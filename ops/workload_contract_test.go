@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const pinnedImage = "eceasy/cli-proxy-api@sha256:e75d910b1fa7ef7e05cf3d5b06c3fbaa467eaf70cea0232cb37e4ede19e978ed"
@@ -19,6 +21,7 @@ var (
 	errDuplicateExposureTuple     = errors.New("duplicate expected_lan_exposure tuple")
 	errInvalidJSONFieldName       = errors.New("contract contains an invalid JSON field name")
 	errInvalidJSONStructure       = errors.New("invalid JSON structure")
+	errInvalidComposeYAML         = errors.New("tracked Compose file is not a single unambiguous YAML document")
 	errMissingRequiredJSONField   = errors.New("contract is missing a required JSON field")
 	errNonContractedPublishedPort = errors.New("tracked Compose file contains a non-contracted published port")
 	errNullJSONValue              = errors.New("contract contains a null JSON value")
@@ -373,61 +376,130 @@ func validateWorkloadContract(contract workloadContract) error {
 	return nil
 }
 
-func composePublishedPorts(composeText string) ([]string, error) {
-	lines := strings.Split(composeText, "\n")
-	portsLine := -1
-	for index, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if indent != 4 || !strings.HasPrefix(trimmed, "ports:") {
-			continue
-		}
-		if portsLine != -1 || trimmed != "ports:" {
-			return nil, errNonContractedPublishedPort
-		}
-		portsLine = index
+func parseComposeDocument(composeText string) (*yaml.Node, error) {
+	decoder := yaml.NewDecoder(strings.NewReader(composeText))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return nil, errInvalidComposeYAML
 	}
-	if portsLine == -1 {
-		return nil, errNonContractedPublishedPort
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errInvalidComposeYAML
 	}
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return nil, errInvalidComposeYAML
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, errInvalidComposeYAML
+	}
+	if err := validateUnambiguousYAML(root); err != nil {
+		return nil, err
+	}
+	return root, nil
+}
 
+func validateUnambiguousYAML(node *yaml.Node) error {
+	if node == nil || node.Kind == yaml.AliasNode || node.Alias != nil || node.Anchor != "" {
+		return errInvalidComposeYAML
+	}
+	switch node.Kind {
+	case yaml.MappingNode:
+		if len(node.Content)%2 != 0 {
+			return errInvalidComposeYAML
+		}
+		seen := make(map[string]struct{}, len(node.Content)/2)
+		for index := 0; index < len(node.Content); index += 2 {
+			key := node.Content[index]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || key.Value == "<<" {
+				return errInvalidComposeYAML
+			}
+			if _, duplicate := seen[key.Value]; duplicate {
+				return errInvalidComposeYAML
+			}
+			seen[key.Value] = struct{}{}
+			if err := validateUnambiguousYAML(node.Content[index+1]); err != nil {
+				return err
+			}
+		}
+		return nil
+	case yaml.SequenceNode:
+		for _, child := range node.Content {
+			if err := validateUnambiguousYAML(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	case yaml.ScalarNode:
+		return nil
+	default:
+		return errInvalidComposeYAML
+	}
+}
+
+func yamlMappingValue(mapping *yaml.Node, name string) (*yaml.Node, bool) {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil, false
+	}
+	for index := 0; index < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == name {
+			return mapping.Content[index+1], true
+		}
+	}
+	return nil, false
+}
+
+func composePublishedPorts(root *yaml.Node, contractedService string) ([]string, error) {
+	services, ok := yamlMappingValue(root, "services")
+	if !ok || services.Kind != yaml.MappingNode {
+		return nil, errInvalidComposeYAML
+	}
+	contractedFound := false
+	contractedPortsFound := false
 	ports := make([]string, 0)
-	for _, line := range lines[portsLine+1:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+	for index := 0; index < len(services.Content); index += 2 {
+		serviceName := services.Content[index].Value
+		service := services.Content[index+1]
+		if service.Kind != yaml.MappingNode {
+			return nil, errInvalidComposeYAML
+		}
+		if serviceName == contractedService {
+			contractedFound = true
+		}
+		servicePorts, hasPorts := yamlMappingValue(service, "ports")
+		if !hasPorts {
 			continue
 		}
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if indent <= 4 {
-			break
-		}
-		if indent != 6 || !strings.HasPrefix(trimmed, "- ") {
+		if serviceName != contractedService || servicePorts.Kind != yaml.SequenceNode {
 			return nil, errNonContractedPublishedPort
 		}
-		published := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-		if len(published) < 2 || published[0] != '"' || published[len(published)-1] != '"' {
-			return nil, errNonContractedPublishedPort
+		contractedPortsFound = true
+		for _, published := range servicePorts.Content {
+			if published.Kind != yaml.ScalarNode || published.Tag != "!!str" {
+				return nil, errNonContractedPublishedPort
+			}
+			ports = append(ports, published.Value)
 		}
-		published, err := strconv.Unquote(published)
-		if err != nil || published == "" {
-			return nil, errNonContractedPublishedPort
-		}
-		ports = append(ports, published)
+	}
+	if !contractedFound || !contractedPortsFound {
+		return nil, errNonContractedPublishedPort
 	}
 	return ports, nil
 }
 
 func validateComposeContract(composeText string, contract workloadContract) error {
+	root, err := parseComposeDocument(composeText)
+	if err != nil {
+		return err
+	}
+	publishedPorts, err := composePublishedPorts(root, contract.Workload.Runtime.Service)
+	if err != nil {
+		return err
+	}
 	requiredComposeFragments := []string{
 		"  cli-proxy-api:\n",
 		"    image: ${CLI_PROXY_IMAGE:-" + contract.Workload.Runtime.Image + "}\n",
 		"    container_name: " + contract.Workload.Runtime.ContainerName + "\n",
-		"      - \"127.0.0.1:8317:8317\"\n",
-		"      - \"127.0.0.1:8085:8085\"\n",
-		"      - \"127.0.0.1:1455:1455\"\n",
-		"      - \"127.0.0.1:54545:54545\"\n",
-		"      - \"127.0.0.1:51121:51121\"\n",
-		"      - \"127.0.0.1:11451:11451\"\n",
 		"        - CMD-SHELL\n",
 		"/dev/tcp/127.0.0.1/8317",
 		"GET /healthz HTTP/1.1",
@@ -442,10 +514,6 @@ func validateComposeContract(composeText string, contract workloadContract) erro
 		if !strings.Contains(composeText, expected) {
 			return errors.New("tracked Compose file does not match the secret-free owner contract")
 		}
-	}
-	publishedPorts, err := composePublishedPorts(composeText)
-	if err != nil {
-		return err
 	}
 	expectedPorts := make(map[string]struct{}, len(contract.Workload.ExpectedLANExposure))
 	for _, exposure := range contract.Workload.ExpectedLANExposure {
@@ -710,6 +778,138 @@ func TestValidateComposeContractRejectsAdditionalPublishedPort(t *testing.T) {
 	}
 	if err.Error() != "tracked Compose file contains a non-contracted published port" {
 		t.Fatal("additional-port diagnostic is not deterministic and secret-safe")
+	}
+}
+
+func TestValidateComposeContractRejectsFlowStyleExtraServicePort(t *testing.T) {
+	composeData, err := os.ReadFile("../docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read tracked Compose file: %v", err)
+	}
+	const extraService = `  review-sidecar: {image: busybox, ports: ["0.0.0.0:9999:9999"]}`
+	adversarial := strings.TrimSuffix(string(composeData), "\n") + "\n" + extraService + "\n"
+
+	err = validateComposeContract(adversarial, expectedWorkloadContract())
+	if err == nil {
+		t.Fatal("flow-style extra-service port was accepted")
+	}
+	if strings.Contains(err.Error(), "9999") || strings.Contains(err.Error(), "0.0.0.0") {
+		t.Fatal("Compose diagnostic exposed an untrusted port value")
+	}
+	if err.Error() != "tracked Compose file contains a non-contracted published port" {
+		t.Fatal("flow-style port diagnostic is not deterministic and secret-safe")
+	}
+}
+
+func TestValidateComposeContractAcceptsFlowStyleContractedPorts(t *testing.T) {
+	composeData, err := os.ReadFile("../docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read tracked Compose file: %v", err)
+	}
+	const blockPorts = `    ports:
+      - "127.0.0.1:8317:8317"
+      - "127.0.0.1:8085:8085"
+      - "127.0.0.1:1455:1455"
+      - "127.0.0.1:54545:54545"
+      - "127.0.0.1:51121:51121"
+      - "127.0.0.1:11451:11451"`
+	const flowPorts = `    ports: ["127.0.0.1:8317:8317", "127.0.0.1:8085:8085", "127.0.0.1:1455:1455", "127.0.0.1:54545:54545", "127.0.0.1:51121:51121", "127.0.0.1:11451:11451"]`
+	adversarial := strings.Replace(string(composeData), blockPorts, flowPorts, 1)
+	if adversarial == string(composeData) {
+		t.Fatal("Compose flow-style fixture replacement target is missing")
+	}
+
+	if err := validateComposeContract(adversarial, expectedWorkloadContract()); err != nil {
+		t.Fatal("contracted flow-style Compose ports were rejected")
+	}
+}
+
+func TestValidateComposeContractRejectsMalformedYAML(t *testing.T) {
+	composeData, err := os.ReadFile("../docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read tracked Compose file: %v", err)
+	}
+	const malformedCanary = "malformed-canary"
+	adversarial := string(composeData) + "\n" + malformedCanary + ": [\n"
+
+	err = validateComposeContract(adversarial, expectedWorkloadContract())
+	if err == nil {
+		t.Fatal("malformed Compose YAML was accepted")
+	}
+	if strings.Contains(err.Error(), malformedCanary) {
+		t.Fatal("malformed-YAML diagnostic exposed input")
+	}
+	if err.Error() != "tracked Compose file is not a single unambiguous YAML document" {
+		t.Fatal("malformed-YAML diagnostic is not deterministic and secret-safe")
+	}
+}
+
+func TestValidateComposeContractRejectsPortAliases(t *testing.T) {
+	composeData, err := os.ReadFile("../docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read tracked Compose file: %v", err)
+	}
+	const blockPorts = `    ports:
+      - "127.0.0.1:8317:8317"
+      - "127.0.0.1:8085:8085"
+      - "127.0.0.1:1455:1455"
+      - "127.0.0.1:54545:54545"
+      - "127.0.0.1:51121:51121"
+      - "127.0.0.1:11451:11451"`
+	const aliasedPorts = `    ports: *contracted_ports`
+	const anchor = `x-contracted-ports: &contracted_ports
+  - "127.0.0.1:8317:8317"
+  - "127.0.0.1:8085:8085"
+  - "127.0.0.1:1455:1455"
+  - "127.0.0.1:54545:54545"
+  - "127.0.0.1:51121:51121"
+  - "127.0.0.1:11451:11451"
+`
+	adversarial := anchor + strings.Replace(string(composeData), blockPorts, aliasedPorts, 1)
+
+	err = validateComposeContract(adversarial, expectedWorkloadContract())
+	if err == nil {
+		t.Fatal("aliased Compose ports were accepted")
+	}
+	if err.Error() != "tracked Compose file is not a single unambiguous YAML document" {
+		t.Fatal("Compose alias diagnostic is not deterministic and secret-safe")
+	}
+}
+
+func TestValidateComposeContractRejectsUnsupportedOrDuplicatePorts(t *testing.T) {
+	composeData, err := os.ReadFile("../docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read tracked Compose file: %v", err)
+	}
+	valid := string(composeData)
+	const contractedPort = `      - "127.0.0.1:8317:8317"`
+	tests := []struct {
+		name        string
+		replacement string
+	}{
+		{
+			name:        "duplicate scalar",
+			replacement: contractedPort + "\n" + contractedPort,
+		},
+		{
+			name: "mapping form",
+			replacement: `      - target: 8317
+        published: "8317"
+        host_ip: 127.0.0.1`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adversarial := strings.Replace(valid, contractedPort, test.replacement, 1)
+			err := validateComposeContract(adversarial, expectedWorkloadContract())
+			if err == nil {
+				t.Fatal("unsupported or duplicate Compose port was accepted")
+			}
+			if err.Error() != "tracked Compose file contains a non-contracted published port" {
+				t.Fatal("unsupported-port diagnostic is not deterministic and secret-safe")
+			}
+		})
 	}
 }
 
