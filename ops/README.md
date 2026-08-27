@@ -97,6 +97,8 @@ docker exec -it cli-proxy-api \
 
 The command prints an authorization URL and waits up to 5 minutes. Open that URL manually; do not have automation preview or fetch it. The browser callback to `http://localhost:54545/callback` reaches the login process through the existing loopback-only Compose port. A successful login replaces `auths/claude-<email>.json` with mode 0600 data.
 
+Do not restart CLIProxy while testing or waiting on a token refresh. Claude refresh tokens rotate; killing the process after the provider consumes the old token but before CLIProxy saves the response can strand the old token on disk.
+
 ### Kimi
 
 Kimi currently refreshes automatically. Only reauthenticate after the reporter shows a real post-network refresh failure:

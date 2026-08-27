@@ -100,9 +100,11 @@ def scan_refresh_results(log_path: Path) -> dict[str, RefreshStatus]:
         changed = AUTH_FILE_CHANGED_RE.search(line)
         if changed:
             filename = Path(changed.group("filename").strip()).name
-            results[filename] = RefreshStatus(
-                state="credential_reloaded", failures=0
-            )
+            previous = results.get(filename)
+            if previous is None or previous.state != "ok":
+                results[filename] = RefreshStatus(
+                    state="credential_reloaded", failures=0
+                )
             continue
         match = REFRESH_RESULT_RE.search(line)
         if not match:

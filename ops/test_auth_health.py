@@ -89,6 +89,34 @@ class AuthHealthTest(unittest.TestCase):
         self.assertEqual(status.refresh_failures, 0)
         self.assertIn("short_lived_auto_refresh_ok", status.reasons)
 
+    def test_refresh_write_event_does_not_erase_success(self) -> None:
+        name = "kimi-device.json"
+        self.write_auth(
+            name,
+            type="kimi",
+            email=None,
+            expired=(self.now + timedelta(minutes=12)).isoformat(),
+            last_refresh=(self.now - timedelta(minutes=3)).isoformat(),
+        )
+        self.log_path.write_text(
+            "\n".join(
+                [
+                    f"[refresh] refreshed kimi, {name}, <nil>",
+                    f"[write] auth file changed (WRITE): {name}, processing incrementally",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        status = scan_auth_directory(
+            self.auth_dir, self.log_path, now=self.now, warn_days=3
+        )[0]
+
+        self.assertEqual(status.level, "ok")
+        self.assertEqual(status.refresh_state, "ok")
+        self.assertEqual(status.refresh_failures, 0)
+        self.assertIn("short_lived_auto_refresh_ok", status.reasons)
+
     def test_reauthenticated_claude_clears_pre_login_invalid_grant(self) -> None:
         name = "claude-person@example.com.json"
         self.write_auth(
