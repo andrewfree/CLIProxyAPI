@@ -56,3 +56,7 @@ _bmad-output/*
 .DS_Store
 ._*
 .gocache/
+
+# Host watchdog runtime state and bounded logs
+ops/runtime/
+ops/__pycache__/
