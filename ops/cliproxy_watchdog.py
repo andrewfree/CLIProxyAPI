@@ -297,10 +297,15 @@ class Watchdog:
             self.config.root / "logs" / "main.log",
             warn_days=self.config.auth_warn_days,
         )
-        unhealthy = [status for status in statuses if status.level != "ok"]
-        if unhealthy:
-            self.logger.warning("OAuth health alert:\n%s", format_text(unhealthy))
+        warnings = [status for status in statuses if status.level == "warning"]
+        critical = [status for status in statuses if status.level == "critical"]
+        if warnings:
+            self.logger.warning("OAuth health alert:\n%s", format_text(warnings))
+        if critical:
+            self.logger.error("OAuth health critical:\n%s", format_text(critical))
             return False
+        # Warnings stay in the log; only critical auth fails the process.
+        # Non-zero exits make launchd throttle StartInterval recovery.
         return True
 
     def _restart_engine_if_allowed(

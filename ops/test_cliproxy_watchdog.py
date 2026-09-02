@@ -216,6 +216,21 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(watchdog.run_once(skip_auth=True), 0)
         self.assertEqual(watchdog.run_once(skip_auth=False), 1)
 
+    def test_auth_warnings_do_not_fail_watchdog_exit(self) -> None:
+        class WarningOnlyWatchdog(FakeWatchdog):
+            def log_auth_health(self) -> bool:  # type: ignore[override]
+                self.logger.warning("OAuth health alert: expires_soon")
+                return True
+
+        watchdog = WarningOnlyWatchdog(
+            self.config,
+            now=7_000,
+            engine=[True],
+            health=[True],
+            probes=[self.ok_probe],
+        )
+        self.assertEqual(watchdog.run_once(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ loopback exposure, health, and configuration-policy expectations.
 1. `docker info` must finish within 10 seconds.
 2. `curl -fsS --max-time 3 http://127.0.0.1:8317/healthz` must succeed.
 3. From inside `cli-proxy-api`, Docker DNS and a verified TLS handshake must work for `chatgpt.com`, `platform.claude.com`, and `auth.kimi.com`.
-4. OAuth metadata and the latest refresh outcome are summarized without reading token values into output.
+4. OAuth metadata and the latest refresh outcome are summarized without reading token values into output. Warnings (for example `expires_soon`) are logged but do not fail the job; only critical auth failures exit non-zero, so launchd keeps running recovery on schedule.
 
 Recovery is deliberately narrow:
 
