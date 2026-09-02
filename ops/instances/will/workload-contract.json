@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "workload": {
+    "id": "cliproxy-will",
+    "physical_host": "will",
+    "runs_on": "will",
+    "resource_group": "will-compute",
+    "lifecycle": "always_on",
+    "runtime": {
+      "kind": "docker_compose",
+      "compose_file": "/home/andrew/cliproxy/docker-compose.yml",
+      "service": "cli-proxy-api",
+      "container_name": "cli-proxy-api",
+      "image": "eceasy/cli-proxy-api@sha256:f077e153476466e0ea8355400e39bf1508e637585b661ed3991b7b8129ce054d",
+      "restart_policy": "always"
+    },
+    "expected_lan_exposure": [
+      {
+        "protocol": "tcp",
+        "port": 8317,
+        "scope": "loopback",
+        "purpose": "openai_compatible_api"
+      },
+      {
+        "protocol": "tcp",
+        "port": 8085,
+        "scope": "loopback",
+        "purpose": "oauth_callback"
+      },
+      {
+        "protocol": "tcp",
+        "port": 1455,
+        "scope": "loopback",
+        "purpose": "oauth_callback"
+      },
+      {
+        "protocol": "tcp",
+        "port": 54545,
+        "scope": "loopback",
+        "purpose": "oauth_callback"
+      },
+      {
+        "protocol": "tcp",
+        "port": 51121,
+        "scope": "loopback",
+        "purpose": "oauth_callback"
+      },
+      {
+        "protocol": "tcp",
+        "port": 11451,
+        "scope": "loopback",
+        "purpose": "oauth_callback"
+      }
+    ],
+    "health": {
+      "docker": {
+        "container_name": "cli-proxy-api",
+        "expected_state": "running",
+        "expected_health": "healthy"
+      },
+      "http": {
+        "scheme": "http",
+        "host": "127.0.0.1",
+        "port": 8317,
+        "path": "/healthz",
+        "expected_status": 200
+      }
+    }
+  }
+}

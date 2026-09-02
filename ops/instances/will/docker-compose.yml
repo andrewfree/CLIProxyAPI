@@ -1,0 +1,38 @@
+name: cliproxy
+
+services:
+  cli-proxy-api:
+    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api@sha256:f077e153476466e0ea8355400e39bf1508e637585b661ed3991b7b8129ce054d}
+    pull_policy: always
+    container_name: cli-proxy-api
+    ports:
+      - "127.0.0.1:8317:8317"
+      - "127.0.0.1:8085:8085"
+      - "127.0.0.1:1455:1455"
+      - "127.0.0.1:54545:54545"
+      - "127.0.0.1:51121:51121"
+      - "127.0.0.1:11451:11451"
+    volumes:
+      - ./config.yaml:/CLIProxyAPI/config.yaml
+      - ./auths:/root/.cli-proxy-api
+      - ./logs:/CLIProxyAPI/logs
+      - ./plugins:/CLIProxyAPI/plugins
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8317;
+          printf "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3;
+          IFS= read -r status <&3;
+          [[ "$$status" == *" 200 "* ]]'
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: always
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -2,6 +2,11 @@
 
 This directory owns the host-side recovery and archive-before-prune paths for the localhost CLIProxy service. It does not contain credentials. Runtime state and the jobs' bounded logs live in ignored `ops/runtime/`.
 
+The primary Linux instance has its own secret-free owner contract under
+[`instances/will/`](instances/will/README.md). That contract is separate from
+the M5 Compose contract and gives PiSec a stable source for Will's image,
+loopback exposure, health, and configuration-policy expectations.
+
 ## Recovery behavior
 
 `com.rever.cliproxy-watchdog` runs at login and every 120 seconds. One run performs these checks in order:

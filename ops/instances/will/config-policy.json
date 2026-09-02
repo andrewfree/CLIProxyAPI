@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "instance_root": "/home/andrew/cliproxy",
+  "config_file": "config.yaml",
+  "config_owner": "andrew:andrew",
+  "config_mode": "600",
+  "required_config": {
+    "request-retry": 3,
+    "max-retry-credentials": 0,
+    "max-retry-interval": 75,
+    "routing.strategy": "round-robin"
+  },
+  "required_mounts": [
+    {
+      "source": "/home/andrew/cliproxy/config.yaml",
+      "target": "/CLIProxyAPI/config.yaml"
+    },
+    {
+      "source": "/home/andrew/cliproxy/auths",
+      "target": "/root/.cli-proxy-api"
+    },
+    {
+      "source": "/home/andrew/cliproxy/logs",
+      "target": "/CLIProxyAPI/logs"
+    },
+    {
+      "source": "/home/andrew/cliproxy/plugins",
+      "target": "/CLIProxyAPI/plugins"
+    }
+  ],
+  "compose_policy": {
+    "pull_policy": "always",
+    "restart": "always",
+    "stop_grace_period": "20s",
+    "logging_driver": "json-file",
+    "logging_max_size": "10m",
+    "logging_max_file": "3"
+  }
+}
