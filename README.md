@@ -128,6 +128,18 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+## Local T3 + CLIProxy Diagnostics
+
+This checkout keeps high-detail T3 and CLIProxy traces for diagnosing reconnects, upstream failures, credential cooldowns, and routing behavior. After an incident, capture the preceding 15 minutes with:
+
+```bash
+./bin/collect-t3-cliproxy-traces 15
+```
+
+The collector writes a timestamped directory under `logs/` containing the matching T3 desktop/server traces, the CLIProxy application log tail, and up to 25 recent full proxy request logs. Pass a window from 1 to 1440 minutes when a different interval is needed.
+
+CLIProxy's delete-based size ceiling is disabled. Closed GPT, Anthropic, and other provider logs are copied to TheCloud, SHA-256 verified, and only then pruned locally by the launchd archive job documented in `ops/README.md`. Authorization, API-key, token, and secret headers are masked, but request bodies and model responses are intentionally retained and may contain private project content. Trace bundles and NAS archives are private and must be reviewed before sharing.
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
