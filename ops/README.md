@@ -11,18 +11,42 @@ loopback exposure, health, and configuration-policy expectations.
 
 `com.rever.cliproxy-watchdog` runs at login and every 120 seconds. One run performs these checks in order:
 
-1. `docker info` must finish within 10 seconds.
+1. A direct HTTP `GET /_ping` on the configured Docker Unix socket must return
+   `200` and `OK`. The socket timeout is three seconds. This does not start the
+   Docker CLI or its plugins.
 2. `curl -fsS --max-time 3 http://127.0.0.1:8317/healthz` must succeed.
 3. From inside `cli-proxy-api`, Docker DNS and a verified TLS handshake must work for `chatgpt.com`, `platform.claude.com`, and `auth.kimi.com`.
 4. OAuth metadata and the latest refresh outcome are summarized without reading token values into output. Warnings (for example `expires_soon`) are logged but do not fail the job; only critical auth failures exit non-zero, so launchd keeps running recovery on schedule.
 
 Recovery is deliberately narrow:
 
-- Dead Docker engine: `docker desktop stop --force --timeout 30`, then `docker desktop start --detach`; poll `docker info` for up to two minutes.
+- Docker socket and CLIProxy health must both fail on three consecutive runs
+  before Desktop recovery is considered. Either recovering clears the count,
+  and failures more than five minutes apart do not accumulate. Both checks
+  are repeated immediately before `docker desktop stop --force --timeout 30`
+  and `docker desktop start --detach`. Recovery polls the socket for up to two
+  minutes.
 - Healthy engine but dead CLIProxy port: `docker compose up -d --no-deps cli-proxy-api` from `/Users/rever/cliproxy`.
-- Total container DNS failure twice in a row: restart only `cli-proxy-api`; if all three DNS probes still fail, restart Docker Desktop and reconcile Compose.
+- Total container DNS failure twice in a row: restart only `cli-proxy-api`.
+  Persistent DNS failure is logged for investigation. CLI execution errors
+  and timeouts are reported separately and do not justify a container or
+  Desktop restart. Desktop recovery requires the repeated socket and service
+  failures above.
 
-Desktop restarts are limited to once per 5 minutes, Compose repairs once per 2 minutes, and container restarts once per 2 minutes. The state file is `ops/runtime/state.json`. The watchdog log rotates at 1 MB with three backups.
+Desktop restarts are limited to once per 30 minutes by default, Compose
+repairs once per 2 minutes, and container restarts once per 2 minutes. The
+state file is `ops/runtime/state.json`. `--check-only` does not change that
+state or perform recovery actions. The watchdog log rotates at 1 MB with
+three backups and records bounded socket failure diagnostics and completed
+checks.
+
+Socket discovery honors `CLIPROXY_DOCKER_SOCKET`, then Docker's
+`DOCKER_CONTEXT`/`DOCKER_HOST` selection and active context metadata under
+`DOCKER_CONFIG` (default `~/.docker`). The default context uses
+`/var/run/docker.sock`. Remote Docker endpoints are rejected because this job
+recovers the local Desktop installation. A socket override must point to the
+same engine used by the configured Docker CLI. The September 7 false-restart
+diagnosis and validation are recorded in `RECOVERY-2026-09-07.md`.
 
 Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watchdog actions.
 
