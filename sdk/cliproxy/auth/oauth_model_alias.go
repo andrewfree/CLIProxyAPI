@@ -21,6 +21,7 @@ type oauthModelAliasEntry struct {
 	upstreamModel string
 	configAlias   string
 	forceMapping  bool
+	fallback      []string
 }
 
 type oauthModelAliasTable struct {
@@ -30,9 +31,10 @@ type oauthModelAliasTable struct {
 
 // OAuthModelAliasResult contains the resolved upstream model and mapping metadata.
 type OAuthModelAliasResult struct {
-	UpstreamModel string // resolved upstream model name (empty if no mapping found)
-	ForceMapping  bool   // whether to rewrite model name in responses
-	OriginalAlias string // client-visible model for response rewrite; only applied when ForceMapping is true (see rewriteForceMappedResponse / wrapStreamResult)
+	UpstreamModel  string   // resolved upstream model name (empty if no mapping found)
+	ForceMapping   bool     // whether to rewrite model name in responses
+	OriginalAlias  string   // client-visible model for response rewrite; only applied when ForceMapping is true (see rewriteForceMappedResponse / wrapStreamResult)
+	FallbackModels []string // upstream models to try after transient or model-availability failures
 }
 
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -65,6 +67,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 				upstreamModel: name,
 				configAlias:   alias,
 				forceMapping:  entry.ForceMapping,
+				fallback:      sanitizeOAuthModelFallbacks(entry.Fallback),
 			}
 		}
 		if len(rev) > 0 {
@@ -73,6 +76,58 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 	}
 	if len(out.reverse) == 0 {
 		out.reverse = nil
+	}
+	return out
+}
+
+func resolveOAuthFallbackModels(models []string, requestResult thinking.SuffixResult) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, raw := range models {
+		model := strings.TrimSpace(raw)
+		if model == "" {
+			continue
+		}
+		model = preserveResolvedModelSuffix(model, requestResult)
+		key := strings.ToLower(strings.TrimSpace(model))
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sanitizeOAuthModelFallbacks(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, raw := range models {
+		model := strings.TrimSpace(raw)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -359,9 +414,10 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 					return OAuthModelAliasResult{}
 				}
 				return OAuthModelAliasResult{
-					UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
-					ForceMapping:  entry.ForceMapping,
-					OriginalAlias: oauthModelAliasForceMappingResponseModel(alias),
+					UpstreamModel:  preserveResolvedModelSuffix(original, requestResult),
+					ForceMapping:   entry.ForceMapping,
+					OriginalAlias:  oauthModelAliasForceMappingResponseModel(alias),
+					FallbackModels: resolveOAuthFallbackModels(entry.Fallback, requestResult),
 				}
 			}
 			originalAlias := requestedModel
@@ -369,9 +425,10 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 				originalAlias = oauthModelAliasForceMappingResponseModel(alias)
 			}
 			return OAuthModelAliasResult{
-				UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
-				ForceMapping:  entry.ForceMapping,
-				OriginalAlias: originalAlias,
+				UpstreamModel:  preserveResolvedModelSuffix(original, requestResult),
+				ForceMapping:   entry.ForceMapping,
+				OriginalAlias:  originalAlias,
+				FallbackModels: resolveOAuthFallbackModels(entry.Fallback, requestResult),
 			}
 		}
 	}
@@ -432,9 +489,10 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 				return OAuthModelAliasResult{}
 			}
 			return OAuthModelAliasResult{
-				UpstreamModel: preserveResolvedModelSuffix(targetModel, requestResult),
-				ForceMapping:  entry.forceMapping,
-				OriginalAlias: oauthModelAliasForceMappingResponseModel(entry.configAlias),
+				UpstreamModel:  preserveResolvedModelSuffix(targetModel, requestResult),
+				ForceMapping:   entry.forceMapping,
+				OriginalAlias:  oauthModelAliasForceMappingResponseModel(entry.configAlias),
+				FallbackModels: resolveOAuthFallbackModels(entry.fallback, requestResult),
 			}
 		}
 
@@ -452,9 +510,10 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 			originalAlias = oauthModelAliasForceMappingResponseModel(entry.configAlias)
 		}
 		return OAuthModelAliasResult{
-			UpstreamModel: upstreamModel,
-			ForceMapping:  entry.forceMapping,
-			OriginalAlias: originalAlias,
+			UpstreamModel:  upstreamModel,
+			ForceMapping:   entry.forceMapping,
+			OriginalAlias:  originalAlias,
+			FallbackModels: resolveOAuthFallbackModels(entry.fallback, requestResult),
 		}
 	}
 
