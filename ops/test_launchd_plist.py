@@ -21,6 +21,10 @@ class LaunchdPlistTest(unittest.TestCase):
         )
         self.assertEqual(plist["StandardOutPath"], "/dev/null")
         self.assertEqual(plist["StandardErrorPath"], "/dev/null")
+        self.assertEqual(
+            plist["EnvironmentVariables"]["CLIPROXY_COMPOSE_PULL_POLICY"],
+            "never",
+        )
 
     def test_archive_job_runs_frequently_and_targets_thecloud(self) -> None:
         root = Path(__file__).resolve().parent.parent

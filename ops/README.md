@@ -93,6 +93,11 @@ recovers the local Desktop installation. A socket override must point to the
 same engine used by the configured Docker CLI. The September 7 false-restart
 diagnosis and validation are recorded in `RECOVERY-2026-09-07.md`.
 
+`CLIPROXY_COMPOSE_PULL_POLICY` optionally adds `--pull` to the watchdog's
+Compose repair command. The M5 launchd job sets it to `never` because that host
+uses a local image override; leave it unset on hosts that recover a registry
+image from the Compose file.
+
 Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watchdog actions.
 
 `com.rever.cliproxy-log-archive` runs at login and every 300 seconds. It handles only closed `.log` and `.log.gz` files older than one hour; the active `main.log` and recent request logs are never candidates. Each candidate is copied to TheCloud, SHA-256 checked, recorded in the NAS manifest, and fingerprinted again before the local copy is unlinked. A missing or unwritable NAS mount means zero pruning. Lumberjack's closed `main-<timestamp>.log` rotations are eligible, so the active `main.log` remains local while completed rotations are preserved in the cloud archive.

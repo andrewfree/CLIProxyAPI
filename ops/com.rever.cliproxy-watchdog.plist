@@ -17,6 +17,8 @@
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>CLIPROXY_AUTH_WARN_DAYS</key>
         <string>3</string>
+        <key>CLIPROXY_COMPOSE_PULL_POLICY</key>
+        <string>never</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
