@@ -504,8 +504,15 @@ nonstream-keepalive-interval: 0
 #     - name: "gpt-5"
 #       alias: "g5"
 #   kimi:
-#     - name: "kimi-k2.5"
-#       alias: "k2.5"
+#     - name: "kimi-k3"
+#       alias: "kimi-default"
+#       fork: true
+#       display-name: "Kimi K3 (default)"
+#     - name: "kimi-k2.8"
+#       alias: "kimi-fallback"
+#       fork: true
+#       display-name: "Kimi K2.8 (fallback)"
+#   # Keep the native kimi-k3 and kimi-k3-256k IDs exposed alongside these aliases.
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
