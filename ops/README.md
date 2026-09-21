@@ -7,6 +7,51 @@ The primary Linux instance has its own secret-free owner contract under
 the M5 Compose contract and gives PiSec a stable source for Will's image,
 loopback exposure, health, and configuration-policy expectations.
 
+## Choosing a Claude account in T3 Code
+
+`claude_account_launcher.mjs` lets separate T3 Claude provider entries use
+specific CLIProxy accounts. Each entry runs the normal Claude binary through
+the same launcher. The launcher starts an ephemeral loopback listener for that
+Claude process and adds the selected account's model prefix before forwarding
+requests to the existing proxy. It streams replies and forwards errors without
+trying a different account. The listener closes when Claude exits.
+
+Give each Claude auth file a unique `prefix` through the management API. The
+local iCloud and Gmail accounts use `t3-icloud` and `t3-gmail`. Keep
+`force-model-prefix` false so existing applications can continue using the
+unprefixed shared pool.
+
+Add one T3 Claude provider instance per account, with this launcher's absolute
+path as its binary. Set these instance environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `CLIPROXY_ACCOUNT_PREFIX` | The account's unique prefix |
+| `CLIPROXY_BASE_URL` | The existing proxy origin |
+| `CLIPROXY_CLAUDE_BINARY` | Absolute path to the real Claude executable |
+| `ANTHROPIC_API_KEY` | Proxy API key, stored as a sensitive T3 variable |
+| `ANTHROPIC_AUTH_TOKEN` | Empty |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Empty |
+
+Use the same Claude config directory for both entries to keep them compatible
+with existing Claude threads. Choose the named account entry in T3's model
+picker. A selected account's cooldown is returned to that chat; choosing another
+account is a manual action. The launcher's model list only includes its chosen
+account, with ordinary model names. Give subagents the same provider entry to
+keep their requests on that account too.
+
+Apply T3 provider changes through its settings UI or `server.updateSettings`
+API. Do not edit the running instance's database or settings file directly.
+The launcher needs Node.js on the provider process's PATH and has no additional
+package dependencies. No separate long-running service or fixed port is needed.
+
+Verify the launcher with `node --test ops/claude_account_launcher.test.mjs`.
+For live verification, check a streamed response through the chosen account and
+an unavailable account's error. The `X-CPA-TRACE-ID` header identifies which
+proxy auth entry served the response. To undo this setup, remove the two T3
+provider entries through Settings, then clear their auth-file prefixes; existing
+unprefixed clients continue to use the shared pool.
+
 ## Recovery behavior
 
 `com.rever.cliproxy-watchdog` runs at login and every 120 seconds. One run performs these checks in order:
