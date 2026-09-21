@@ -110,6 +110,7 @@ class WatchdogConfig:
     engine_start_timeout: int = 120
     health_start_timeout: int = 90
     auth_warn_days: int = 3
+    compose_pull_policy: str | None = None
 
     @classmethod
     def from_environment(cls, root: Path | None = None) -> "WatchdogConfig":
@@ -125,6 +126,11 @@ class WatchdogConfig:
             raise RuntimeError("docker CLI not found in watchdog PATH")
         if not curl:
             raise RuntimeError("curl not found in watchdog PATH")
+        compose_pull_policy = os.environ.get("CLIPROXY_COMPOSE_PULL_POLICY") or None
+        if compose_pull_policy not in {None, "always", "missing", "never"}:
+            raise ValueError(
+                "CLIPROXY_COMPOSE_PULL_POLICY must be always, missing, or never"
+            )
         runtime_dir = project_root / "ops" / "runtime"
         return cls(
             root=project_root,
@@ -142,6 +148,7 @@ class WatchdogConfig:
                 os.environ.get("CLIPROXY_CONTAINER_RESTART_COOLDOWN", "120")
             ),
             auth_warn_days=int(os.environ.get("CLIPROXY_AUTH_WARN_DAYS", "3")),
+            compose_pull_policy=compose_pull_policy,
         )
 
 
@@ -288,16 +295,22 @@ class Watchdog:
         return True
 
     def compose_up(self) -> bool:
-        self.logger.warning("recovery action: docker compose up -d --no-deps %s", self.config.service)
+        command = [
+            self.config.docker,
+            "compose",
+            "up",
+            "-d",
+            "--no-deps",
+        ]
+        if self.config.compose_pull_policy:
+            command.extend(["--pull", self.config.compose_pull_policy])
+        command.append(self.config.service)
+        self.logger.warning(
+            "recovery action: %s",
+            " ".join(command),
+        )
         result = self.run_command(
-            [
-                self.config.docker,
-                "compose",
-                "up",
-                "-d",
-                "--no-deps",
-                self.config.service,
-            ],
+            command,
             timeout=150,
             cwd=self.config.root,
         )

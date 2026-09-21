@@ -382,6 +382,58 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(watchdog.run_once(), 0)
 
 
+class ComposeRecoveryTest(unittest.TestCase):
+    def test_compose_up_honors_explicit_pull_policy(self) -> None:
+        root = Path("/tmp/cliproxy-watchdog-test")
+        config = WatchdogConfig(
+            root=root,
+            state_path=root / "state.json",
+            docker="docker",
+            compose_pull_policy="never",
+        )
+        watchdog = Watchdog(config, logger=logging.getLogger("compose-recovery-test"))
+        with patch.object(
+            watchdog,
+            "run_command",
+            return_value=CommandResult(0),
+        ) as run_command:
+            self.assertTrue(watchdog.compose_up())
+        run_command.assert_called_once_with(
+            [
+                "docker",
+                "compose",
+                "up",
+                "-d",
+                "--no-deps",
+                "--pull",
+                "never",
+                "cli-proxy-api",
+            ],
+            timeout=150,
+            cwd=root,
+        )
+
+    def test_compose_up_keeps_compose_default_without_override(self) -> None:
+        root = Path("/tmp/cliproxy-watchdog-test")
+        config = WatchdogConfig(
+            root=root,
+            state_path=root / "state.json",
+            docker="docker",
+        )
+        watchdog = Watchdog(config, logger=logging.getLogger("compose-recovery-test"))
+        with patch.object(
+            watchdog,
+            "run_command",
+            return_value=CommandResult(0),
+        ) as run_command:
+            self.assertTrue(watchdog.compose_up())
+        run_command.assert_called_once_with(
+            ["docker", "compose", "up", "-d", "--no-deps", "cli-proxy-api"],
+            timeout=150,
+            cwd=root,
+        )
+
+
 class SocketProbeTest(unittest.TestCase):
     def setUp(self) -> None:
         config = WatchdogConfig(
