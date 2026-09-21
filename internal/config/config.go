@@ -391,6 +391,10 @@ type OAuthModelAlias struct {
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
 
+	// Fallback lists upstream model names to try when the primary model is
+	// unavailable or returns a transient upstream failure.
+	Fallback []string `yaml:"fallback,omitempty" json:"fallback,omitempty"`
+
 	// DisplayName is the optional human-readable name shown in model catalogs.
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
@@ -1035,6 +1039,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				Name:         name,
 				Alias:        alias,
 				Fork:         entry.Fork,
+				Fallback:     sanitizeOAuthModelFallbacks(entry.Fallback),
 				DisplayName:  strings.TrimSpace(entry.DisplayName),
 				ForceMapping: entry.ForceMapping,
 			})
@@ -1044,6 +1049,30 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+func sanitizeOAuthModelFallbacks(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, raw := range models {
+		model := strings.TrimSpace(raw)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are

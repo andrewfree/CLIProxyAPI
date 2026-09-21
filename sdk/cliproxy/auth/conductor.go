@@ -1473,6 +1473,23 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 			candidates = []string{resolved}
 		}
 	}
+	if len(aliasResult.FallbackModels) > 0 && len(candidates) > 0 {
+		seen := make(map[string]struct{}, len(candidates)+len(aliasResult.FallbackModels))
+		for _, candidate := range candidates {
+			seen[canonicalModelKey(candidate)] = struct{}{}
+		}
+		for _, fallback := range aliasResult.FallbackModels {
+			key := canonicalModelKey(fallback)
+			if key == "" {
+				continue
+			}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			candidates = append(candidates, fallback)
+		}
+	}
 	pooled := len(candidates) > 1
 	return candidates, pooled, aliasResult
 }
@@ -2134,6 +2151,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			if isOAuthModelFallbackPrimary(aliasResult, execModel) && !shouldAttemptOAuthModelFallback(errStream) {
+				return nil, errStream
+			}
 			lastErr = errStream
 			continue
 		}
@@ -2172,7 +2192,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
-			if idx < len(execModels)-1 {
+			if idx < len(execModels)-1 && (!isOAuthModelFallbackPrimary(aliasResult, execModel) || shouldAttemptOAuthModelFallback(bootstrapErr)) {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
@@ -3007,6 +3027,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
+				if isOAuthModelFallbackPrimary(aliasResult, upstreamModel) && !shouldAttemptOAuthModelFallback(errExec) {
+					authErr = errExec
+					break
+				}
 				authErr = errExec
 				continue
 			}
@@ -3127,6 +3151,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
+				}
+				if isOAuthModelFallbackPrimary(aliasResult, upstreamModel) && !shouldAttemptOAuthModelFallback(errExec) {
+					authErr = errExec
+					break
 				}
 				authErr = errExec
 				continue
@@ -5145,6 +5173,34 @@ func isRequestInvalidError(err error) bool {
 		msg := err.Error()
 		return strings.Contains(msg, "\"status\":\"UNKNOWN\"") ||
 			strings.Contains(msg, "\"status\": \"UNKNOWN\"")
+	default:
+		return false
+	}
+}
+
+func isOAuthModelFallbackPrimary(aliasResult OAuthModelAliasResult, model string) bool {
+	if len(aliasResult.FallbackModels) == 0 {
+		return false
+	}
+	return canonicalModelKey(aliasResult.UpstreamModel) != "" && canonicalModelKey(aliasResult.UpstreamModel) == canonicalModelKey(model)
+}
+
+func shouldAttemptOAuthModelFallback(err error) bool {
+	if err == nil || isRequestInvalidError(err) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if isModelSupportError(err) {
+		return true
+	}
+	if status == http.StatusNotFound && isModelSupportErrorMessage(err.Error()) {
+		return true
+	}
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
 	default:
 		return false
 	}

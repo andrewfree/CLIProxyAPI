@@ -508,6 +508,8 @@ nonstream-keepalive-interval: 0
 #       alias: "kimi-default"
 #       fork: true
 #       display-name: "Kimi K3 (default)"
+#       fallback:
+#         - "kimi-k2.8"
 #     - name: "kimi-k2.8"
 #       alias: "kimi-fallback"
 #       fork: true
