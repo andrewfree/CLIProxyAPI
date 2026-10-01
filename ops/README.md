@@ -16,6 +16,14 @@ Claude process and adds the selected account's model prefix before forwarding
 requests to the existing proxy. It streams replies and forwards errors without
 trying a different account. The listener closes when Claude exits.
 
+The launcher accepts only `POST /v1/messages`, `POST /v1/messages/count_tokens`,
+and `GET /v1/models`. Message requests require an `application/json` body.
+Unsupported routes are rejected before they reach the shared account pool.
+
+On `SIGTERM`, `SIGINT`, or `SIGHUP`, the launcher closes its listener and
+connections, then forwards the signal to its child. If the child has not exited
+after five seconds, the launcher terminates that child with `SIGKILL`.
+
 Give each Claude auth file a unique `prefix` through the management API. The
 local iCloud and Gmail accounts use `t3-icloud` and `t3-gmail`. Keep
 `force-model-prefix` false so existing applications can continue using the
@@ -45,7 +53,8 @@ API. Do not edit the running instance's database or settings file directly.
 The launcher needs Node.js on the provider process's PATH and has no additional
 package dependencies. No separate long-running service or fixed port is needed.
 
-Verify the launcher with `node --test ops/claude_account_launcher.test.mjs`.
+Verify the launcher with
+`node --test ops/claude_account_launcher.test.mjs ops/claude_account_launcher_process.test.mjs`.
 For live verification, check a streamed response through the chosen account and
 an unavailable account's error. The `X-CPA-TRACE-ID` header identifies which
 proxy auth entry served the response. To undo this setup, remove the two T3

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import http from "node:http";
 import https from "node:https";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { pathToFileURL } from "node:url";
@@ -13,6 +14,8 @@ const hopHeaders = new Set([
 const supportedOperations = new Set([
   "POST /v1/messages", "POST /v1/messages/count_tokens", "GET /v1/models",
 ]);
+
+const childShutdownGraceMs = 5000;
 
 function forwardedHeaders(headers) {
   const excluded = new Set(hopHeaders);
@@ -121,10 +124,40 @@ async function main() {
     stdio: "inherit",
     env: { ...process.env, ANTHROPIC_BASE_URL: baseURL, ANTHROPIC_AUTH_TOKEN: "", CLAUDE_CODE_OAUTH_TOKEN: "" },
   });
-  const close = () => { server.closeAllConnections(); server.close(); };
-  child.once("error", () => { console.error("Unable to launch Claude Code."); close(); process.exitCode = 1; });
-  child.once("exit", (code, signal) => { close(); process.exitCode = code ?? (signal ? 1 : 0); });
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => child.kill(signal));
+
+  let state = "running";
+  let escalation;
+  let proxyClosed = false;
+  const close = () => {
+    if (proxyClosed) return;
+    proxyClosed = true;
+    server.closeAllConnections();
+    server.close();
+  };
+  const finish = () => {
+    state = "exited";
+    clearTimeout(escalation);
+    close();
+  };
+  const stop = (signal) => {
+    // Repeated signals must not restart the shutdown grace period.
+    if (state !== "running") return;
+    state = "stopping";
+    close();
+    child.kill(signal);
+    escalation = setTimeout(() => child.kill("SIGKILL"), childShutdownGraceMs);
+  };
+
+  child.once("error", () => {
+    console.error("Unable to launch Claude Code.");
+    finish();
+    process.exitCode = 1;
+  });
+  child.once("exit", (code, signal) => {
+    finish();
+    process.exitCode = code ?? (signal ? 128 + os.constants.signals[signal] : 0);
+  });
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => stop(signal));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
