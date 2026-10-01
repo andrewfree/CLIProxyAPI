@@ -10,6 +10,10 @@ const hopHeaders = new Set([
   "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length",
 ]);
 
+const supportedOperations = new Set([
+  "POST /v1/messages", "POST /v1/messages/count_tokens", "GET /v1/models",
+]);
+
 function forwardedHeaders(headers) {
   const excluded = new Set(hopHeaders);
   for (const name of (headers.connection ?? "").split(",")) excluded.add(name.trim().toLowerCase());
@@ -42,25 +46,29 @@ export async function startAccountProxy({ prefix, upstream }) {
   const transport = target.protocol === "https:" ? https : http;
   const server = http.createServer(async (request, response) => {
     let body;
-    const path = new URL(request.url, "http://localhost").pathname;
+    const path = request.url.split("?")[0];
+    if (!supportedOperations.has(`${request.method} ${path}`)) {
+      return fail(response, 404, "This request is not supported by the account launcher.");
+    }
     try {
-      body = await requestBody(request);
-      if (body.length && request.headers["content-type"]?.includes("application/json")) {
+      if (request.method === "POST") {
         if (request.headers["content-encoding"] && request.headers["content-encoding"] !== "identity") {
           return fail(response, 415, "Compressed requests are not supported by the account launcher.");
         }
-        const value = JSON.parse(body);
-        if (typeof value.model === "string" && value.model) {
-          if (value.model.includes("/") && !value.model.startsWith(`${prefix}/`)) {
-            return fail(response, 400, "This Claude entry is pinned to a different account.");
-          }
-          if (!value.model.startsWith(`${prefix}/`)) value.model = `${prefix}/${value.model}`;
-          body = Buffer.from(JSON.stringify(value));
-        } else if (path.startsWith("/v1/messages")) {
+        if (!/^\s*application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) {
+          return fail(response, 415, "An account-pinned request requires an application/json body.");
+        }
+        const value = JSON.parse(await requestBody(request));
+        if (value === null || typeof value !== "object" || Array.isArray(value) || typeof value.model !== "string" || !value.model) {
           return fail(response, 400, "A model is required for an account-pinned request.");
         }
-      } else if (path.startsWith("/v1/messages")) {
-        return fail(response, 400, "An account-pinned request requires a JSON body with a model.");
+        if (value.model.includes("/") && !value.model.startsWith(`${prefix}/`)) {
+          return fail(response, 400, "This Claude entry is pinned to a different account.");
+        }
+        if (!value.model.startsWith(`${prefix}/`)) value.model = `${prefix}/${value.model}`;
+        body = Buffer.from(JSON.stringify(value));
+      } else {
+        body = await requestBody(request);
       }
     } catch {
       return fail(response, 400, "The account launcher could not read the JSON request.");
