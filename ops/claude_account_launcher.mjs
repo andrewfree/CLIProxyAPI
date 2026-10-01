@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import http from "node:http";
 import https from "node:https";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { pathToFileURL } from "node:url";
@@ -9,6 +10,12 @@ const hopHeaders = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
   "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length",
 ]);
+
+const supportedOperations = new Set([
+  "POST /v1/messages", "POST /v1/messages/count_tokens", "GET /v1/models",
+]);
+
+const childShutdownGraceMs = 5000;
 
 function forwardedHeaders(headers) {
   const excluded = new Set(hopHeaders);
@@ -42,25 +49,29 @@ export async function startAccountProxy({ prefix, upstream }) {
   const transport = target.protocol === "https:" ? https : http;
   const server = http.createServer(async (request, response) => {
     let body;
-    const path = new URL(request.url, "http://localhost").pathname;
+    const path = request.url.split("?")[0];
+    if (!supportedOperations.has(`${request.method} ${path}`)) {
+      return fail(response, 404, "This request is not supported by the account launcher.");
+    }
     try {
-      body = await requestBody(request);
-      if (body.length && request.headers["content-type"]?.includes("application/json")) {
+      if (request.method === "POST") {
         if (request.headers["content-encoding"] && request.headers["content-encoding"] !== "identity") {
           return fail(response, 415, "Compressed requests are not supported by the account launcher.");
         }
-        const value = JSON.parse(body);
-        if (typeof value.model === "string" && value.model) {
-          if (value.model.includes("/") && !value.model.startsWith(`${prefix}/`)) {
-            return fail(response, 400, "This Claude entry is pinned to a different account.");
-          }
-          if (!value.model.startsWith(`${prefix}/`)) value.model = `${prefix}/${value.model}`;
-          body = Buffer.from(JSON.stringify(value));
-        } else if (path.startsWith("/v1/messages")) {
+        if (!/^\s*application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) {
+          return fail(response, 415, "An account-pinned request requires an application/json body.");
+        }
+        const value = JSON.parse(await requestBody(request));
+        if (value === null || typeof value !== "object" || Array.isArray(value) || typeof value.model !== "string" || !value.model) {
           return fail(response, 400, "A model is required for an account-pinned request.");
         }
-      } else if (path.startsWith("/v1/messages")) {
-        return fail(response, 400, "An account-pinned request requires a JSON body with a model.");
+        if (value.model.includes("/") && !value.model.startsWith(`${prefix}/`)) {
+          return fail(response, 400, "This Claude entry is pinned to a different account.");
+        }
+        if (!value.model.startsWith(`${prefix}/`)) value.model = `${prefix}/${value.model}`;
+        body = Buffer.from(JSON.stringify(value));
+      } else {
+        body = await requestBody(request);
       }
     } catch {
       return fail(response, 400, "The account launcher could not read the JSON request.");
@@ -113,10 +124,40 @@ async function main() {
     stdio: "inherit",
     env: { ...process.env, ANTHROPIC_BASE_URL: baseURL, ANTHROPIC_AUTH_TOKEN: "", CLAUDE_CODE_OAUTH_TOKEN: "" },
   });
-  const close = () => { server.closeAllConnections(); server.close(); };
-  child.once("error", () => { console.error("Unable to launch Claude Code."); close(); process.exitCode = 1; });
-  child.once("exit", (code, signal) => { close(); process.exitCode = code ?? (signal ? 1 : 0); });
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => child.kill(signal));
+
+  let state = "running";
+  let escalation;
+  let proxyClosed = false;
+  const close = () => {
+    if (proxyClosed) return;
+    proxyClosed = true;
+    server.closeAllConnections();
+    server.close();
+  };
+  const finish = () => {
+    state = "exited";
+    clearTimeout(escalation);
+    close();
+  };
+  const stop = (signal) => {
+    // Repeated signals must not restart the shutdown grace period.
+    if (state !== "running") return;
+    state = "stopping";
+    close();
+    child.kill(signal);
+    escalation = setTimeout(() => child.kill("SIGKILL"), childShutdownGraceMs);
+  };
+
+  child.once("error", () => {
+    console.error("Unable to launch Claude Code.");
+    finish();
+    process.exitCode = 1;
+  });
+  child.once("exit", (code, signal) => {
+    finish();
+    process.exitCode = code ?? (signal ? 128 + os.constants.signals[signal] : 0);
+  });
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => stop(signal));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

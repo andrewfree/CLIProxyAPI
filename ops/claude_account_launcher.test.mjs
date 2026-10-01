@@ -89,3 +89,65 @@ test("model discovery exposes only the chosen account with normal model IDs", as
   const res = await fetch(base + "/v1/models");
   assert.deepEqual((await res.json()).data, [{ id: "claude-sonnet-5" }]);
 });
+
+test("unsupported paths, methods, aliases and media types never reach the upstream", async (t) => {
+  let called = 0;
+  const base = await fixture(t, (_req, res) => { called++; res.end("{}"); });
+  const body = '{"model":"claude-sonnet-5"}';
+  const cases = [
+    ["POST", "/v1/chat/completions", "text/plain", 404],
+    ["POST", "/v1/responses", "text/plain", 404],
+    ["POST", "/v1/responses", "application/json", 404],
+    ["POST", "/v1/%6dessages", "application/json", 404],
+    ["POST", "/v1/messages/", "application/json", 404],
+    ["POST", "/v1/messages/count_tokens/", "application/json", 404],
+    ["POST", "/v1/messages//", "application/json", 404],
+    ["GET", "/v1/messages", undefined, 404],
+    ["PUT", "/v1/messages", "application/json", 404],
+    ["DELETE", "/v1/messages", undefined, 404],
+    ["POST", "/v1/models", "application/json", 404],
+    ["GET", "/v1/models/", undefined, 404],
+    ["GET", "/v1/%6dodels", undefined, 404],
+    ["POST", "/v1/messages", "text/plain", 415],
+    ["POST", "/v1/messages", "application/json-patch+json", 415],
+    ["POST", "/v1/messages", "application/jsonx", 415],
+    ["POST", "/v1/messages/count_tokens", "text/plain", 415],
+  ];
+  for (const [method, path, type, status] of cases) {
+    const init = { method };
+    if (method !== "GET" && method !== "DELETE") init.body = body;
+    if (type) init.headers = { "content-type": type };
+    const res = await fetch(base + path, init);
+    assert.equal(res.status, status, `${method} ${path} ${type}`);
+    await res.text();
+  }
+  assert.equal(called, 0);
+});
+
+test("mixed-case JSON media types with parameters and queries stay pinned", async (t) => {
+  const calls = [];
+  const base = await fixture(t, async (req, res) => {
+    calls.push([req.url, (await readJSON(req)).model]);
+    res.end("{}");
+  });
+  for (const [path, type] of [["/v1/messages?beta=true", "Application/JSON; charset=utf-8"], ["/v1/messages/count_tokens?x=1&beta=true", "APPLICATION/json"]]) {
+    const res = await fetch(base + path, { method: "POST", headers: { "content-type": type }, body: '{"model":"claude-sonnet-5"}' });
+    assert.equal(res.status, 200);
+    await res.text();
+  }
+  assert.deepEqual(calls, [
+    ["/v1/messages?beta=true", "icloud/claude-sonnet-5"],
+    ["/v1/messages/count_tokens?x=1&beta=true", "icloud/claude-sonnet-5"],
+  ]);
+});
+
+test("count_tokens requires an object body with a nonempty model", async (t) => {
+  let called = 0;
+  const base = await fixture(t, (_req, res) => { called++; res.end(); });
+  for (const body of ['{}', '[]', 'null', '"x"', '{"model":""}', '{"model":5}']) {
+    const res = await fetch(base + "/v1/messages/count_tokens", { method: "POST", headers: { "content-type": "application/json" }, body });
+    assert.equal(res.status, 400, body);
+    await res.text();
+  }
+  assert.equal(called, 0);
+});
