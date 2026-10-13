@@ -16,6 +16,8 @@ docker exec -it cli-proxy-api /CLIProxyAPI/CLIProxyAPI --config /CLIProxyAPI/con
 
 Create the key in the Cursor dashboard. Keep it out of shell arguments and chat. Account Privacy Mode applies to SDK requests. The plugin has no separate telemetry switch; no analytics client was found in its source. Both services set `DO_NOT_TRACK=1`, and CLIProxy usage aggregation is disabled.
 
+Run `python3 ops/verify_fleet_instance.py` from each instance root to check its live image, source revision, plugin checksum, version, health, and analytics settings against the shared manifest. The verifier prints no credentials.
+
 For a future update, create one new release manifest, build its exact source on both platforms, verify both plugin artifacts, stage both configurations without production auth, run the app and contract checks, then recreate only the two proxy containers. Check the running image IDs, source revision labels, health endpoints, registered plugin version, authenticated model catalogs, and client routes against the manifest. Keep the previous images and private configuration backups for rollback.
 
 The October 13 source build is `d4fa77254e2922a834f6f97ddac0d7a88249b9ad`, based on upstream v8.0.27. It preserves the local Kimi model fallback feature. The runtime backups are `/Users/rever/cliproxy/ops/runtime/v8.0.27-fleet.1/backup` and `/home/andrew/cliproxy/releases/v8.0.27-fleet.1/backup`. No OAuth credential directory is replaced during upgrade or rollback.
