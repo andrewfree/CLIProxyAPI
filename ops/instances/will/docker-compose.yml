@@ -2,9 +2,13 @@ name: cliproxy
 
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api@sha256:f077e153476466e0ea8355400e39bf1508e637585b661ed3991b7b8129ce054d}
-    pull_policy: always
+    image: ${CLI_PROXY_IMAGE:-sha256:cff34aadce0684523ca94d7829be961954ce1bebfba7c8c3fb847c50b7281e0a}
+    pull_policy: never
     container_name: cli-proxy-api
+    env_file:
+      - .env
+    environment:
+      DO_NOT_TRACK: "1"
     ports:
       - "127.0.0.1:8317:8317"
       - "127.0.0.1:8085:8085"

@@ -8,7 +8,10 @@
     "request-retry": 3,
     "max-retry-credentials": 0,
     "max-retry-interval": 75,
-    "routing.strategy": "round-robin"
+    "routing.strategy": "round-robin",
+    "plugins.enabled": true,
+    "plugins.configs.auth-cursor.enabled": true,
+    "usage-statistics-enabled": false
   },
   "required_mounts": [
     {
@@ -29,7 +32,7 @@
     }
   ],
   "compose_policy": {
-    "pull_policy": "always",
+    "pull_policy": "never",
     "restart": "always",
     "stop_grace_period": "20s",
     "logging_driver": "json-file",
