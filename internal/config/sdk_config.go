@@ -6,6 +6,21 @@ package config
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
+	// MaxRequestBodyBytes limits the size (in bytes) of incoming HTTP request bodies.
+	// Values <= 0 disable the limit (default).
+	MaxRequestBodyBytes int64 `yaml:"max-request-body-bytes" json:"max-request-body-bytes"`
+
+	// Client configures client-facing compatibility behavior.
+	Client ClientConfig `yaml:"client" json:"client"`
+
+	// OAuthOnlyFields records v8 provider settings that must wait for credential
+	// selection and must not affect API-key credentials. Config YAML snapshots
+	// preserve the corresponding v8 paths instead of serializing this metadata.
+	OAuthOnlyFields map[string]bool `yaml:"-" json:"-"`
+
+	// CodexResponseSteering mirrors the provider-wide runtime setting for API handlers.
+	CodexResponseSteering bool `yaml:"-" json:"-"`
+
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
@@ -42,8 +57,11 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
-	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
-	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
+	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
+	CodexOrphanDelegationCompatibility bool `yaml:"-" json:"-"`
+
+	// ClaudeCode configures Claude Code compatibility behavior.
+	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
@@ -60,9 +78,32 @@ type SDKConfig struct {
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
 }
 
+// ClientConfig configures client-facing compatibility behavior.
+type ClientConfig struct {
+	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+}
+
+// CodexClientConfig configures Codex client compatibility and the model catalog.
+type CodexClientConfig struct {
+	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests across providers.
+	// Default false leaves the client's multi-agent behavior unchanged.
+	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+
+	// EnableApplyPatch advertises freeform apply_patch only for supported models.
+	// Default false clears the capability regardless of template metadata.
+	EnableApplyPatch bool `yaml:"enable-apply-patch" json:"enable-apply-patch"`
+}
+
+// ClaudeCodeConfig configures Claude Code compatibility behavior.
+type ClaudeCodeConfig struct {
+	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
+	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+}
+
 // StreamingConfig holds server streaming behavior configuration.
 type StreamingConfig struct {
-	// KeepAliveSeconds controls how often the server emits SSE heartbeats (": keep-alive\n\n").
+	// KeepAliveSeconds controls how often the server emits SSE heartbeats (": keep-alive\n\n")
+	// or WebSocket Ping control frames.
 	// <= 0 disables keep-alives. Default is 0.
 	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
 
@@ -70,4 +111,8 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+
+	// SendKeepAliveBeforeFT controls whether SSE heartbeats are sent before the first token arrives
+	// when KeepAliveSeconds > 0. Default is false.
+	SendKeepAliveBeforeFT bool `yaml:"send-keepalive-before-ft,omitempty" json:"send-keepalive-before-ft,omitempty"`
 }
