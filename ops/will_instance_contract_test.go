@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const willPinnedImage = "eceasy/cli-proxy-api@sha256:f077e153476466e0ea8355400e39bf1508e637585b661ed3991b7b8129ce054d"
+const willPinnedImage = "sha256:cff34aadce0684523ca94d7829be961954ce1bebfba7c8c3fb847c50b7281e0a"
 
 type willWorkloadContract struct {
 	SchemaVersion int                  `json:"schema_version"`

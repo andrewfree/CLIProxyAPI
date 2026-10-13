@@ -14,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const pinnedImage = "eceasy/cli-proxy-api@sha256:ee21d2cc4b8f89d0df142724479e6d8107e69ea91c5dc6c14abfd837e42c2422"
+const pinnedImage = "sha256:1914227451c32a2e19cc3c1919c8e53fe48507dc2a09a2f0f1d76563bdae361e"
 
 var (
 	errDuplicateJSONObjectMember  = errors.New("duplicate JSON object member")

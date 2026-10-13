@@ -1,7 +1,7 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api@sha256:ee21d2cc4b8f89d0df142724479e6d8107e69ea91c5dc6c14abfd837e42c2422}
-    pull_policy: always
+    image: ${CLI_PROXY_IMAGE:-sha256:1914227451c32a2e19cc3c1919c8e53fe48507dc2a09a2f0f1d76563bdae361e}
+    pull_policy: never
     build:
       context: .
       dockerfile: Dockerfile
@@ -13,6 +13,7 @@ services:
     # env_file:
     #   - .env
     environment:
+      DO_NOT_TRACK: "1"
       DEPLOY: ${DEPLOY:-}
     ports:
       - "127.0.0.1:8317:8317"

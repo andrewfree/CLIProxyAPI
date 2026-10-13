@@ -37,7 +37,7 @@ def matching_observation():
     return {
         "compose": {
             "image": runtime["image"],
-            "pull_policy": "always",
+            "pull_policy": "never",
             "restart": "always",
             "ports": [
                 {
