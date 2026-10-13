@@ -4,7 +4,9 @@ Will is the always-on primary at `http://100.98.74.67:8317`. This address is pri
 
 `fleet-release.json` pins one application source commit, one Cursor plugin version, and the exact platform image and plugin hashes. Both images are built from the same commit. ARM64 runs on the Mac's Docker VM; AMD64 runs on Will. Compose uses immutable local image IDs with `pull_policy: never`, so a restart cannot silently select a new release. The two Compose files and owner contracts must be changed together for the next release.
 
-Keep host configuration, logs, and OAuth credentials local to each instance. Never synchronize rotating OAuth tokens between active servers. The Mac has an additional iCloud Claude account that Will does not have. Its named account route stays on the Mac. Changing a named account route must never select another account implicitly.
+Keep host configuration, logs, and OAuth credentials local to each instance. Never synchronize rotating OAuth tokens between active servers. Both hosts have separate Gmail and iCloud Claude credentials, selected by the `t3-gmail` and `t3-icloud` prefixes. Changing a named account route must never select another account implicitly.
+
+Each host's `auths/` directory is bind-mounted at `/root/.cli-proxy-api`; both Claude credential files contain refresh tokens and have mode `0600`. CLIProxy loads these files on startup and refreshes credentials automatically. Both containers use the `always` restart policy, and Will's Docker and Tailscale services are enabled at boot. After a fresh login, check the new credential file's permissions and restrict it to `0600` if necessary. These persistence settings and mounted files were verified without restarting active clients.
 
 Plugins are enabled on both hosts. The Cursor provider is `auth-cursor` 2.1.1; its provider key is `cursor`. Plugin archives were verified against the publisher's registry before extracting the shared libraries. The libraries are persisted under each instance's `plugins/linux/<arch>/` directory. The plugin uses the official Cursor SDK Bridge and supports one API key file per Cursor account, round-robin selection, and optional weighted routing. No Cursor API keys were present at preparation time.
 
@@ -18,7 +20,7 @@ Create the key in the Cursor dashboard. Keep it out of shell arguments and chat.
 
 Run `python3 ops/verify_fleet_instance.py` from each instance root to check its live image, source revision, plugin checksum, version, health, and analytics settings against the shared manifest. The verifier prints no credentials.
 
-T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the shared Codex pool and Gmail Claude account. Selecting a fallback is manual. New sessions use the selected endpoint; an already running client keeps its launch environment. The iCloud Claude account remains Mac-only. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
+T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the shared Codex pool and both Claude accounts. Selecting a fallback is manual. New sessions use the selected endpoint; an already running client keeps its launch environment. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
 
 The Will owner verifier additionally checks the exact private IPv4 and IPv6 listeners, the Tailscale Serve forwarding target, and all six loopback Docker bindings. PiSec records the private forwarding service separately from the Docker workload. The primary uses Will's own credentials and local storage, so the Mac is not in its request path.
 
