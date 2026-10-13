@@ -23,8 +23,10 @@ python3 -m unittest -v ops.test_will_instance
 python3 ops/instances/will/verify_live.py --json
 ```
 
-The verifier checks all six Docker bindings and host listeners against
-`127.0.0.1`, verifies the running image and restart policy, compares the host
+The verifier checks all six Docker bindings against `127.0.0.1` and permits
+only the two explicitly pinned Tailscale listeners in addition to loopback.
+It verifies that Tailscale Serve forwards port 8317 to the local proxy,
+verifies the running image and restart policy, compares the host
 and in-container configuration hashes, enforces the retry/routing policy, and
 requires `/healthz` HTTP 200. A clean verifier result is still not proof that a
 provider can generate. After an update, also run an authenticated models check,
@@ -39,8 +41,9 @@ a real `/v1/responses` request, and the affected Codex/T3 thread.
 3. Back up Will's current Compose file, copy the reviewed tracked Compose file
    to `/home/andrew/cliproxy/docker-compose.yml`, and preserve mode `0600` and
    owner `andrew:andrew`.
-4. From the Will instance directory, pull and recreate only
-   `cli-proxy-api`. Never delete the bind-mounted state directories.
+4. Build or load the image pinned by `ops/fleet-release.json`, then recreate
+   only `cli-proxy-api` with `--pull never --no-build`. Never delete the
+   bind-mounted state directories.
 5. Run the live verifier, then the authenticated model, generation, and exact
    client/thread checks. Roll back the Compose file and previous digest if any
    layer fails.

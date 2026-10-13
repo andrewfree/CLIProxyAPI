@@ -44,21 +44,26 @@ container=$(
 )
 
 config_file="$root/config.yaml"
-request_retry=$(awk -F: '$1 == "request-retry" {gsub(/[[:space:]\"'\''#]/, "", $2); print $2}' "$config_file")
-max_retry_credentials=$(awk -F: '$1 == "max-retry-credentials" {gsub(/[[:space:]\"'\''#]/, "", $2); print $2}' "$config_file")
-max_retry_interval=$(awk -F: '$1 == "max-retry-interval" {gsub(/[[:space:]\"'\''#]/, "", $2); print $2}' "$config_file")
-routing_strategy=$(
-  awk '
-    /^routing:[[:space:]]*$/ { in_routing = 1; next }
-    in_routing && /^[^[:space:]]/ { in_routing = 0 }
-    in_routing && /^[[:space:]]+strategy:/ {
-      value = $0
-      sub(/^[^:]*:[[:space:]]*/, "", value)
-      gsub(/[[:space:]\"'\''#]/, "", value)
-      print value
-    }
-  ' "$config_file"
+config_values=$(
+  python3 - "$config_file" <<'PY'
+import json, sys, yaml
+with open(sys.argv[1]) as source:
+    config = yaml.safe_load(source)
+fields = [
+    "request-retry", "max-retry-credentials", "max-retry-interval",
+    "routing.strategy", "plugins.enabled",
+    "plugins.configs.auth-cursor.enabled", "usage-statistics-enabled",
+]
+values = {}
+for field in fields:
+    value = config
+    for part in field.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    values[field] = str(value)
+print(json.dumps(values))
+PY
 )
+tailnet_forward=$(tailscale serve status --json | jq -c '.TCP["8317"] // null')
 config_mode=$(stat -c '%a' "$config_file")
 config_owner=$(stat -c '%U:%G' "$config_file")
 host_sha256=$(sha256sum "$config_file" | awk '{print $1}')
@@ -74,10 +79,8 @@ health_status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.
 jq -n \
   --argjson compose "$compose" \
   --argjson container "$container" \
-  --arg request_retry "$request_retry" \
-  --arg max_retry_credentials "$max_retry_credentials" \
-  --arg max_retry_interval "$max_retry_interval" \
-  --arg routing_strategy "$routing_strategy" \
+  --argjson config_values "$config_values" \
+  --argjson tailnet_forward "$tailnet_forward" \
   --arg config_mode "$config_mode" \
   --arg config_owner "$config_owner" \
   --arg host_sha256 "$host_sha256" \
@@ -87,16 +90,13 @@ jq -n \
   '{
     compose: $compose,
     container: $container,
-    config: {
-      "request-retry": $request_retry,
-      "max-retry-credentials": $max_retry_credentials,
-      "max-retry-interval": $max_retry_interval,
-      "routing.strategy": $routing_strategy,
+    config: ($config_values + {
       mode: $config_mode,
       owner: $config_owner,
       host_sha256: $host_sha256,
       container_sha256: $container_sha256
-    },
+    }),
+    tailnet_forward: $tailnet_forward,
     listeners: $listeners,
     health_status: $health_status
   }'
@@ -215,8 +215,12 @@ def evaluate_observation(
     if container.get("ports") != expected_bindings:
         findings.add("container_port_exposure_drift")
     expected_listeners = {f"127.0.0.1:{port}" for port in ports}
+    tailnet = policy["tailnet_forward"]
+    expected_listeners.update(tailnet["listeners"])
     if set(observation.get("listeners", [])) != expected_listeners:
         findings.add("listener_exposure_drift")
+    if observation.get("tailnet_forward") != {"TCPForward": tailnet["target"]}:
+        findings.add("tailnet_forward_drift")
 
     for key, value in policy["required_config"].items():
         if config.get(key) != str(value):
