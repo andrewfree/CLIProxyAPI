@@ -80,7 +80,9 @@ def matching_observation():
             "host_sha256": "a" * 64,
             "container_sha256": "a" * 64,
         },
-        "listeners": [f"127.0.0.1:{port}" for port in ports],
+        "listeners": [f"127.0.0.1:{port}" for port in ports]
+        + policy["tailnet_forward"]["listeners"],
+        "tailnet_forward": {"TCPForward": policy["tailnet_forward"]["target"]},
         "health_status": 200,
     }
 
@@ -119,6 +121,19 @@ class WillInstanceVerifierTests(unittest.TestCase):
 
         self.assertIn("config_policy_drift", findings)
         self.assertIn("config_mount_identity_drift", findings)
+
+    def test_tailnet_forward_must_target_the_local_proxy(self):
+        observation = matching_observation()
+        observation["tailnet_forward"] = {"TCPForward": "100.92.72.40:8317"}
+        findings = evaluate_observation(self.contract, self.policy, observation)
+        self.assertIn("tailnet_forward_drift", findings)
+
+    def test_tailnet_listener_cannot_be_replaced_by_public_binding(self):
+        observation = matching_observation()
+        observation["listeners"].remove("100.98.74.67%tailscale0:8317")
+        observation["listeners"].append("0.0.0.0:8317")
+        findings = evaluate_observation(self.contract, self.policy, observation)
+        self.assertIn("listener_exposure_drift", findings)
 
     def test_image_and_compose_port_drift_are_detected(self):
         observation = matching_observation()

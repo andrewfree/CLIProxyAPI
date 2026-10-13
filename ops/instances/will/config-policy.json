@@ -4,6 +4,13 @@
   "config_file": "config.yaml",
   "config_owner": "andrew:andrew",
   "config_mode": "600",
+  "tailnet_forward": {
+    "target": "127.0.0.1:8317",
+    "listeners": [
+      "100.98.74.67%tailscale0:8317",
+      "[fd7a:115c:a1e0::7a2d:4a44]%tailscale0:8317"
+    ]
+  },
   "required_config": {
     "request-retry": 3,
     "max-retry-credentials": 0,
