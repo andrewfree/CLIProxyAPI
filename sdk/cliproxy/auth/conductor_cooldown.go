@@ -162,6 +162,9 @@ func (m *Manager) setConfigSnapshotLocked(cfg *internalconfig.Config) bool {
 	}
 	m.runtimeConfig.Store(cfg)
 	clearedCooldowns := m.clearDisabledCooldownStates(cfg)
+	if m.limitExistingQuotaCooldowns(cfg) {
+		clearedCooldowns = true
+	}
 	if clearedCooldowns && oldCooldownStore != nil {
 		m.mu.Lock()
 		if m.cooldownStore == oldCooldownStore {
@@ -369,6 +372,11 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	quota := record.Quota
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	limitQuotaState(&quota, &record.NextRetryAfter, record.LastError, updatedAt, now, quotaCooldownLimit(cfg))
+	if !record.NextRetryAfter.After(now) {
+		return false
 	}
 
 	if model == "" {
@@ -935,6 +943,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									}
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
 								}
+								cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+								next = limitQuotaDeadline(next, now, quotaCooldownLimit(cfg))
 								credentialNext = next
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
@@ -952,6 +962,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									if otherState != nil && otherState != state {
 										otherState.Unavailable = true
 										otherState.Status = StatusError
+										otherState.UpdatedAt = now
 										otherQuotaNext := credentialNext
 										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherQuotaNext) {
 											otherQuotaNext = otherState.Quota.NextRecoverAt
@@ -1017,7 +1028,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					disableCooling = false
 				}
 				if !wasTerminalUnauthorized {
-					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, quotaCooldownLimit(cfg))
 				}
 			}
 		}
@@ -2277,7 +2289,7 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool, quotaLimit time.Duration) {
 	if auth == nil {
 		return
 	}
@@ -2358,6 +2370,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				}
+				next = limitQuotaDeadline(next, now, quotaLimit)
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
 				}
