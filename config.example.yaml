@@ -217,6 +217,13 @@ routing:
     # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
     transient-error-cooldown-seconds: 0
 
+    # Limit quota cooldowns so normal traffic can discover an early upstream reset.
+    # 0 or below preserves upstream deadlines. Positive values have a 10-second floor.
+    # Applies to new, restored and reloaded quota state; other failure cooldowns remain intact.
+    # Expiry permits a real request, not a background probe. A new 429 cools the account again.
+    # Ignored in Home mode, which owns its cooldown policy.
+    quota-cooldown-max-seconds: 0
+
 # Shared request/response behavior.
 requests:
   # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
