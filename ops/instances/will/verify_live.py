@@ -55,12 +55,26 @@ fields = [
     "routing.strategy", "plugins.enabled",
     "plugins.configs.auth-cursor.enabled", "usage-statistics-enabled",
 ]
+v8_paths = {
+    "request-retry": "routing.retry.request-retry",
+    "max-retry-credentials": "routing.retry.max-retry-credentials",
+    "max-retry-interval": "routing.retry.max-retry-interval",
+    "quota-cooldown-max-seconds": "routing.cooldown.quota-cooldown-max-seconds",
+    "save-cooldown-status": "routing.cooldown.save-cooldown-status",
+    "usage-statistics-enabled": "observability.usage.usage-statistics-enabled",
+}
+missing = object()
+def at_path(path):
+    value = config
+    for part in path.split("."):
+        value = value.get(part, missing) if isinstance(value, dict) else missing
+    return value
 values = {}
 for field in fields:
-    value = config
-    for part in field.split("."):
-        value = value.get(part) if isinstance(value, dict) else None
-    values[field] = str(value)
+    value = at_path(v8_paths.get(field, field))
+    if value is missing:
+        value = at_path(field)
+    values[field] = str(None if value is missing else value)
 print(json.dumps(values))
 PY
 )
