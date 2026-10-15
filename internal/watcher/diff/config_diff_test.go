@@ -398,6 +398,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		DisableCooling:                false,
 		SaveCooldownStatus:            false,
 		TransientErrorCooldownSeconds: 0,
+		QuotaCooldownMaxSeconds:       0,
 		RequestRetry:                  1,
 		MaxRetryCredentials:           1,
 		MaxRetryInterval:              1,
@@ -430,6 +431,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		DisableCooling:                true,
 		SaveCooldownStatus:            true,
 		TransientErrorCooldownSeconds: -1,
+		QuotaCooldownMaxSeconds:       3600,
 		RequestRetry:                  2,
 		MaxRetryCredentials:           3,
 		MaxRetryInterval:              3,
@@ -478,6 +480,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "disable-cooling: false -> true")
 	expectContains(t, details, "save-cooldown-status: false -> true")
 	expectContains(t, details, "transient-error-cooldown-seconds: 0 -> -1")
+	expectContains(t, details, "quota-cooldown-max-seconds: 0 -> 3600")
 	expectContains(t, details, "disable-image-generation: false -> true")
 	expectContains(t, details, "claude-code.disable-cloaking-model-list: false -> true")
 	expectContains(t, details, "request-log: false -> true")
@@ -515,6 +518,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		DisableCooling:                false,
 		SaveCooldownStatus:            false,
 		TransientErrorCooldownSeconds: 0,
+		QuotaCooldownMaxSeconds:       0,
 		RequestRetry:                  1,
 		MaxRetryCredentials:           1,
 		MaxRetryInterval:              1,
@@ -564,6 +568,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		DisableCooling:                true,
 		SaveCooldownStatus:            true,
 		TransientErrorCooldownSeconds: -1,
+		QuotaCooldownMaxSeconds:       3600,
 		RequestRetry:                  2,
 		MaxRetryCredentials:           3,
 		MaxRetryInterval:              3,
@@ -620,6 +625,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "disable-cooling: false -> true")
 	expectContains(t, changes, "save-cooldown-status: false -> true")
 	expectContains(t, changes, "transient-error-cooldown-seconds: 0 -> -1")
+	expectContains(t, changes, "quota-cooldown-max-seconds: 0 -> 3600")
 	expectContains(t, changes, "disable-image-generation: false -> true")
 	expectContains(t, changes, "request-retry: 1 -> 2")
 	expectContains(t, changes, "max-retry-credentials: 1 -> 3")

@@ -44,7 +44,8 @@ func limitQuotaState(quota *QuotaState, nextRetry *time.Time, lastErr *Error, up
 	if next.Equal(previous) {
 		return false
 	}
-	if nextRetry.Equal(previous) && (lastErr == nil || lastErr.HTTPStatus == http.StatusTooManyRequests) {
+	// Aggregates pair the earliest model retry with a later quota deadline.
+	if !nextRetry.After(previous) && next.Before(*nextRetry) && (lastErr == nil || lastErr.HTTPStatus == http.StatusTooManyRequests) {
 		*nextRetry = next
 	}
 	quota.NextRecoverAt = next
@@ -63,6 +64,8 @@ func (m *Manager) limitExistingQuotaCooldowns(cfg *internalconfig.Config) bool {
 		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || hasUnauthorizedAuthFailure(auth) || quotaCooldownDisabledForAuthWithConfig(auth, cfg) {
 			continue
 		}
+		quotaOnlyAggregate := auth.Quota.Reason == "quota" && !auth.NextRetryAfter.After(auth.Quota.NextRecoverAt) &&
+			(auth.LastError == nil || auth.LastError.HTTPStatus == http.StatusTooManyRequests)
 		changed := limitQuotaState(&auth.Quota, &auth.NextRetryAfter, auth.LastError, auth.UpdatedAt, now, limit)
 		for _, state := range auth.ModelStates {
 			if state == nil || state.Status == StatusDisabled {
@@ -76,6 +79,9 @@ func (m *Manager) limitExistingQuotaCooldowns(cfg *internalconfig.Config) bool {
 			if limitQuotaState(&state.Quota, &state.NextRetryAfter, state.LastError, updatedAt, now, limit) {
 				changed = true
 			}
+		}
+		if changed && quotaOnlyAggregate && len(auth.ModelStates) > 0 {
+			updateAggregatedAvailability(auth, now)
 		}
 		if changed {
 			// Keep the failure timestamps: reloads must not renew a quota window.
