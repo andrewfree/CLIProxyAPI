@@ -1,6 +1,8 @@
 import copy
 import json
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -157,6 +159,52 @@ class WillInstanceVerifierTests(unittest.TestCase):
         self.assertNotIn("auths/", REMOTE_PROBE)
         self.assertNotIn("api-key", REMOTE_PROBE.lower())
         self.assertNotIn("token", REMOTE_PROBE.lower())
+
+    def probe_config(self, config):
+        script = REMOTE_PROBE.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as source:
+            json.dump(config, source)
+            source.flush()
+            result = subprocess.run(
+                [sys.executable, "-c", script, source.name],
+                check=True, capture_output=True, text=True,
+            )
+        return json.loads(result.stdout)
+
+    def test_probe_accepts_legacy_and_v8_quota_settings(self):
+        settings = {"quota-cooldown-max-seconds": 3600, "save-cooldown-status": True}
+        for config in (settings, {"routing": {"cooldown": settings}}):
+            with self.subTest(config=config):
+                observed = self.probe_config(config)
+                for key, value in settings.items():
+                    self.assertEqual(observed[key], str(value))
+
+    def test_probe_nested_values_override_conflicting_legacy_values(self):
+        config = dict(self.policy["required_config"])
+        config.update({
+            "routing": {
+                "retry": {"request-retry": 0, "max-retry-credentials": 0, "max-retry-interval": 0},
+                "cooldown": {"quota-cooldown-max-seconds": 0, "save-cooldown-status": False},
+            },
+            "observability": {"usage": {"usage-statistics-enabled": True}},
+        })
+        observed = self.probe_config(config)
+        expected = {"request-retry": "0", "max-retry-credentials": "0", "max-retry-interval": "0",
+                    "quota-cooldown-max-seconds": "0", "save-cooldown-status": "False",
+                    "usage-statistics-enabled": "True"}
+        for key, value in expected.items():
+            self.assertEqual(observed[key], value)
+        observation = matching_observation()
+        observation["config"].update(observed)
+        self.assertIn("config_policy_drift", evaluate_observation(self.contract, self.policy, observation))
+
+    def test_probe_partial_v8_settings_keep_unspecified_legacy_values(self):
+        observed = self.probe_config({
+            "quota-cooldown-max-seconds": 3600, "save-cooldown-status": True,
+            "routing": {"cooldown": {"quota-cooldown-max-seconds": None}},
+        })
+        self.assertEqual(observed["quota-cooldown-max-seconds"], "None")
+        self.assertEqual(observed["save-cooldown-status"], "True")
 
     def test_collection_rejects_untrusted_target_before_runner(self):
         def runner(*args, **kwargs):
