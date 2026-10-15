@@ -51,6 +51,7 @@ with open(sys.argv[1]) as source:
     config = yaml.safe_load(source)
 fields = [
     "request-retry", "max-retry-credentials", "max-retry-interval",
+    "quota-cooldown-max-seconds", "save-cooldown-status",
     "routing.strategy", "plugins.enabled",
     "plugins.configs.auth-cursor.enabled", "usage-statistics-enabled",
 ]

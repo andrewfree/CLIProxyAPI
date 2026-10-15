@@ -36,6 +36,8 @@ observed = {
     'cursor_version': plugin['metadata']['version'],
     'cursor_sha256': hashlib.sha256(filename.read_bytes()).hexdigest(),
     'usage_statistics_enabled': config.get('usage-statistics-enabled'),
+    'quota_cooldown_max_seconds': config.get('quota-cooldown-max-seconds'),
+    'save_cooldown_status': config.get('save-cooldown-status'),
     'do_not_track': 'DO_NOT_TRACK=1' in container['Config']['Env'],
     'account_counts': dict(collections.Counter(a.get('provider', 'unknown') for a in auths['files'])),
 }
@@ -51,6 +53,8 @@ expected = {
     'cursor_version': release['cursor_plugin']['version'],
     'cursor_sha256': release['cursor_plugin']['libraries'][arch]['sha256'],
     'usage_statistics_enabled': False,
+    'quota_cooldown_max_seconds': release['runtime_policy']['quota-cooldown-max-seconds'],
+    'save_cooldown_status': release['runtime_policy']['save-cooldown-status'],
     'do_not_track': True,
 }
 failures = [name for name, value in expected.items() if observed.get(name) != value]
