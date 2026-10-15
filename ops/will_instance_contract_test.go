@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const willPinnedImage = "sha256:cff34aadce0684523ca94d7829be961954ce1bebfba7c8c3fb847c50b7281e0a"
+const willPinnedImage = "sha256:1acc486496c8f539ef6b4dafd40d5fd04e12e19c13d9e2dd12f3590f0e70eb51"
 
 type willWorkloadContract struct {
 	SchemaVersion int                  `json:"schema_version"`
