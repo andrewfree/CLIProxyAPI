@@ -254,3 +254,76 @@ func TestQuotaCooldownLimit_PreservesCloudflareAndHomePolicy(t *testing.T) {
 		t.Fatal("local quota cap introduced cooling in Home mode")
 	}
 }
+
+func TestQuotaCooldownLimit_RestartWithDifferentModelDeadlines(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, reloadFirst := range []bool{false, true} {
+		for _, age := range []time.Duration{30 * time.Minute, 2 * time.Hour} {
+			name := "direct restore/" + age.String()
+			if reloadFirst {
+				name = "reload then restore/" + age.String()
+			}
+			t.Run(name, func(t *testing.T) {
+				m, auth := newCooldownMonotonicManager(t, "model-a", "model-b")
+				store := &recordingCooldownStateStore{}
+				m.SetCooldownStateStore(store)
+				for i, model := range []string{"model-a", "model-b"} {
+					duration := time.Duration(5-i) * 24 * time.Hour
+					m.MarkResult(context.Background(), Result{AuthID: auth.ID, Model: model, RetryAfter: &duration, Error: &Error{HTTPStatus: 429}})
+				}
+				observed := time.Now().Add(-age)
+				m.mu.Lock()
+				current := m.auths[auth.ID]
+				current.UpdatedAt = observed
+				for _, state := range current.ModelStates {
+					state.UpdatedAt = observed
+				}
+				equalDeadlines := current.NextRetryAfter.Equal(current.Quota.NextRecoverAt)
+				m.mu.Unlock()
+				if equalDeadlines {
+					t.Fatal("precondition: aggregate deadlines must differ")
+				}
+				m.persistCooldownStates(context.Background())
+				cfg := &internalconfig.Config{QuotaCooldownMaxSeconds: 3600, SaveCooldownStatus: true}
+				if reloadFirst {
+					m.SetConfig(cfg)
+				}
+				restored, _ := newCooldownMonotonicManager(t, "model-a", "model-b")
+				restored.SetConfig(cfg)
+				restored.SetCooldownStateStore(&recordingCooldownStateStore{load: store.savedRecords()})
+				if err := restored.RestoreCooldownStates(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				got, _ := restored.GetByID(auth.ID)
+				for _, model := range []string{"", "model-a", "model-b"} {
+					if blocked, _, _ := isAuthBlockedForModel(got, model, observed.Add(time.Hour+time.Second)); blocked {
+						t.Fatalf("%q blocked after capped deadline", model)
+					}
+				}
+				if age > time.Hour {
+					for _, model := range []string{"model-a", "model-b"} {
+						if _, err := restored.scheduler.pickSingle(context.Background(), auth.Provider, model, cliproxyexecutor.Options{}, nil); err != nil {
+							t.Fatalf("restart blocks %s: %v", model, err)
+						}
+					}
+				} else if blocked, _, _ := isAuthBlockedForModel(got, "model-a", time.Now()); !blocked {
+					t.Fatal("recent quota expired too early")
+				}
+			})
+		}
+	}
+}
+
+func TestQuotaCooldownLimit_ReloadPreservesAuthFailureWithModelState(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, auth := newCooldownMonotonicManager(t, "quota-model")
+	long := 5 * 24 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: auth.ID, Model: "quota-model", RetryAfter: &long, Error: &Error{HTTPStatus: 429}})
+	m.MarkResult(context.Background(), Result{AuthID: auth.ID, Error: &Error{HTTPStatus: 503}})
+	before, _ := m.GetByID(auth.ID)
+	m.SetConfig(&internalconfig.Config{QuotaCooldownMaxSeconds: 3600})
+	after, _ := m.GetByID(auth.ID)
+	if !after.NextRetryAfter.Equal(before.NextRetryAfter) || !after.Unavailable || after.LastError.HTTPStatus != 503 {
+		t.Fatal("recomputing model aggregate discarded the separate auth failure")
+	}
+}
