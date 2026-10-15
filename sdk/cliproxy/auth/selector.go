@@ -357,7 +357,11 @@ func (e *modelCooldownError) Headers() http.Header {
 	if resetSeconds < 0 {
 		resetSeconds = 0
 	}
-	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
+	// Limit automatic waits to one minute because Codex sleeps for the entire hint.
+	// Longer deadlines remain in the error body.
+	if resetSeconds <= 60 {
+		headers.Set("Retry-After", strconv.Itoa(resetSeconds))
+	}
 	return headers
 }
 
