@@ -39,14 +39,14 @@
   "routing_policy": {
     "arm64": {
       "strategy": "round-robin",
-      "session-affinity": true,
+      "session-affinity": false,
       "session-affinity-ttl": "1h",
       "session-affinity-subagents": false,
       "session-affinity-rebind-on": "any"
     },
     "amd64": {
       "strategy": "round-robin",
-      "session-affinity": true,
+      "session-affinity": false,
       "session-affinity-ttl": "1h",
       "session-affinity-subagents": false,
       "session-affinity-rebind-on": "any"

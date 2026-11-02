@@ -15,6 +15,14 @@ class FleetRoutingPolicyTests(unittest.TestCase):
     def test_matching_management_config_passes(self):
         self.assertTrue(routing_policy_matches(self.config, self.policy))
 
+    def test_omitted_false_affinity_preserves_explicit_settings(self):
+        policy = dict(self.policy, **{"session-affinity": False})
+        config = {"routing": dict(policy)}
+        del config["routing"]["session-affinity"]
+        self.assertTrue(routing_policy_matches(config, policy))
+        config["routing"]["session-affinity"] = True
+        self.assertFalse(routing_policy_matches(config, policy))
+
     def test_observed_routing_excludes_unrelated_configuration(self):
         self.config["api-keys"] = ["synthetic-secret"]
         self.config["routing"]["unrelated"] = "synthetic-private-value"

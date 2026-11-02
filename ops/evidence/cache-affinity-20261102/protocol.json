@@ -1,0 +1,83 @@
+{
+  "source_head": "7f9d9e30",
+  "claim": "Test whether affinity materially reduces uncached input or request latency in repeated synthetic native Responses tool loops resembling current context sizes; not a universal performance claim.",
+  "host": "Mac fallback only",
+  "model": "gpt-6-luna",
+  "reasoning": "low",
+  "context_chars": 380000,
+  "calibrated_first_input_tokens": 98357,
+  "sessions_per_run": 2,
+  "tool_turns": 5,
+  "final_turns": 1,
+  "pairs": 5,
+  "pair_orders": [
+    [
+      "off",
+      "on"
+    ],
+    [
+      "on",
+      "off"
+    ],
+    [
+      "off",
+      "on"
+    ],
+    [
+      "on",
+      "off"
+    ],
+    [
+      "off",
+      "on"
+    ]
+  ],
+  "fixed": [
+    "application image",
+    "credential pool",
+    "model",
+    "transport HTTP/HTTP",
+    "380000-character allowlisted public source fixture",
+    "function schema and deterministic tool results",
+    "idle timing no artificial delay"
+  ],
+  "independence": "Different early instructions nonce per arm and session; Session_id=Thread-Id=prompt_cache_key remains stable within each session. Tool histories include actual function call IDs and outputs.",
+  "primary_metric": "sum(input_tokens-cached_tokens) over non-first requests in both sessions per run; pair is experimental unit. Also report all-turn totals.",
+  "cache_acceptance": {
+    "median_paired_reduction_min": 0.1,
+    "all_five_pairs_positive": true,
+    "median_absolute_reduction_min_tokens": 10000,
+    "reliability_regression_allowed": false
+  },
+  "latency_acceptance": {
+    "median_paired_reduction_min": 0.1,
+    "all_five_pairs_positive": true,
+    "median_load_difference_max": 0.25,
+    "limiter": "remote inference/cache/network; also report local process cpu/wall and container stats",
+    "otherwise": "inconclusive"
+  },
+  "decision": "Retain affinity only on material reproducible benefit without reliability/distribution concerns. Failure to meet criterion is no demonstrated benefit, not equivalence; prefer original round-robin if no benefit established and no separately proven continuity need. Transfer to Will is an operational conservative-default choice, not evidence of measured Will performance.",
+  "validity_gates": [
+    "All terminal responses completed with valid usage 0<=cached<=input",
+    "Correct forced step functions and exact final output, linked continuation IDs",
+    "Context-size divergence <1 percent per paired run",
+    "At least2 distinct selected accounts per off session; exactly1 per on session",
+    "All request logs correlate to generated test identity and have single successful selected auth; no quota/cooldown/error/retry",
+    "Stop at any invalid run; retain it and do not silently replace or drop it"
+  ],
+  "limits": [
+    "Synthetic controlled workload, not native T3 app-server acceptance",
+    "Natural current sample overlaps evaluation, is not independent baseline",
+    "Luna results not proof for Astra/Sol or other providers",
+    "Mac host busy with unrelated processes, latency conservatively qualified",
+    "No public API pricing or subscription-quota savings inference"
+  ],
+  "harness_sha256": "ed327f1de503692cfb5a19a0bbc7494b26c3ee8adfcade6e9709354de83f93f1",
+  "calibrations": [
+    "calibration-01.json 52k input success",
+    "calibration-02.json 98k input success; no calibration requests included in sweep"
+  ],
+  "request_order": "Reverse session order on alternating tool turns to break cycle aliasing for two or three eligible accounts",
+  "supersedes": "Original pair-1-off retained INVALID: pre-existing third-account cooldown reduced pool to2, fixed2-session order aliased RR. No response failure, but arm did not rotate. No data from that run used here.",
+  "eligible_pool_at_start": 2
+}
