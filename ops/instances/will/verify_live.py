@@ -54,6 +54,7 @@ fields = [
     "quota-cooldown-max-seconds", "save-cooldown-status",
     "routing.strategy", "plugins.enabled",
     "plugins.configs.auth-cursor.enabled", "usage-statistics-enabled",
+    "request-log", "logging-to-file", "logs-max-total-size-mb",
 ]
 v8_paths = {
     "request-retry": "routing.retry.request-retry",
@@ -62,6 +63,9 @@ v8_paths = {
     "quota-cooldown-max-seconds": "routing.cooldown.quota-cooldown-max-seconds",
     "save-cooldown-status": "routing.cooldown.save-cooldown-status",
     "usage-statistics-enabled": "observability.usage.usage-statistics-enabled",
+    "request-log": "observability.logs.request-log",
+    "logging-to-file": "observability.logs.logging-to-file",
+    "logs-max-total-size-mb": "observability.logs.logs-max-total-size-mb",
 }
 missing = object()
 def at_path(path):
