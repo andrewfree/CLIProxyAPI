@@ -30,6 +30,8 @@ For an affinity-only change, edit `routing.session-affinity` in place, preservin
 
 T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the shared Codex pool and both Claude accounts. Selecting a fallback is manual. New sessions use the selected endpoint; an already running client keeps its launch environment. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
 
+For exact-model discovery and an authorized T3 task, follow [the Kimi CLIProxy routing recipe](KIMI_ROUTING.md).
+
 M1 is a client, not a third proxy host. On November 2, its T3 instance gained an enabled `codex_cliproxy` profile named `Codex - CLIProxy Will primary`, using `http://100.98.74.67:8317/v1`. The profile uses the Responses API and a local token helper. The client key has mode `0600`, and the helper has mode `0700`. Setup preserved all existing profiles and unrelated settings, and revoked its temporary T3 setup session. This profile is available for selection in new sessions. Existing threads keep their selected providers.
 
 Authenticated model-catalog and synthetic generation checks passed from M1 through Will, and from M5 through both Will and its local fallback. The [client validation receipt](evidence/cache-affinity-20261102/client-validation.json) records these checks and the native T3 smoke results. Both proxy instances retain the verified round-robin policy with affinity disabled. M5's proxy remains loopback-only, so M1 cannot use it directly as a fallback. The M1 profile does not add a Claude account route or another proxy server.
