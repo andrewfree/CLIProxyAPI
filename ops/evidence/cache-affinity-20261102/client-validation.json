@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-02",
+  "policy_commit": "0564eb70",
+  "model_and_policy_review": "Claude Opus 5.5 QUALIFIED; reconciliation recorded before 0564eb70",
+  "settlement_verification": "GPT-6 Astra with GPT-6 Luna receipt audit and native connectivity checks",
+  "proxy_instances": [
+    {
+      "host": "m5",
+      "platform": "arm64",
+      "image_id": "sha256:d0eaef5cb5ca17bcfabc4786ad8b763c995ff65e4a60430606b91b5338e8aa9b",
+      "source_commit": "07e5dff992f2ae93bd49f6a3de0ba158816a2dcc",
+      "health": "healthy",
+      "routing": {
+        "strategy": "round-robin",
+        "session-affinity": false,
+        "session-affinity-ttl": "1h",
+        "session-affinity-subagents": false,
+        "session-affinity-rebind-on": "any"
+      },
+      "routing_policy_matches": true,
+      "failures": []
+    },
+    {
+      "host": "will",
+      "platform": "amd64",
+      "image_id": "sha256:cc6f13bdaa5aaa5b51984a8a4613521b2daad79c7b2b89a8de9ca70e13bbbed5",
+      "source_commit": "07e5dff992f2ae93bd49f6a3de0ba158816a2dcc",
+      "health": "healthy",
+      "routing": {
+        "strategy": "round-robin",
+        "session-affinity": false,
+        "session-affinity-ttl": "1h",
+        "session-affinity-subagents": false,
+        "session-affinity-rebind-on": "any"
+      },
+      "routing_policy_matches": true,
+      "failures": []
+    }
+  ],
+  "m1_setup": {
+    "profile": "codex_cliproxy",
+    "enabled": true,
+    "live_registered": true,
+    "existing_profiles_preserved": true,
+    "unrelated_settings_preserved": true,
+    "key_mode": "0600",
+    "helper_mode": "0700",
+    "temporary_setup_session_revoked": true
+  },
+  "http_checks": [
+    {
+      "client": "m1",
+      "profile": "codex_cliproxy",
+      "endpoint": "http://100.98.74.67:8317/v1",
+      "wire_api": "responses",
+      "synthetic_request": true,
+      "catalog_http_status": 200,
+      "response_http_status": 200,
+      "terminal_type": "response.completed",
+      "output_correct": true,
+      "completed": true,
+      "finished_unix": 1793638860.2838578
+    },
+    {
+      "client": "m5",
+      "profile": "codex_cliproxy",
+      "endpoint": "http://100.98.74.67:8317/v1",
+      "wire_api": "responses",
+      "synthetic_request": true,
+      "catalog_http_status": 200,
+      "response_http_status": 200,
+      "terminal_type": "response.completed",
+      "output_correct": true,
+      "completed": true,
+      "finished_unix": 1793638861.5224829
+    },
+    {
+      "client": "m5",
+      "profile": "codex_cliproxy_mac",
+      "endpoint": "http://127.0.0.1:8317/v1",
+      "wire_api": "responses",
+      "synthetic_request": true,
+      "catalog_http_status": 200,
+      "response_http_status": 200,
+      "terminal_type": "response.completed",
+      "output_correct": true,
+      "completed": true,
+      "finished_unix": 1793638865.9062212
+    }
+  ],
+  "native_t3_checks": [
+    {
+      "client": "m1",
+      "profile": "codex_cliproxy",
+      "model": "gpt-6-luna",
+      "status": "completed",
+      "expected_output": "SETTLED",
+      "actual_output": "SETTLED",
+      "pending_child_runs": false
+    },
+    {
+      "client": "m5",
+      "profile": "codex_cliproxy",
+      "model": "gpt-6-luna",
+      "status": "completed",
+      "expected_output": "SETTLED",
+      "actual_output": "SETTLED",
+      "pending_child_runs": false
+    },
+    {
+      "client": "m5",
+      "profile": "codex_cliproxy_mac",
+      "model": "gpt-6-luna",
+      "status": "completed",
+      "expected_output": "SETTLED",
+      "actual_output": "SETTLED",
+      "pending_child_runs": false
+    }
+  ],
+  "scope": "Synthetic connectivity checks. No cache comparison, existing-thread migration, default-provider change, or M1 local proxy deployment.",
+  "outstanding": {
+    "gmail_claude_generation": "blocked on previously observed upstream quota",
+    "scheduled_recheck_utc": "2026-11-04T02:05:00Z",
+    "account_substitution": false
+  },
+  "private_receipts": "/Users/rever/.codex/reports/cliproxy-affinity-validation-20261102/settlement"
+}
