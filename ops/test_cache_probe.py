@@ -1,6 +1,7 @@
 import json
 import contextlib
 import io
+import http.client
 import pathlib
 import tempfile
 from types import SimpleNamespace
@@ -10,10 +11,98 @@ from unittest.mock import patch
 from ops.cache_probe import (
     build_request, checked_usage, collect_response, validate_final_result,
     validate_tool_result, fixture_result, make_instructions, is_output_event, session_order, run,
+    load_local_key, response_record, invoke,
 )
 
 
 class CacheProbeTests(unittest.TestCase):
+    def test_config_supports_both_layouts_and_nested_values_win(self):
+        configs = [
+            ({"port": 8317, "api-keys": ["legacy-key"]}, ("legacy-key", 8317)),
+            ({"server": {"port": 8318}, "access": {"api-keys": ["nested-key"]},
+              "api-keys": {"codex": [{"api-key": "upstream-key"}]}}, ("nested-key", 8318)),
+            ({"port": 8317, "api-keys": ["legacy-key"], "server": {"port": 8318},
+              "access": {"api-keys": ["nested-key"]}}, ("nested-key", 8318)),
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            config = pathlib.Path(folder) / "config.json"
+            for data, expected in configs:
+                config.write_text(json.dumps(data))
+                self.assertEqual(load_local_key(config), expected)
+            for data in ({"api-keys": ["legacy-key"]},
+                         {"port": 8317, "api-keys": ["legacy-key"], "access": {"api-keys": []}}):
+                config.write_text(json.dumps(data))
+                with self.assertRaisesRegex(ValueError, "cannot read valid"):
+                    load_local_key(config)
+
+    def test_cut_off_stream_is_recorded_as_failure(self):
+        with patch("ops.cache_probe.urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"private")):
+            result = invoke("http://127.0.0.1:8317", "synthetic-key", {}, {})
+        self.assertEqual(result["failure"], "IncompleteRead")
+        self.assertIsNone(result["terminal"])
+        self.assertNotIn("private", json.dumps(result))
+
+    def test_malformed_tool_arguments_and_message_content_are_rejected(self):
+        terminal = {"type": "response.completed", "response": {"usage": {
+            "input_tokens": 2, "input_tokens_details": {"cached_tokens": 1}, "output_tokens": 1}}}
+        result = {"status": 200, "failure": None, "terminal": terminal}
+        for arguments in (None, [], {}, '{"step":true}'):
+            result["output"] = [{"type": "function_call", "name": "inspect_public_section",
+                                 "call_id": "call-1", "arguments": arguments}]
+            with self.assertRaises(ValueError):
+                validate_tool_result(result, 1)
+        for content in (None, {}, [None], [{"type": "output_text", "text": None}]):
+            result["output"] = [{"type": "message", "content": content}]
+            with self.assertRaises(ValueError):
+                validate_final_result(result, "CHECKSUM:abc")
+
+    def test_no_call_default_does_not_read_config_or_create_files(self):
+        with patch("ops.cache_probe.load_local_key") as key, \
+             patch("ops.cache_probe.save_progress") as save, \
+             patch("ops.cache_probe.invoke") as invoke, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run(SimpleNamespace(execute=False)), 0)
+        key.assert_not_called()
+        save.assert_not_called()
+        invoke.assert_not_called()
+
+    def test_invalid_config_does_not_expose_parser_content(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = pathlib.Path(folder) / "config.yaml"
+            config.write_text('api-keys: ["synthetic-private-value"\n')
+            with self.assertRaisesRegex(ValueError, "^cannot read valid local API configuration$"):
+                load_local_key(config)
+
+    def test_existing_output_or_overlapping_manifest_prevents_requests(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = pathlib.Path(folder) / "receipt.json"
+            output.write_text("existing receipt")
+            args = SimpleNamespace(execute=True, output=str(output), manifest=None)
+            with patch("ops.cache_probe.invoke") as invoke, self.assertRaisesRegex(ValueError, "already exists"):
+                run(args)
+            invoke.assert_not_called()
+            self.assertEqual(output.read_text(), "existing receipt")
+            output.unlink()
+            for manifest in (str(output), str(output) + ".partial"):
+                args.manifest = manifest
+                with self.assertRaisesRegex(ValueError, "must be distinct"):
+                    run(args)
+                self.assertFalse(output.exists())
+
+    def test_malformed_usage_is_rejected_and_can_be_recorded(self):
+        for response in (None, [], {"usage": None}, {"usage": {"input_tokens_details": []}}):
+            terminal = {"type": "response.completed", "response": response}
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                checked_usage(terminal)
+            record = response_record(0, 1, {"terminal": terminal, "status": 200,
+                "model": "synthetic", "ttfo_seconds": None, "first_output_event": None,
+                "latency_seconds": 1, "failure": None}, "opaque", "invalid usage")
+            self.assertEqual(record["validation_error"], "invalid usage")
+            self.assertIsNone(record["cached_tokens"])
+
+    def test_non_object_sse_event_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "invalid event shape"):
+            collect_response([b'data: []\n', b'\n'])
+
     def test_complete_probe_keeps_isolated_native_sessions_and_linked_tool_history(self):
         requests = []
 
@@ -34,7 +123,7 @@ class CacheProbeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder:
             args = SimpleNamespace(execute=True, output=str(pathlib.Path(folder) / "receipt.json"),
-                manifest=str(pathlib.Path(folder) / "ids.json"), config="unused", run_id="fixture",
+                manifest=str(pathlib.Path(folder) / "nested" / "ids.json"), config="unused", run_id="fixture",
                 model="synthetic-model", sessions=2, turns=2, context_chars=4096)
             with patch("ops.cache_probe.public_context", return_value="x" * 4096), \
                  patch("ops.cache_probe.load_local_key", return_value=("synthetic-key", 8317)), \

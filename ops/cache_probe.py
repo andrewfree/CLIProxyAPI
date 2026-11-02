@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import pathlib
@@ -103,6 +104,8 @@ def collect_response(lines):
     """Collect output items and terminal response without retaining text in records."""
     output, terminal, first_output_type = [], None, None
     for event in parse_sse(lines):
+        if not isinstance(event, dict):
+            raise ValueError("invalid event shape")
         kind = event.get("type", "")
         if first_output_type is None and is_output_event(kind):
             first_output_type = kind
@@ -124,7 +127,8 @@ def is_output_event(kind):
 def checked_usage(terminal: dict) -> tuple[int, int, int]:
     if terminal.get("type") != "response.completed":
         raise ValueError("response did not complete")
-    usage = terminal.get("response", {}).get("usage")
+    response = terminal.get("response")
+    usage = response.get("usage") if isinstance(response, dict) else None
     if not isinstance(usage, dict):
         raise ValueError("missing usage")
     details = usage.get("input_tokens_details")
@@ -148,8 +152,9 @@ def fixture_result(context: str, step: int) -> str:
 def save_progress(path: pathlib.Path, document: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".partial")
-    temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as destination:
+        destination.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
     os.replace(temporary, path)
     path.chmod(0o600)
 
@@ -157,18 +162,25 @@ def save_progress(path: pathlib.Path, document: dict) -> None:
 def load_local_key(config_path: pathlib.Path) -> tuple[str, int]:
     """Read only port and first configured API key; never render config or key."""
     try:
-        import yaml
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except ImportError:
-        raw = subprocess.check_output(
-            ["ruby", "-ryaml", "-rjson", "-e", "puts JSON.generate(YAML.load_file(ARGV[0]))", str(config_path)],
-            text=True,
-        )
-        config = json.loads(raw)
-    keys = config.get("api-keys") or []
-    if not keys or not isinstance(keys[0], str):
-        raise ValueError("config has no usable api-keys entry")
-    return keys[0], int(config.get("port", 8317))
+        try:
+            import yaml
+        except ImportError:
+            raw = subprocess.check_output(
+                ["ruby", "-ryaml", "-rjson", "-e", "puts JSON.generate(YAML.load_file(ARGV[0]))", str(config_path)],
+                text=True, stderr=subprocess.PIPE,
+            )
+            config = json.loads(raw)
+        else:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        keys = config.get("access", {}).get("api-keys", config.get("api-keys"))
+        port = config.get("server", {}).get("port", config.get("port"))
+        if not isinstance(keys, list) or not keys or not isinstance(keys[0], str) or not keys[0]:
+            raise ValueError("missing API key")
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("invalid port")
+        return keys[0], port
+    except Exception:
+        raise ValueError("cannot read valid local API configuration") from None
 
 
 def invoke(base_url: str, api_key: str, headers: dict, payload: dict):
@@ -190,6 +202,8 @@ def invoke(base_url: str, api_key: str, headers: dict, payload: dict):
                         event = json.loads(line[5:].strip())
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(event, dict):
+                        raise ValueError("invalid event shape")
                     if first_at is None and is_output_event(event.get("type", "")):
                         first_at = time.monotonic() - start
             output, terminal, first_type = collect_response(lines)
@@ -197,7 +211,7 @@ def invoke(base_url: str, api_key: str, headers: dict, payload: dict):
         status, failure = exc.code, "HTTPError"
         exc.close()
         output, terminal, first_type = [], None, None
-    except (OSError, TimeoutError, ValueError) as exc:
+    except (OSError, http.client.HTTPException, ValueError) as exc:
         failure = type(exc).__name__
         output, terminal, first_type = [], None, None
     return {
@@ -220,11 +234,13 @@ def validate_tool_result(result: dict, expected_step: int) -> tuple[dict, dict]:
     calls = [item for item in result["output"] if item.get("type") == "function_call" and item.get("name") == TOOL_NAME]
     if len(calls) != 1 or sum(item.get("type") == "function_call" for item in result["output"]) != 1:
         raise ValueError("expected exactly one tool call")
+    if not isinstance(calls[0].get("arguments"), str):
+        raise ValueError("invalid tool arguments")
     try:
         args = json.loads(calls[0]["arguments"])
     except (KeyError, json.JSONDecodeError):
         raise ValueError("invalid tool arguments") from None
-    if args != {"step": expected_step} or not calls[0].get("call_id"):
+    if not isinstance(args, dict) or type(args.get("step")) is not int or args != {"step": expected_step} or not calls[0].get("call_id"):
         raise ValueError("tool arguments did not match expected step")
     return calls[0], result["terminal"]["response"].get("usage", {})
 
@@ -235,8 +251,19 @@ def validate_final_result(result: dict, expected: str) -> dict:
     if result["terminal"] is None or result["terminal"].get("type") != "response.completed":
         raise ValueError("missing or failed final event")
     checked_usage(result["terminal"])
-    text = "".join(item.get("text", "") for item in result["output"] if item.get("type") == "message"
-                   for item in item.get("content", []) if item.get("type") == "output_text")
+    fragments = []
+    for item in result["output"]:
+        if item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list) or any(not isinstance(part, dict) for part in content):
+            raise ValueError("invalid message content")
+        for part in content:
+            if part.get("type") == "output_text":
+                if not isinstance(part.get("text"), str):
+                    raise ValueError("invalid output text")
+                fragments.append(part["text"])
+    text = "".join(fragments)
     if text.strip() != expected:
         raise ValueError("final output checksum did not match")
     return result["terminal"]["response"]["usage"]
@@ -244,8 +271,11 @@ def validate_final_result(result: dict, expected: str) -> dict:
 
 def response_record(index: int, step, result: dict, nonce_hash: str, error):
     terminal = result["terminal"]
-    usage = terminal.get("response", {}).get("usage", {}) if terminal else {}
-    details = usage.get("input_tokens_details") or {}
+    response = terminal.get("response") if terminal else None
+    usage = response.get("usage") if isinstance(response, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("input_tokens_details")
+    details = details if isinstance(details, dict) else {}
     return {"session_index": index, "step": step, "status": result["status"],
         "terminal": (terminal or {}).get("type"), "model": result["model"], "run_nonce_sha256": nonce_hash,
         "input_tokens": usage.get("input_tokens"), "cached_tokens": details.get("cached_tokens"),
@@ -261,6 +291,13 @@ def run(args) -> int:
     output_path = pathlib.Path(args.output)
     if output_path.exists() or output_path.with_name(output_path.name + ".partial").exists():
         raise ValueError("output already exists; choose a fresh path")
+    if args.manifest:
+        manifest = pathlib.Path(args.manifest)
+        if manifest.resolve() in (output_path.resolve(), output_path.with_name(output_path.name + ".partial").resolve()):
+            raise ValueError("manifest and output paths must be distinct")
+        if manifest.exists():
+            raise ValueError("manifest already exists; choose a fresh path")
+        manifest.parent.mkdir(parents=True, exist_ok=True)
     context = public_context(ROOT, args.context_chars)
     if args.turns > (len(context) + 2047) // 2048:
         raise ValueError("turns exceeds the number of public fixture sections")
@@ -272,10 +309,10 @@ def run(args) -> int:
         session_id = str(uuid.uuid4())
         sessions.append({"session_id": session_id, "thread_id": session_id, "cache_key": session_id,
                          "instructions": make_instructions(run_nonce + ":session:" + str(index), context)})
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(descriptor)
     if args.manifest:
-        manifest = pathlib.Path(args.manifest)
-        if manifest.exists():
-            raise ValueError("manifest already exists; choose a fresh path")
         identities = [{k: ids[k] for k in ("session_id", "thread_id", "cache_key")} for ids in sessions]
         descriptor = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w") as destination:

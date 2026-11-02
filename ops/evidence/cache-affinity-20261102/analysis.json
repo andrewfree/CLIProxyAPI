@@ -1,0 +1,204 @@
+{
+  "experimental_units": 5,
+  "requests": 120,
+  "metrics": {
+    "pair-1-off": {
+      "uncached_warm": 214766,
+      "input_warm": 1007214,
+      "cached_warm": 792448,
+      "uncached_all": 411478,
+      "latency_sum": 70.01051662489772,
+      "ttfo_sum": 63.90172008506488,
+      "latency_median": 2.715586270962376,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 15.064453125
+    },
+    "pair-1-on": {
+      "uncached_warm": 15174,
+      "input_warm": 1007174,
+      "cached_warm": 992000,
+      "uncached_all": 211878,
+      "latency_sum": 43.436633874778636,
+      "ttfo_sum": 37.48682670900598,
+      "latency_median": 3.3102544169523753,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 12.95556640625
+    },
+    "pair-2-on": {
+      "uncached_warm": 15194,
+      "input_warm": 1007194,
+      "cached_warm": 992000,
+      "uncached_all": 211902,
+      "latency_sum": 31.223718207795173,
+      "ttfo_sum": 25.664702667156234,
+      "latency_median": 2.5329282914754003,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 12.70703125
+    },
+    "pair-2-off": {
+      "uncached_warm": 15194,
+      "input_warm": 1007194,
+      "cached_warm": 992000,
+      "uncached_all": 211902,
+      "latency_sum": 35.51210383523721,
+      "ttfo_sum": 28.246226043906063,
+      "latency_median": 2.395811250549741,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 12.678955078125
+    },
+    "pair-3-off": {
+      "uncached_warm": 15244,
+      "input_warm": 1007244,
+      "cached_warm": 992000,
+      "uncached_all": 211962,
+      "latency_sum": 38.79954407981131,
+      "ttfo_sum": 32.990888500004075,
+      "latency_median": 2.664262624515686,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 15.19873046875
+    },
+    "pair-3-on": {
+      "uncached_warm": 15274,
+      "input_warm": 1007274,
+      "cached_warm": 992000,
+      "uncached_all": 211998,
+      "latency_sum": 31.144744374672882,
+      "ttfo_sum": 25.43131799902767,
+      "latency_median": 2.2446189374895766,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 16.25830078125
+    },
+    "pair-4-on": {
+      "uncached_warm": 211290,
+      "input_warm": 1007194,
+      "cached_warm": 795904,
+      "uncached_all": 407998,
+      "latency_sum": 63.605191415175796,
+      "ttfo_sum": 55.67502612597309,
+      "latency_median": 3.012253499997314,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 14.125244140625
+    },
+    "pair-4-off": {
+      "uncached_warm": 15224,
+      "input_warm": 1007224,
+      "cached_warm": 992000,
+      "uncached_all": 211938,
+      "latency_sum": 27.497385042137466,
+      "ttfo_sum": 22.373368456959724,
+      "latency_median": 2.1799794579856098,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 13.399169921875
+    },
+    "pair-5-off": {
+      "uncached_warm": 15224,
+      "input_warm": 1007224,
+      "cached_warm": 992000,
+      "uncached_all": 211938,
+      "latency_sum": 30.031949790893123,
+      "ttfo_sum": 23.502169040730223,
+      "latency_median": 2.402591187506914,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 13.68359375
+    },
+    "pair-5-on": {
+      "uncached_warm": 213604,
+      "input_warm": 1007204,
+      "cached_warm": 793600,
+      "uncached_all": 410314,
+      "latency_sum": 62.894217876018956,
+      "ttfo_sum": 55.765418709022924,
+      "latency_median": 2.4178135829861276,
+      "warm_requests": 10,
+      "all_requests": 12,
+      "load_mean": 12.716552734375
+    }
+  },
+  "pairs": [
+    {
+      "pair": 1,
+      "off_uncached": 214766,
+      "on_uncached": 15174,
+      "cache_absolute_reduction": 199592,
+      "cache_relative_reduction": 0.9293463583621243,
+      "latency_relative_reduction": 0.3795698708023626,
+      "off_latency_seconds": 70.01051662489772,
+      "on_latency_seconds": 43.436633874778636,
+      "load_relative_difference": 0.13999092441332814
+    },
+    {
+      "pair": 2,
+      "off_uncached": 15194,
+      "on_uncached": 15194,
+      "cache_absolute_reduction": 0,
+      "cache_relative_reduction": 0.0,
+      "latency_relative_reduction": 0.12075842218018207,
+      "off_latency_seconds": 35.51210383523721,
+      "on_latency_seconds": 31.223718207795173,
+      "load_relative_difference": 0.0022143916199718868
+    },
+    {
+      "pair": 3,
+      "off_uncached": 15244,
+      "on_uncached": 15274,
+      "cache_absolute_reduction": -30,
+      "cache_relative_reduction": -0.001967987404880578,
+      "latency_relative_reduction": 0.1972909704658482,
+      "off_latency_seconds": 38.79954407981131,
+      "on_latency_seconds": 31.144744374672882,
+      "load_relative_difference": 0.06971439586211328
+    },
+    {
+      "pair": 4,
+      "off_uncached": 15224,
+      "on_uncached": 211290,
+      "cache_absolute_reduction": -196066,
+      "cache_relative_reduction": -12.87874408828166,
+      "latency_relative_reduction": -1.3131360061222588,
+      "off_latency_seconds": 27.497385042137466,
+      "on_latency_seconds": 63.605191415175796,
+      "load_relative_difference": 0.05418799992711769
+    },
+    {
+      "pair": 5,
+      "off_uncached": 15224,
+      "on_uncached": 213604,
+      "cache_absolute_reduction": -198380,
+      "cache_relative_reduction": -13.030740935365213,
+      "latency_relative_reduction": -1.094243574391263,
+      "off_latency_seconds": 30.031949790893123,
+      "on_latency_seconds": 62.894217876018956,
+      "load_relative_difference": 0.0706715672280902
+    }
+  ],
+  "cache_median_relative_reduction": -0.001967987404880578,
+  "cache_median_absolute_reduction": -30,
+  "cache_improving_pairs": 1,
+  "latency_median_relative_reduction": 0.12075842218018207,
+  "latency_improving_pairs": 3,
+  "median_pair_load_difference": 0.06971439586211328,
+  "cache_acceptance_met": false,
+  "latency_acceptance_met": false,
+  "cross_account": {
+    "first_visit_nonfirst_requests": 10,
+    "first_visit_with_cached_input": 10,
+    "changed_requests": 40,
+    "changed_with_cached_input": 39
+  },
+  "limits": [
+    "Synthetic controlled workload, not native T3 app-server acceptance",
+    "Natural current sample overlaps evaluation, is not independent baseline",
+    "Luna results not proof for Astra/Sol or other providers",
+    "Mac host busy with unrelated processes, latency conservatively qualified",
+    "No public API pricing or subscription-quota savings inference"
+  ]
+}
