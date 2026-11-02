@@ -32,6 +32,20 @@ requires `/healthz` HTTP 200. A clean verifier result is still not proof that a
 provider can generate. After an update, also run an authenticated models check,
 a real `/v1/responses` request, and the affected Codex/T3 thread.
 
+## Request logging
+
+The owner policy requires normal request logging and file logging, with a
+1,024 MB total log-directory cap. Usage aggregation stays disabled. Logs survive
+container replacement through the existing bind mount, but the size cleaner
+can remove older files. This is bounded local retention, not an archival copy.
+
+For a request-log setting change, preserve the mounted config file's inode and
+permissions, then let the config watcher reload it. No container recreation is
+needed. Confirm the container start time is unchanged and a new successful
+`HEAD /healthz` request produces a normal request-log file. Ordinary HTTP GET
+requests are skipped by the request logger. This check exercises logging
+without a model generation and does not qualify a provider or client update.
+
 ## Update boundary
 
 1. Confirm no OAuth refresh or protected T3 request is in flight.
