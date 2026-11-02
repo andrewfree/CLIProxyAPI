@@ -23,7 +23,11 @@
     "logs-max-total-size-mb": 1024,
     "usage-statistics-enabled": false,
     "quota-cooldown-max-seconds": 3600,
-    "save-cooldown-status": true
+    "save-cooldown-status": true,
+    "routing.session-affinity": true,
+    "routing.session-affinity-ttl": "1h",
+    "routing.session-affinity-subagents": false,
+    "routing.session-affinity-rebind-on": "any"
   },
   "required_mounts": [
     {

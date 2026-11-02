@@ -52,7 +52,9 @@ with open(sys.argv[1]) as source:
 fields = [
     "request-retry", "max-retry-credentials", "max-retry-interval",
     "quota-cooldown-max-seconds", "save-cooldown-status",
-    "routing.strategy", "plugins.enabled",
+    "routing.strategy", "routing.session-affinity",
+    "routing.session-affinity-ttl", "routing.session-affinity-subagents",
+    "routing.session-affinity-rebind-on", "plugins.enabled",
     "plugins.configs.auth-cursor.enabled", "usage-statistics-enabled",
     "request-log", "logging-to-file", "logs-max-total-size-mb",
 ]
@@ -73,12 +75,19 @@ def at_path(path):
     for part in path.split("."):
         value = value.get(part, missing) if isinstance(value, dict) else missing
     return value
+routing_defaults = {
+    "routing.session-affinity": False,
+    "routing.session-affinity-ttl": "",
+    "routing.session-affinity-rebind-on": "",
+}
 values = {}
 for field in fields:
     value = at_path(v8_paths.get(field, field))
     if value is missing:
         value = at_path(field)
-    values[field] = str(None if value is missing else value)
+    if value is missing:
+        value = routing_defaults.get(field)
+    values[field] = str(value)
 print(json.dumps(values))
 PY
 )

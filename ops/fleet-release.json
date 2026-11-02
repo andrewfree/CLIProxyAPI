@@ -35,5 +35,21 @@
   "runtime_policy": {
     "quota-cooldown-max-seconds": 3600,
     "save-cooldown-status": true
+  },
+  "routing_policy": {
+    "arm64": {
+      "strategy": "round-robin",
+      "session-affinity": true,
+      "session-affinity-ttl": "1h",
+      "session-affinity-subagents": false,
+      "session-affinity-rebind-on": "any"
+    },
+    "amd64": {
+      "strategy": "round-robin",
+      "session-affinity": true,
+      "session-affinity-ttl": "1h",
+      "session-affinity-subagents": false,
+      "session-affinity-rebind-on": "any"
+    }
   }
 }

@@ -171,6 +171,40 @@ class WillInstanceVerifierTests(unittest.TestCase):
             )
         return json.loads(result.stdout)
 
+    def test_will_contract_pins_all_five_routing_fields_to_release_policy(self):
+        release = json.loads((INSTANCE_DIR.parent.parent / "fleet-release.json").read_text())
+        will = {key.removeprefix("routing."): value for key, value in self.policy["required_config"].items()
+                if key.startswith("routing.")}
+        self.assertEqual(will, release["routing_policy"]["amd64"])
+
+    def test_probe_reports_disabled_affinity_defaults_when_fields_are_absent(self):
+        observed = self.probe_config({"routing": {"strategy": "round-robin"}})
+        expected = {
+            "routing.strategy": "round-robin",
+            "routing.session-affinity": "False",
+            "routing.session-affinity-ttl": "",
+            "routing.session-affinity-subagents": "None",
+            "routing.session-affinity-rebind-on": "",
+        }
+        for key, value in expected.items():
+            self.assertEqual(observed[key], value)
+
+    def test_probe_reports_enabled_affinity_and_detects_each_field_drift(self):
+        routing = {
+            "strategy": "round-robin", "session-affinity": True,
+            "session-affinity-ttl": "1h", "session-affinity-subagents": False,
+            "session-affinity-rebind-on": "any",
+        }
+        observed = self.probe_config({"routing": routing})
+        for key, value in routing.items():
+            self.assertEqual(observed[f"routing.{key}"], str(value))
+            with self.subTest(field=key):
+                observation = matching_observation()
+                observation["config"][f"routing.{key}"] = "drift"
+                self.assertIn("config_policy_drift", evaluate_observation(
+                    self.contract, self.policy, observation,
+                ))
+
     def test_probe_accepts_legacy_and_v8_quota_settings(self):
         settings = {"quota-cooldown-max-seconds": 3600, "save-cooldown-status": True}
         for config in (settings, {"routing": {"cooldown": settings}}):

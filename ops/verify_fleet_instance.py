@@ -5,6 +5,8 @@ import pathlib
 import subprocess
 import urllib.request
 
+from fleet_routing import routing_policy_matches, routing_policy_values
+
 root = pathlib.Path.cwd()
 release = json.loads((root / 'ops/fleet-release.json').read_text())
 container = json.loads(subprocess.check_output(['docker', 'inspect', 'cli-proxy-api'], text=True))[0]
@@ -38,6 +40,10 @@ observed = {
     'usage_statistics_enabled': config.get('usage-statistics-enabled'),
     'quota_cooldown_max_seconds': config.get('quota-cooldown-max-seconds'),
     'save_cooldown_status': config.get('save-cooldown-status'),
+    'routing': routing_policy_values(config),
+    'routing_policy_matches': routing_policy_matches(
+        config, release.get('routing_policy', {}).get(arch)
+    ),
     'do_not_track': 'DO_NOT_TRACK=1' in container['Config']['Env'],
     'account_counts': dict(collections.Counter(a.get('provider', 'unknown') for a in auths['files'])),
 }
@@ -55,6 +61,7 @@ expected = {
     'usage_statistics_enabled': False,
     'quota_cooldown_max_seconds': release['runtime_policy']['quota-cooldown-max-seconds'],
     'save_cooldown_status': release['runtime_policy']['save-cooldown-status'],
+    'routing_policy_matches': True,
     'do_not_track': True,
 }
 failures = [name for name, value in expected.items() if observed.get(name) != value]
