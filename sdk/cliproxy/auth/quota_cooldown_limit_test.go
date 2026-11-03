@@ -338,11 +338,11 @@ func TestQuotaCooldownLimit_RestoreExpiredWrapperPreservesIndependentFailure(t *
 	store := &recordingCooldownStateStore{load: []CooldownStateRecord{{
 		AuthID: auth.ID, Model: "missing-model", UpdatedAt: now.Add(-2 * time.Hour),
 		NextRetryAfter: quotaDeadline, LastError: &Error{HTTPStatus: 429},
-		Quota:                     QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: quotaDeadline},
+		Quota:                     QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: quotaDeadline, ObservedAt: now.Add(-2 * time.Hour), Signals: map[string]string{"usage": "new"}},
 		CredentialQuotaPropagated: true,
 		IndependentState: &ModelState{Unavailable: true, Status: StatusError,
 			NextRetryAfter: independentDeadline, LastError: &Error{HTTPStatus: 404},
-			UpdatedAt: now.Add(-3 * time.Hour)},
+			UpdatedAt: now.Add(-3 * time.Hour), Quota: QuotaState{ObservedAt: now.Add(-3 * time.Hour), Signals: map[string]string{"usage": "old"}}},
 	}}}
 	m.SetCooldownStateStore(store)
 	if err := m.RestoreCooldownStates(context.Background()); err != nil {
@@ -353,6 +353,9 @@ func TestQuotaCooldownLimit_RestoreExpiredWrapperPreservesIndependentFailure(t *
 		t.Fatal("expired credential quota discarded a live independent 404")
 	}
 	state := got.ModelStates["missing-model"]
+	if !state.Quota.ObservedAt.Equal(now.Add(-2*time.Hour)) || state.Quota.Signals["usage"] != "new" {
+		t.Fatalf("newer quota observation lost: %+v", state.Quota)
+	}
 	if state.LastError == nil || state.LastError.HTTPStatus != 404 || !state.NextRetryAfter.Equal(independentDeadline) {
 		t.Fatalf("independent failure changed: %+v", state)
 	}
