@@ -42,7 +42,11 @@ The earlier canary verified account continuity, independent child distribution, 
 
 For an affinity-only change, edit `routing.session-affinity` in place, preserving the configuration inode and all unrelated settings. Update the affected platform's manifest value and Will's owner policy when applicable. Verify the loaded configuration and mounted file with the fleet and owner verifiers, then check routing in request logs. Do not restore an old full configuration over later edits. Private backups and sanitized rollout receipts for the November 2 return to round robin are under `ops/runtime/affinity-validation-final-20261102/` on each host.
 
-T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the shared Codex pool and both Claude accounts. Selecting a fallback is manual. New sessions use the selected endpoint; an already running client keeps its launch environment. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
+T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the shared Codex and Claude pools, plus the three named Claude accounts. The shared Claude profiles are `claude_cliproxy` and `claude_cliproxy_mac`. Will's T3 has `claude_cliproxy` connected to its own loopback proxy. The native Claude entry is labeled `Claude - Direct login`.
+
+`ops/claude_account_launcher.mjs` supports explicit `shared-pool` mode through `CLIPROXY_CLAUDE_ROUTE`. This mode forwards unprefixed Claude model IDs to the existing credential selector. Named profiles keep their account prefixes. `ops/configure_claude_pool.mjs` provisions pool profiles through the running T3 settings API and stores keys in its secret store. The [routing receipt](evidence/claude-pool-routing-20261103.json) records tests, deployed artifact hashes, and runtime-check limits. This host-side integration does not change the fleet's server images or manifest.
+
+Selecting another host remains manual. New sessions use the selected endpoint; an already running client keeps its launch environment. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
 
 For exact-model discovery and an authorized T3 task, follow [the Kimi CLIProxy routing recipe](KIMI_ROUTING.md).
 

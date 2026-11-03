@@ -1,0 +1,60 @@
+{
+  "observed_utc": "2026-11-03T09:39:16Z",
+  "implementation_commit": "f0dd57e1",
+  "regression_commit": "d4b1a055",
+  "models": {
+    "initial_investigation_and_tests": "claude-opus-5-5 high",
+    "implementation_and_deployment": "gpt-6.1-sol xhigh",
+    "model_change": "Andrew approved Sol completing the task after Opus exhausted its five-hour allowance"
+  },
+  "artifacts_sha256": {
+    "ops/claude_account_launcher.mjs": "cf76c00d30478da4e600c3ac408ab03f9b2af93048411245727344664ab49d82",
+    "ops/configure_claude_pool.mjs": "57dd22a14f2e8f6210747a23e835e91f7dc79e2e5a797b8b0a3ada6920ae70c5"
+  },
+  "validation": {
+    "before_fix": { "tests": 23, "passed": 15, "failed": 8 },
+    "mac_after_fix": { "tests": 26, "passed": 26, "failed": 0 },
+    "will_after_fix": { "tests": 26, "passed": 26, "failed": 0 },
+    "command": "node --test ops/claude_account_launcher.test.mjs ops/claude_account_launcher_process.test.mjs ops/configure_claude_pool.test.mjs",
+    "compile": "go build passed with go1.27.3 darwin/arm64; task build output removed",
+    "tests_changed": "Added pool routing, model filtering, configuration preservation and lifecycle coverage. Corrected the new fixture's default-prefix and cleanup bugs so rejected configuration cannot hang the runner. Existing assertions and deadlines retained."
+  },
+  "deployments": {
+    "will": {
+      "profile": "claude_cliproxy",
+      "upstream": "http://127.0.0.1:8317",
+      "artifacts_match": true,
+      "fleet_verifier": "passed; failures empty",
+      "owner_verifier": "will.local: ok",
+      "container_id_image_start_unchanged": true,
+      "t3_pid_unchanged": true,
+      "existing_profile_configurations_preserved": true,
+      "key_stored_and_redacted": true,
+      "model_catalog_status": 200,
+      "opus_listed": true,
+      "token_count_status": 200,
+      "token_count": 11,
+      "qualified_model_rejected": 400,
+      "generation_status": 429
+    },
+    "mac": {
+      "profiles": ["claude_cliproxy", "claude_cliproxy_mac"],
+      "artifacts_match": true,
+      "fleet_verifier": "passed; failures empty",
+      "container_id_image_start_unchanged": true,
+      "t3_pid_unchanged": true,
+      "existing_profile_configurations_preserved": true,
+      "keys_stored_and_redacted": true,
+      "t3_catalog_exposes_both_pool_profiles_and_opus": true,
+      "will_primary_smoke": { "models": 200, "count_tokens": 429, "qualified_model": 400, "generation": 429 },
+      "mac_fallback_smoke": { "models": 200, "count_tokens": 200, "input_tokens": 11, "qualified_model": 400, "generation": 429 }
+    }
+  },
+  "qualification": {
+    "routing_and_deployment": "verified",
+    "fresh_generation": "blocked by upstream allowance; no successful post-fix completion is claimed",
+    "upstream_five_hour_reset_utc": "2026-11-03T13:20:00Z",
+    "pre_fix_pool_probe": "Opus obtained HTTP 200 and OK from the unprefixed pool on both hosts before quota exhaustion",
+    "affected_thread": "Selected the shared pool through thread.model-selection.set without dispatching a message or resuming simulator work"
+  }
+}
