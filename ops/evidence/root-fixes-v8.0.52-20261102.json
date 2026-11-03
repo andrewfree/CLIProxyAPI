@@ -1,0 +1,153 @@
+{
+  "at": "2026-11-03T02:37:10.172233+00:00",
+  "release": "v8.0.52-fleet.3",
+  "latest_upstream_checked": "v8.0.52",
+  "source_commit": "53ff3c26a440e9b35eefdfae4868a9106b223ce5",
+  "tested_metadata_commit": "d88567d156a925b4b3d11af57527e2ec6313fb89",
+  "hosts": {
+    "mac": {
+      "image": "sha256:3615ac678a7b9b3e428d6dfd03e56d019b71a944df34d498012dbf6f4365ecaf",
+      "version": "v8.0.52-fleet.3",
+      "source_commit": "53ff3c26a440e9b35eefdfae4868a9106b223ce5",
+      "fleet_failures": [],
+      "generation": {
+        "endpoint": "http://127.0.0.1:8317",
+        "model": "gpt-6-luna",
+        "http_status": 200,
+        "completed": true,
+        "response_matches": true
+      },
+      "preservation": {
+        "image": true,
+        "health": true,
+        "config_sha256": true,
+        "auth_directory_inode": true,
+        "mounts": true,
+        "ports": true,
+        "restart_policy": true,
+        "unrelated_containers": true
+      }
+    },
+    "will": {
+      "image": "sha256:318107e9333148eac12889eacf8b1db5e1fc184f39869500377d25e243684168",
+      "version": "v8.0.52-fleet.3",
+      "source_commit": "53ff3c26a440e9b35eefdfae4868a9106b223ce5",
+      "fleet_failures": [],
+      "generation": {
+        "endpoint": "http://100.98.74.67:8317",
+        "model": "gpt-6-luna",
+        "http_status": 200,
+        "completed": true,
+        "response_matches": true
+      },
+      "preservation": {
+        "image": true,
+        "health": true,
+        "config_sha256": true,
+        "auth_directory_inode": true,
+        "mounts": true,
+        "ports": true,
+        "restart_policy": true,
+        "unrelated_containers": false
+      }
+    }
+  },
+  "fixes": [
+    "Preserve uncapped trusted retry metadata and apply the one-minute hint policy to final outgoing client headers",
+    "Cancel upstream HTTP context before writing local interrupt acknowledgement",
+    "Explicit CI container resolver policy validated, transmitted and recorded without hosts-file injection"
+  ],
+  "validation": {
+    "go_packages": 103,
+    "go_build": "passed",
+    "home_close_repetitions": 20,
+    "python_ops_tests": 84,
+    "local_ci_tool_tests": 114,
+    "local_ci": {
+      "verdict": "pass",
+      "partial": false,
+      "runner_dns": [
+        "205.171.3.65"
+      ],
+      "jobs": [
+        {
+          "workflow": "pr-test-build",
+          "job_id": "build",
+          "result": "success"
+        },
+        {
+          "workflow": "translator-path-guard",
+          "job_id": "ensure-no-translator-changes",
+          "result": "success"
+        }
+      ]
+    }
+  },
+  "test_changes": [
+    "Added interrupt acknowledgement backpressure and retry boundary regressions",
+    "Restored four auth test files exactly to upstream v8.0.52",
+    "Retained intentional HTTP issue7017 test expectation for fleet one-minute policy",
+    "Retained cancellation-observation channel to remove scheduling race",
+    "Changed Home close-order fixture to numeric loopback to bypass unrelated go-redis constructor DNS without loosening timeout",
+    "Updated independent deployment image expectations"
+  ],
+  "remaining_workaround": "The HTTP Retry-After expectation remains an intentional upstream test policy adaptation. CI uses a valid ISP resolver to avoid gateway EDNS corruption; gateway implementation remains unfixed.",
+  "ci_tool": {
+    "at": "2026-11-03T02:25:43.379574+00:00",
+    "source_commit": "b3d681fd3c8fd0702528a85705b95a2f4e098f53",
+    "install": "/Users/rever/.local/share/local-ci/versions/b3d681fd3c8fd0702528a85705b95a2f4e098f53",
+    "script_sha256": "755f8193860483d1b6de65e5f709ab2264535c879223c9d1f5e4ec60e8547cf1",
+    "previous_launcher_sha256": "0f48d051a10b28eb6a219584a858b06b074a68bd674e8b947d60a4f98f8ffc24",
+    "launcher_sha256": "1b7559e3234718ce89cec08635c23dd193a8cc7e25223c759f843100854764a6",
+    "config": "/Users/rever/.config/local-ci/runner.json",
+    "runner_dns": [
+      "205.171.3.65"
+    ],
+    "tests": "114 passed"
+  },
+  "review": {
+    "provider": "OpenAI Codex",
+    "judgment": "GPT-6 Astra",
+    "bounded_ci_design": "GPT-6 Luna",
+    "opus": "Earlier rate-limit dropout; user selected OpenAI swarm; no alternate account"
+  },
+  "preserved": [
+    "OAuth directories and configuration hashes",
+    "Kimi fallback",
+    "one-hour quota cooldown cap",
+    "round-robin with affinity disabled",
+    "Cursor 2.1.1",
+    "disabled telemetry",
+    "production DNS inherited unchanged"
+  ],
+  "limitations": [
+    "Seven short-lived Will containers disappeared between backup and verification: two CI containers and five research helpers. Deployment targeted only cli-proxy-api; helper termination timing not established.",
+    "PiSec retains pre-existing unrelated CodeOne wall page host_projects_drift.",
+    "Native T3 smoke was not repeated; both new binaries passed authenticated streamed generation through existing endpoints.",
+    "local-ci durable controller configuration installed on M5; existing Will standalone launcher remains unchanged. Remote runs invoked by M5 upload the new content-hashed runner."
+  ],
+  "rollback": {
+    "mac": "/Users/rever/cliproxy/ops/runtime/workaround-fixes-20261102/backup-20261103T022733Z",
+    "will": "/home/andrew/cliproxy/releases/v8.0.52-fleet.3/backup-20261103T022733Z"
+  },
+  "runtime": {
+    "mac": {
+      "image": "sha256:3615ac678a7b9b3e428d6dfd03e56d019b71a944df34d498012dbf6f4365ecaf",
+      "health": "healthy",
+      "dns": null,
+      "started": "2026-11-03T02:34:29.392829968Z"
+    },
+    "will": {
+      "image": "sha256:318107e9333148eac12889eacf8b1db5e1fc184f39869500377d25e243684168",
+      "health": "healthy",
+      "dns": null,
+      "started": "2026-11-03T02:31:48.602825024Z"
+    },
+    "at": "2026-11-03T02:36:20.289636+00:00"
+  },
+  "private_receipts": "/Users/rever/cliproxy/ops/runtime/workaround-fixes-20261102",
+  "principles": {
+    "Boundary Discipline": "Moved client wait policy out of trusted scheduling metadata and onto outgoing headers.",
+    "Prove It Works": "Recorded failing behavior, passing regressions, full CI and live image, policy and generation checks."
+  }
+}
