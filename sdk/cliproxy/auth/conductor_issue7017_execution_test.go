@@ -115,8 +115,8 @@ func TestIssue7017ExecuteSingleCredentialTerminalRetryAfter(t *testing.T) {
 	if errExecute == nil {
 		t.Fatal("expected terminal 429")
 	}
-	if got := SafeResponseHeaders(errExecute).Get("Retry-After"); got != "256" {
-		t.Fatalf("terminal Retry-After = %q, want 256 (err=%v)", got, errExecute)
+	if got := SafeResponseHeaders(errExecute).Get("Retry-After"); got != "" {
+		t.Fatalf("terminal Retry-After = %q, want no client wait above one minute (err=%v)", got, errExecute)
 	}
 	if calls := executor.callIDs(); len(calls) != 1 {
 		t.Fatalf("calls = %v, want exactly one upstream attempt", calls)
@@ -127,14 +127,13 @@ func TestIssue7017ExecuteSingleCredentialTerminalRetryAfter(t *testing.T) {
 		t.Fatalf("model state must cool without quota, got %+v", state)
 	}
 
-	// A follow-up request inside the deadline advertises the locally computed
-	// remaining time, not the stale raw upstream header value.
+	// The stored deadline still blocks follow-up traffic when its client hint is omitted.
 	_, errFollowUp := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-6.1-sol"}, cliproxyexecutor.Options{})
 	if errFollowUp == nil {
 		t.Fatal("expected follow-up rejection while cooling")
 	}
-	if gotRetry := SafeResponseHeaders(errFollowUp).Get("Retry-After"); gotRetry == "" {
-		t.Fatalf("follow-up must carry a trusted Retry-After (err=%v)", errFollowUp)
+	if gotRetry := SafeResponseHeaders(errFollowUp).Get("Retry-After"); gotRetry != "" {
+		t.Fatalf("follow-up must omit a client wait above one minute (err=%v)", errFollowUp)
 	}
 	if calls := executor.callIDs(); len(calls) != 1 {
 		t.Fatalf("cooling follow-up must not reach upstream, calls=%v", calls)
@@ -153,8 +152,8 @@ func TestIssue7017ExecuteStreamMultiCredentialFailsOver(t *testing.T) {
 	if len(calls) != 2 || calls[0] == calls[1] {
 		t.Fatalf("stream must fail over to the second credential, calls=%v", calls)
 	}
-	if got := SafeResponseHeaders(errStream).Get("Retry-After"); got != "256" {
-		t.Fatalf("stream terminal Retry-After = %q, want 256 (err=%v)", got, errStream)
+	if got := SafeResponseHeaders(errStream).Get("Retry-After"); got != "" {
+		t.Fatalf("stream terminal Retry-After = %q, want no client wait above one minute (err=%v)", got, errStream)
 	}
 	for _, id := range []string{"turn-a", "turn-b"} {
 		got, _ := manager.GetByID(id)

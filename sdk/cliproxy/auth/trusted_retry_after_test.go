@@ -20,10 +20,10 @@ func TestTrustedRetryAfterErrorIdentityAndHeaders(t *testing.T) {
 	if !errors.As(err, &base) || base != cause {
 		t.Fatalf("wrapped error must resolve to the original *Error")
 	}
-	if got := SafeResponseHeaders(err).Get("Retry-After"); got != "256" {
-		t.Fatalf("trusted Retry-After = %q, want 256", got)
+	if got := SafeResponseHeaders(err).Get("Retry-After"); got != "" {
+		t.Fatalf("trusted Retry-After = %q, want no client wait above one minute", got)
 	}
-	if got := SafeResponseHeaders(fmt.Errorf("outer: %w", err)).Get("Retry-After"); got != "256" {
+	if got := SafeResponseHeaders(fmt.Errorf("outer: %w", err)).Get("Retry-After"); got != "" {
 		t.Fatalf("trusted Retry-After must survive wrapping, got %q", got)
 	}
 	got := retryAfterFromError(err)
@@ -49,8 +49,8 @@ func TestTrustedRetryAfterPreservesUpstreamHeaders(t *testing.T) {
 	if got := carrier.Headers().Get("X-Request-Id"); got != "req-1" {
 		t.Fatalf("X-Request-Id = %q, want req-1", got)
 	}
-	if got := SafeResponseHeaders(err).Get("Retry-After"); got != "256" {
-		t.Fatalf("trusted Retry-After = %q, want 256", got)
+	if got := SafeResponseHeaders(err).Get("Retry-After"); got != "" {
+		t.Fatalf("trusted Retry-After = %q, want no client wait above one minute", got)
 	}
 }
 

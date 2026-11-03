@@ -38,8 +38,8 @@ func TestIssue7017TrustedRetryAfterWinsOverPassthroughAddon(t *testing.T) {
 		Addon:      http.Header{"Retry-After": {"30"}, "X-Request-Id": {"req-1"}},
 	})
 
-	if got := recorder.Header().Get("Retry-After"); got != "256" {
-		t.Fatalf("trusted Retry-After must win over passthrough, got %q want 256", got)
+	if got := recorder.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("trusted Retry-After must win over passthrough, got %q want no client wait above one minute", got)
 	}
 	if got := recorder.Header().Get("X-Request-Id"); got != "req-1" {
 		t.Fatalf("other passthrough headers must still apply, got %q", got)
