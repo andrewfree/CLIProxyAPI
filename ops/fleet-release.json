@@ -1,8 +1,8 @@
 {
-  "version": "v8.0.52-fleet.1",
+  "version": "v8.0.52-fleet.2",
   "upstream": "v8.0.52",
-  "source_commit": "25e976a1ce93cde5c0e800ca6b93b55522c1037b",
-  "image_tag": "cliproxy-fleet:v8.0.52-fleet.1",
+  "source_commit": "6cc4c2ce09963d5dea8e7ca5c7ef948c7e3afd6c",
+  "image_tag": "cliproxy-fleet:v8.0.52-fleet.2",
   "primary": {
     "host": "will.local",
     "address": "100.98.74.67",
@@ -29,8 +29,8 @@
     }
   },
   "images": {
-    "arm64": "sha256:de9dc9a15e349d50f31d3d59f5d227d013060a205684de16eb567e71623b3fef",
-    "amd64": "sha256:fe9d7be4061cb05ea44e6198f65cbdc3dbe6b23d1d30abe701219f8349dfd52a"
+    "arm64": "sha256:9ecc0f8d67e4c39732695152ef421e7e730a70709c0baaaa8739015a062450a7",
+    "amd64": "sha256:17bccfe8912daf3fa2fe7add8a8fd0f50b0bf751db2bbf17ae1b05ac982b2cd5"
   },
   "runtime_policy": {
     "quota-cooldown-max-seconds": 3600,
