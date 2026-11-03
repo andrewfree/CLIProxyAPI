@@ -6,11 +6,41 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
+
+func (s *Service) currentConfig() *config.Config {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	return cfg
+}
+
+func (s *Service) currentWatcher() *WatcherWrapper {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	w := s.watcher
+	s.cfgMu.RUnlock()
+	return w
+}
+
+func (s *Service) setWatcher(w *WatcherWrapper) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.Lock()
+	s.watcher = w
+	s.cfgMu.Unlock()
+}
 
 func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
@@ -126,6 +156,9 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		log.WithError(errValidate).Warn("rejected invalid model catalog sources")
 		return configCommit{}
 	}
+	// Clone before assigning the generation: callers may still hold the input snapshot.
+	newCfg = newCfg.CloneForRuntime()
+	helps.AdvanceProxyPoolGeneration(s.proxyPoolPublisher, newCfg)
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
@@ -255,10 +288,11 @@ func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Co
 }
 
 func (s *Service) reloadConfigFromWatcher() bool {
-	if s == nil || s.watcher == nil {
+	w := s.currentWatcher()
+	if w == nil {
 		return false
 	}
-	return s.watcher.ReloadConfigIfChanged()
+	return w.ReloadConfigIfChanged()
 }
 
 func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Config) {
@@ -314,7 +348,7 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.SaveCooldownStatus = false
-	cfg.WebsocketAuth = false
+	cfg.WebsocketAuth = true
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
 	cfg.Plugins.StoreAuth = nil
