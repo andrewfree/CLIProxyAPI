@@ -327,3 +327,73 @@ func TestQuotaCooldownLimit_ReloadPreservesAuthFailureWithModelState(t *testing.
 		t.Fatal("recomputing model aggregate discarded the separate auth failure")
 	}
 }
+
+func TestQuotaCooldownLimit_RestoreExpiredWrapperPreservesIndependentFailure(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m, auth := newCooldownMonotonicManager(t, "missing-model")
+	m.SetConfig(&internalconfig.Config{QuotaCooldownMaxSeconds: 3600, SaveCooldownStatus: true})
+	now := time.Now()
+	independentDeadline := now.Add(10 * time.Hour)
+	quotaDeadline := now.Add(5 * 24 * time.Hour)
+	store := &recordingCooldownStateStore{load: []CooldownStateRecord{{
+		AuthID: auth.ID, Model: "missing-model", UpdatedAt: now.Add(-2 * time.Hour),
+		NextRetryAfter: quotaDeadline, LastError: &Error{HTTPStatus: 429},
+		Quota:                     QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: quotaDeadline},
+		CredentialQuotaPropagated: true,
+		IndependentState: &ModelState{Unavailable: true, Status: StatusError,
+			NextRetryAfter: independentDeadline, LastError: &Error{HTTPStatus: 404},
+			UpdatedAt: now.Add(-3 * time.Hour)},
+	}}}
+	m.SetCooldownStateStore(store)
+	if err := m.RestoreCooldownStates(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := m.GetByID(auth.ID)
+	if blocked, _, _ := isAuthBlockedForModel(got, "missing-model", now); !blocked {
+		t.Fatal("expired credential quota discarded a live independent 404")
+	}
+	state := got.ModelStates["missing-model"]
+	if state.LastError == nil || state.LastError.HTTPStatus != 404 || !state.NextRetryAfter.Equal(independentDeadline) {
+		t.Fatalf("independent failure changed: %+v", state)
+	}
+}
+
+func TestQuotaCooldownLimit_BoundsIndependentQuotaAcrossRestoreAndReload(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for _, reload := range []bool{false, true} {
+		t.Run(map[bool]string{false: "restore", true: "reload"}[reload], func(t *testing.T) {
+			m, auth := newCooldownMonotonicManager(t, "quota-model")
+			cfg := &internalconfig.Config{QuotaCooldownMaxSeconds: 3600, SaveCooldownStatus: true}
+			if !reload {
+				m.SetConfig(cfg)
+			}
+			now := time.Now()
+			shadowTime := now.Add(-30 * time.Minute)
+			deadline := now.Add(5 * 24 * time.Hour)
+			store := &recordingCooldownStateStore{load: []CooldownStateRecord{{
+				AuthID: auth.ID, Model: "quota-model", UpdatedAt: now,
+				NextRetryAfter: deadline, LastError: &Error{HTTPStatus: 429},
+				Quota:                     QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: deadline},
+				CredentialQuotaPropagated: true,
+				IndependentState: &ModelState{Unavailable: true, Status: StatusError,
+					NextRetryAfter: deadline, LastError: &Error{HTTPStatus: 429}, UpdatedAt: shadowTime,
+					Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline}},
+			}}}
+			m.SetCooldownStateStore(store)
+			if err := m.RestoreCooldownStates(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if reload {
+				m.SetConfig(cfg)
+			}
+			got, _ := m.GetByID(auth.ID)
+			shadow := got.ModelStates["quota-model"].credentialQuotaShadow
+			if shadow == nil || !shadow.NextRetryAfter.Equal(shadowTime.Add(time.Hour)) {
+				t.Fatalf("independent quota did not keep its original bounded deadline: %+v", shadow)
+			}
+			if blocked, _, _ := isAuthBlockedForModel(got, "quota-model", now.Add(2*time.Hour)); blocked {
+				t.Fatal("expired independent quota still blocked the model")
+			}
+		})
+	}
+}

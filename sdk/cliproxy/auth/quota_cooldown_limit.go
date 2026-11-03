@@ -52,6 +52,42 @@ func limitQuotaState(quota *QuotaState, nextRetry *time.Time, lastErr *Error, up
 	return true
 }
 
+func limitModelQuotaState(state *ModelState, updatedAt, now time.Time, limit time.Duration) bool {
+	if state == nil || state.Status == StatusDisabled || limit <= 0 {
+		return false
+	}
+	shadow := state.credentialQuotaShadow
+	changed := false
+	if shadow != nil && shadow.Status != StatusDisabled {
+		changed = limitQuotaState(&shadow.Quota, &shadow.NextRetryAfter, shadow.LastError, shadow.UpdatedAt, now, limit)
+	}
+	if limitQuotaState(&state.Quota, &state.NextRetryAfter, state.LastError, updatedAt, now, limit) {
+		changed = true
+	}
+	wrappedQuota := state.Quota.Exceeded && (state.Quota.Reason == "quota" || state.Quota.Reason == "credential_quota") &&
+		(state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota")
+	if shadow == nil || !wrappedQuota {
+		return changed
+	}
+	if !state.Quota.NextRecoverAt.After(now) {
+		if isModelStateActiveCooldown(shadow, now) {
+			*state = *shadow.cloneShallow()
+		} else {
+			resetModelState(state, now)
+		}
+		return true
+	}
+	next := state.Quota.NextRecoverAt
+	if isModelStateActiveCooldown(shadow, now) && shadow.NextRetryAfter.After(next) {
+		next = shadow.NextRetryAfter
+	}
+	if !state.NextRetryAfter.Equal(next) {
+		state.NextRetryAfter = next
+		changed = true
+	}
+	return changed
+}
+
 func (m *Manager) limitExistingQuotaCooldowns(cfg *internalconfig.Config) bool {
 	limit := quotaCooldownLimit(cfg)
 	if limit == 0 {
@@ -76,7 +112,7 @@ func (m *Manager) limitExistingQuotaCooldowns(cfg *internalconfig.Config) bool {
 			if state.Quota.Reason == "credential_quota" && auth.UpdatedAt.After(updatedAt) {
 				updatedAt = auth.UpdatedAt
 			}
-			if limitQuotaState(&state.Quota, &state.NextRetryAfter, state.LastError, updatedAt, now, limit) {
+			if limitModelQuotaState(state, updatedAt, now, limit) {
 				changed = true
 			}
 		}

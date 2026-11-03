@@ -386,7 +386,24 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		quota.NextRecoverAt = record.NextRetryAfter
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	limitQuotaState(&quota, &record.NextRetryAfter, record.LastError, updatedAt, now, quotaCooldownLimit(cfg))
+	limit := quotaCooldownLimit(cfg)
+	if model == "" {
+		limitQuotaState(&quota, &record.NextRetryAfter, record.LastError, updatedAt, now, limit)
+	} else {
+		prepared := &ModelState{
+			Unavailable: true, Status: StatusError, StatusMessage: reason,
+			NextRetryAfter: record.NextRetryAfter, Quota: quota,
+			LastError: cloneError(record.LastError), UpdatedAt: updatedAt,
+			credentialQuotaShadow:     record.IndependentState.cloneShallow(),
+			credentialQuotaPropagated: record.CredentialQuotaPropagated,
+		}
+		if limitModelQuotaState(prepared, updatedAt, now, limit) {
+			quota, updatedAt, reason = prepared.Quota, prepared.UpdatedAt, prepared.StatusMessage
+			record.NextRetryAfter, record.LastError = prepared.NextRetryAfter, prepared.LastError
+			record.IndependentState = prepared.credentialQuotaShadow
+			record.CredentialQuotaPropagated = prepared.credentialQuotaPropagated
+		}
+	}
 	if !record.NextRetryAfter.After(now) {
 		return false
 	}
