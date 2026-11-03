@@ -1,0 +1,99 @@
+{
+  "purpose": "Verify refresh-token retention for the third Claude account on both CLIProxy hosts",
+  "model": "gpt-6.1-sol",
+  "source_commit": "53ff3c26a440e9b35eefdfae4868a9106b223ce5",
+  "scope": {
+    "credential": "New Claude Pro subscription",
+    "refresh_requests_per_host": 1,
+    "oauth_grants_created_independently": true,
+    "inference_test_run": false,
+    "restart_test_run": false,
+    "publication_performed": false,
+    "raw_credentials_in_receipt": false,
+    "go_source_or_tests_changed": false,
+    "older_mac_file_permissions_corrected": 2
+  },
+  "hosts": {
+    "will": {
+      "verified_at": "2026-11-03T07:51:50.406298+00:00",
+      "provider": "claude",
+      "claude_accounts": 3,
+      "new_status": "active",
+      "new_disabled": false,
+      "new_unavailable": false,
+      "refresh_http_status": 200,
+      "refresh_ok": true,
+      "access_token_rotated_and_persisted": true,
+      "refresh_token_rotated_and_persisted": true,
+      "last_refresh_advanced": true,
+      "runtime_renewal_verified": true,
+      "runtime_requires_sign_in": false,
+      "runtime_last_refresh": "2026-11-03T15:51:49.996809757+08:00",
+      "disk_last_refresh": "2026-11-03T15:51:49+08:00",
+      "file_permissions": "0o600",
+      "auth_bind_mount_writable": true,
+      "container_restart_policy": "always",
+      "container_started_at": "2026-11-03T02:31:48.602825024Z",
+      "container_not_restarted": true,
+      "health_http_status": 200,
+      "upstream_usage_status_after_refresh": 200,
+      "existing_accounts_preserved": true,
+      "source_commit": "53ff3c26a440e9b35eefdfae4868a9106b223ce5",
+      "inference_test_run": false,
+      "all_claude_refresh_tokens_present": true,
+      "all_claude_file_permissions": "0o600"
+    },
+    "mac": {
+      "verified_at": "2026-11-03T07:52:06.012109+00:00",
+      "provider": "claude",
+      "claude_accounts": 3,
+      "new_status": "active",
+      "new_disabled": false,
+      "new_unavailable": false,
+      "refresh_http_status": 200,
+      "refresh_ok": true,
+      "access_token_rotated_and_persisted": true,
+      "refresh_token_rotated_and_persisted": true,
+      "last_refresh_advanced": true,
+      "runtime_renewal_verified": true,
+      "runtime_requires_sign_in": false,
+      "runtime_last_refresh": "2026-11-03T15:52:05.692167839+08:00",
+      "disk_last_refresh": "2026-11-03T15:52:05+08:00",
+      "file_permissions": "0o600",
+      "auth_bind_mount_writable": true,
+      "container_restart_policy": "always",
+      "container_started_at": "2026-11-03T07:32:53.253539667Z",
+      "container_not_restarted": true,
+      "health_http_status": 200,
+      "upstream_usage_status_after_refresh": 200,
+      "existing_accounts_preserved": true,
+      "source_commit": "53ff3c26a440e9b35eefdfae4868a9106b223ce5",
+      "inference_test_run": false,
+      "all_claude_refresh_tokens_present": true,
+      "all_claude_file_permissions": "0o600"
+    }
+  },
+  "source_verification": {
+    "startup_load_and_auto_refresh": "sdk/cliproxy/service_lifecycle.go",
+    "claude_refresh_lead": "sdk/auth/claude.go",
+    "refresh_provider_registration": "sdk/auth/refresh_registry.go",
+    "rotated_tokens_and_last_refresh": "internal/runtime/executor/claude_executor_auth.go",
+    "refresh_persistence": "sdk/cliproxy/auth/conductor_refresh.go",
+    "file_token_store": "sdk/auth/filestore.go"
+  },
+  "validation": {
+    "focused_tests": {
+      "command": "go test ./internal/auth/claude ./sdk/auth -run 'Test(RefreshTokens_DeduplicatesConcurrentRefresh|RefreshTokensUsesNative220ControlPlaneShape|UpdateTokenStoragePreservesAccountWhenRefreshOmitsIt|FileTokenStoreSaveReadModifyWritePreservesSIWC|FileTokenStoreNormalizesLegacyCredentialMetadata)$' -count=1",
+      "exit_code": 0,
+      "packages_passed": [
+        "internal/auth/claude",
+        "sdk/auth"
+      ]
+    },
+    "server_build": {
+      "command": "go build -o ops/runtime/new-claude-pro-20261103/compile-check ./cmd/server",
+      "exit_code": 0,
+      "temporary_binary_removed": true
+    }
+  }
+}
