@@ -575,6 +575,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 				c.Writer.Header().Add(key, value)
 			}
 		}
+		handlers.FilterClientRetryAfterHeaders(c.Writer.Header(), time.Now())
 		body := bytes.Clone(msg.Body)
 		if clienterror.IsClaudeThreadNotFound(status, errors.New(string(body))) {
 			if markedBody, errMarshal := json.Marshal(h.toClaudeError(&interfaces.ErrorMessage{
@@ -614,6 +615,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
+	handlers.FilterClientRetryAfterHeaders(c.Writer.Header(), time.Now())
 	body, err := json.Marshal(h.toClaudeError(msg))
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)

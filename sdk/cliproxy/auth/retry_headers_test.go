@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestSafeResponseHeadersBoundClientWaits(t *testing.T) {
+func TestSafeResponseHeadersPreserveInternalDeadlines(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name string
@@ -19,8 +19,8 @@ func TestSafeResponseHeadersBoundClientWaits(t *testing.T) {
 		{"zero", 0, ""},
 		{"fractional", time.Millisecond, "1"},
 		{"one minute", time.Minute, "60"},
-		{"over one minute", time.Minute + time.Nanosecond, ""},
-		{"multi day", 384882 * time.Second, ""},
+		{"over one minute", time.Minute + time.Nanosecond, "61"},
+		{"multi day", 384882 * time.Second, "384882"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now()
@@ -55,20 +55,20 @@ func TestSafeResponseHeadersBoundClientWaits(t *testing.T) {
 	}
 }
 
-func TestTrustedRetryAfterBoundsClientHintWithoutChangingInternalDeadline(t *testing.T) {
+func TestTrustedRetryAfterPreservesInternalDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		hint time.Duration
 		want string
 	}{
 		{"short", 30 * time.Second, "30"},
-		{"long", 256 * time.Second, ""},
-		{"multi day", 5 * 24 * time.Hour, ""},
+		{"long", 256 * time.Second, "256"},
+		{"multi day", 5 * 24 * time.Hour, "432000"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := withTrustedRetryAfter(&Error{HTTPStatus: http.StatusTooManyRequests}, &tc.hint)
 			if got := SafeResponseHeaders(err).Get("Retry-After"); got != tc.want {
-				t.Fatalf("client Retry-After = %q, want %q", got, tc.want)
+				t.Fatalf("trusted Retry-After = %q, want %q", got, tc.want)
 			}
 			remaining := retryAfterFromError(err)
 			if remaining == nil || *remaining > tc.hint || *remaining < tc.hint-time.Second {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -145,6 +146,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		}
 	}
 
+	FilterClientRetryAfterHeaders(c.Writer.Header(), time.Now())
 	errText := http.StatusText(status)
 	if msg != nil && msg.Error != nil {
 		if v := strings.TrimSpace(msg.Error.Error()); v != "" {
@@ -191,6 +193,7 @@ func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorM
 			c.Writer.Header().Add(key, value)
 		}
 	}
+	FilterClientRetryAfterHeaders(c.Writer.Header(), time.Now())
 	body := bytes.Clone(msg.Body)
 	appendAPIResponse(c, body)
 	if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {

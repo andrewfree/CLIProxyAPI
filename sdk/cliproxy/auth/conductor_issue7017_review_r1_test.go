@@ -65,8 +65,8 @@ func TestIssue7017ExecuteMarkedAttemptKeepsTrustedRetryAfter(t *testing.T) {
 	if errExecute == nil {
 		t.Fatal("expected terminal 429")
 	}
-	if got := SafeResponseHeaders(errExecute).Get("Retry-After"); got != "" {
-		t.Fatalf("marked-attempt terminal Retry-After = %q, want no client wait above one minute (err=%v)", got, errExecute)
+	if got := SafeResponseHeaders(errExecute).Get("Retry-After"); got != "256" {
+		t.Fatalf("marked-attempt terminal Retry-After = %q, want 256 (err=%v)", got, errExecute)
 	}
 }
 
@@ -82,8 +82,8 @@ func TestIssue7017ExecuteStreamMarkedAttemptKeepsTrustedRetryAfter(t *testing.T)
 	if errStream == nil {
 		t.Fatal("expected terminal stream error")
 	}
-	if got := SafeResponseHeaders(errStream).Get("Retry-After"); got != "" {
-		t.Fatalf("marked stream terminal Retry-After = %q, want no client wait above one minute (err=%v)", got, errStream)
+	if got := SafeResponseHeaders(errStream).Get("Retry-After"); got != "256" {
+		t.Fatalf("marked stream terminal Retry-After = %q, want 256 (err=%v)", got, errStream)
 	}
 }
 
@@ -108,8 +108,8 @@ func TestIssue7017ExecuteStreamBootstrapMarkedAttemptKeepsTrustedRetryAfter(t *t
 	if chunk.Err == nil {
 		t.Fatal("expected terminal chunk error")
 	}
-	if got := SafeResponseHeaders(chunk.Err).Get("Retry-After"); got != "" {
-		t.Fatalf("bootstrap terminal Retry-After = %q, want no client wait above one minute (err=%v)", got, chunk.Err)
+	if got := SafeResponseHeaders(chunk.Err).Get("Retry-After"); got != "256" {
+		t.Fatalf("bootstrap terminal Retry-After = %q, want 256 (err=%v)", got, chunk.Err)
 	}
 }
 

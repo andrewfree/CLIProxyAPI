@@ -404,6 +404,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
 		}
+		handlers.FilterClientRetryAfterHeaders(c.Writer.Header(), time.Now())
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
