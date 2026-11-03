@@ -71,7 +71,9 @@ func limitModelQuotaState(state *ModelState, updatedAt, now time.Time, limit tim
 	}
 	if !state.Quota.NextRecoverAt.After(now) {
 		if isModelStateActiveCooldown(shadow, now) {
+			previousQuota := state.Quota
 			*state = *shadow.cloneShallow()
+			state.Quota = mergeQuotaObservation(state.Quota, previousQuota)
 		} else {
 			resetModelState(state, now)
 		}
