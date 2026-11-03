@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -813,6 +814,7 @@ func callResponseHeaders(source http.Header) http.Header {
 }
 
 func writeResponseHeaders(destination, source http.Header) {
+	defer handlers.FilterClientRetryAfterHeaders(destination, time.Now())
 	for name, values := range source {
 		for _, value := range values {
 			destination.Add(name, value)
@@ -840,5 +842,6 @@ func writeSelectionError(c *gin.Context, err error) {
 	for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
 		c.Writer.Header().Add("Retry-After", value)
 	}
+	handlers.FilterClientRetryAfterHeaders(c.Writer.Header(), time.Now())
 	writeLiveError(c, status, err.Error())
 }

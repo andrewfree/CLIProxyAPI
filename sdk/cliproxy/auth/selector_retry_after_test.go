@@ -19,8 +19,8 @@ func TestModelCooldownRetryAfter(t *testing.T) {
 		{"zero", 0, "0", 0},
 		{"fractional", time.Millisecond, "1", 1},
 		{"one minute", time.Minute, "60", 60},
-		{"over one minute", time.Minute + time.Millisecond, "", 61},
-		{"multi day quota", 384882 * time.Second, "", 384882},
+		{"over one minute", time.Minute + time.Millisecond, "61", 61},
+		{"multi day quota", 384882 * time.Second, "384882", 384882},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := newModelCooldownError("gpt-6-astra", "codex", tc.wait)

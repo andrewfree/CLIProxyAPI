@@ -326,8 +326,7 @@ func SafeResponseHeaders(err error) http.Header {
 }
 
 func safeRetryAfterHeader(retryAfter time.Duration) http.Header {
-	// One minute is our cap for automatic client waits; internal retries keep the full deadline.
-	if retryAfter <= 0 || retryAfter > time.Minute {
+	if retryAfter <= 0 {
 		return nil
 	}
 	seconds := int64(retryAfter / time.Second)

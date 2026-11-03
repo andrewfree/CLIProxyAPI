@@ -98,7 +98,7 @@ func TestIssue7017HomeRequestScopedStopKeepsTrustedRetryAfter(t *testing.T) {
 	if errExecute == nil {
 		t.Fatal("expected terminal error from request-scoped stop")
 	}
-	if got := SafeResponseHeaders(errExecute).Get("Retry-After"); got != "" {
-		t.Fatalf("Home stop terminal Retry-After = %q, want no client wait above one minute (err=%v)", got, errExecute)
+	if got := SafeResponseHeaders(errExecute).Get("Retry-After"); got != "256" {
+		t.Fatalf("Home stop terminal Retry-After = %q, want 256 (err=%v)", got, errExecute)
 	}
 }

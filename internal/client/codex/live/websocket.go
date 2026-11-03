@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -265,6 +266,7 @@ func directRealtimeHeaders(source http.Header) http.Header {
 }
 
 func copyRealtimeHandshakeHeaders(destination, source http.Header) {
+	defer handlers.FilterClientRetryAfterHeaders(destination, time.Now())
 	for _, name := range []string{"Retry-After", "X-Request-Id", "OpenAI-Request-Id"} {
 		for _, value := range source.Values(name) {
 			destination.Add(name, value)

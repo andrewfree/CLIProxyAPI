@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 	"strings"
+	"time"
 )
 
 // gatewayHeaderPrefixes lists header name prefixes injected by known AI gateway
@@ -109,6 +110,7 @@ func connectionScopedHeaders(src http.Header) map[string]struct{} {
 // WriteUpstreamHeaders writes filtered upstream headers to the gin response writer.
 // Headers already set by CPA (e.g., Content-Type) are NOT overwritten.
 func WriteUpstreamHeaders(dst http.Header, src http.Header) {
+	defer FilterClientRetryAfterHeaders(dst, time.Now())
 	if src == nil {
 		return
 	}

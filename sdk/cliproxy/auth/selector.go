@@ -352,14 +352,13 @@ func (e *modelCooldownError) StatusCode() int {
 }
 
 func (e *modelCooldownError) Headers() http.Header {
-	headers := safeRetryAfterHeader(e.resetIn)
-	if headers == nil {
-		headers = make(http.Header)
-	}
+	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	if e.resetIn <= 0 {
-		headers.Set("Retry-After", "0")
+	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
+	if resetSeconds < 0 {
+		resetSeconds = 0
 	}
+	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
 	return headers
 }
 
