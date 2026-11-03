@@ -1,0 +1,138 @@
+{
+  "at": "2026-11-03T01:47:29.561803+00:00",
+  "release": "v8.0.52-fleet.2",
+  "latest_upstream_checked": "v8.0.52",
+  "source_commit": "6cc4c2ce09963d5dea8e7ca5c7ef948c7e3afd6c",
+  "tested_metadata_commit": "606a9efdaa1db9239cf26ed95c1ab21797419347",
+  "hosts": {
+    "mac": {
+      "image": "sha256:9ecc0f8d67e4c39732695152ef421e7e730a70709c0baaaa8739015a062450a7",
+      "version": "v8.0.52-fleet.2",
+      "source_commit": "6cc4c2ce09963d5dea8e7ca5c7ef948c7e3afd6c",
+      "health": "healthy",
+      "fleet_failures": [],
+      "http_generation": {
+        "endpoint": "http://127.0.0.1:8317",
+        "model": "gpt-6-luna",
+        "http_status": 200,
+        "completed": true,
+        "response_matches": true
+      },
+      "preservation": {
+        "image": true,
+        "health": true,
+        "config_sha256": true,
+        "auth_directory_inode": true,
+        "mounts": true,
+        "ports": true,
+        "restart_policy": true,
+        "unrelated_containers": true
+      },
+      "native_t3": {
+        "provider": "codex_cliproxy_mac",
+        "model": "gpt-6-luna",
+        "link": "<t3-thread://v2/0cb9207a-1817-4a07-9bea-67a567163108/thread:delegated-task:command%3Amcp%3A4d79762a-abf5-40f9-ae64-32c3a1ba60f6%3Adelegate-task%3Acliproxy-v8052-fleet2-mac-smoke-20261102>",
+        "status": "completed",
+        "initial_response": "CLIPROXY_UPGRADE_OK",
+        "final_summary": "CLIPROXY_UPGRADE_OK"
+      }
+    },
+    "will": {
+      "image": "sha256:17bccfe8912daf3fa2fe7add8a8fd0f50b0bf751db2bbf17ae1b05ac982b2cd5",
+      "version": "v8.0.52-fleet.2",
+      "source_commit": "6cc4c2ce09963d5dea8e7ca5c7ef948c7e3afd6c",
+      "health": "healthy",
+      "fleet_failures": [],
+      "http_generation": {
+        "endpoint": "http://100.98.74.67:8317",
+        "model": "gpt-6-luna",
+        "http_status": 200,
+        "completed": true,
+        "response_matches": true
+      },
+      "preservation": {
+        "image": true,
+        "health": true,
+        "config_sha256": true,
+        "auth_directory_inode": true,
+        "mounts": true,
+        "ports": true,
+        "restart_policy": true,
+        "unrelated_containers": false
+      },
+      "native_t3": {
+        "provider": "codex_cliproxy",
+        "model": "gpt-6-luna",
+        "link": "<t3-thread://v2/0cb9207a-1817-4a07-9bea-67a567163108/thread:delegated-task:command%3Amcp%3A4d79762a-abf5-40f9-ae64-32c3a1ba60f6%3Adelegate-task%3Acliproxy-v8052-fleet2-will-smoke-20261102>",
+        "status": "completed",
+        "initial_response": "CLIPROXY_UPGRADE_OK",
+        "final_summary": "blocked"
+      }
+    }
+  },
+  "validation": {
+    "go_test_passing_packages": 103,
+    "python_ops_tests": 84,
+    "final_metadata_go_tests": "passed",
+    "local_ci": {
+      "verdict": "pass",
+      "partial": false,
+      "jobs": [
+        {
+          "workflow": "pr-test-build",
+          "job_id": "build",
+          "result": "success"
+        },
+        {
+          "workflow": "translator-path-guard",
+          "job_id": "ensure-no-translator-changes",
+          "result": "success"
+        }
+      ]
+    }
+  },
+  "preserved_policies": [
+    "Kimi model fallback",
+    "60-second maximum client retry hint",
+    "3600-second quota cooldown cap",
+    "round-robin routing with affinity disabled",
+    "Cursor 2.1.1",
+    "DO_NOT_TRACK=1",
+    "usage statistics disabled"
+  ],
+  "workarounds": [
+    "Five upstream retry test files adapted to retained fleet policy; long retry inputs and internal deadlines retained",
+    "Upstream interrupt test uses deterministic cancellation channel; production code unchanged",
+    "Temporary official Go download IPv4 hosts entries inside task CI container only"
+  ],
+  "test_changes": [
+    "Quota observation regression assertions added",
+    "Independent contract image expectations updated",
+    "Retry policy and interrupt synchronization test workarounds listed above"
+  ],
+  "review": {
+    "completed": "OpenAI Codex swarm, GPT-6 Astra source and deployment judgment",
+    "opus": "failed due account limit; user selected OpenAI swarm; no alternate account"
+  },
+  "limitations": [
+    "Will native T3 generated the expected response at 2026-11-03T01:45:29Z, then its separate child ledger hook caused a blocked final summary. Connectivity succeeded; that helper did not satisfy its final-output format.",
+    "Two short-lived unrelated Will containers disappeared between backup and verification. Their exact termination timing was unavailable. Other pre-existing container IDs/images matched; deployment command targeted only cli-proxy-api.",
+    "PiSec inventory compare retains pre-existing unrelated CodeOne wall page host_projects_drift; CLIProxy digest drift is resolved."
+  ],
+  "rollback": {
+    "mac": {
+      "previous_image_retained": "sha256:de9dc9a15e349d50f31d3d59f5d227d013060a205684de16eb567e71623b3fef",
+      "backup": "/Users/rever/cliproxy/ops/runtime/upgrade-v8.0.52-20261102/fleet2/backup-20261103T013607Z"
+    },
+    "will": {
+      "previous_image_retained": "sha256:cc6f13bdaa5aaa5b51984a8a4613521b2daad79c7b2b89a8de9ca70e13bbbed5",
+      "backup": "/home/andrew/cliproxy/releases/v8.0.52-fleet.2/backup-20261103T013607Z"
+    }
+  },
+  "private_receipts": "/Users/rever/cliproxy/ops/runtime/upgrade-v8.0.52-20261102/fleet2",
+  "principles": {
+    "Prove It Works": "Compared running image IDs and configuration state, then performed actual authenticated HTTP and native T3 generation.",
+    "Model the Domain": "Retained QuotaState observations through the existing mergeQuotaObservation helper when restoring the independent cooldown state.",
+    "Test Behavior, Not Implementation": "Asserted observation and deadline preservation; synchronized the test on observed cancellation without changing the production interrupt path."
+  }
+}
