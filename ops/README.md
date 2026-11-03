@@ -9,6 +9,23 @@ loopback exposure, health, and configuration-policy expectations.
 
 ## Choosing a Claude account in T3 Code
 
+Use a **Claude - CLIProxy pool** profile when any subscribed Claude account
+may handle the request. Set `CLIPROXY_CLAUDE_ROUTE=shared-pool` and leave
+`CLIPROXY_ACCOUNT_PREFIX` empty. The launcher forwards unprefixed Claude
+model IDs to CLIProxy, which selects eligible credentials and handles
+credential retries. The launcher does not retry requests or switch hosts.
+Its model list contains only unprefixed Claude models. Account-qualified
+models are rejected in pool mode.
+
+Use a named profile when a specific account must handle the request.
+`CLIPROXY_CLAUDE_ROUTE=account` is the default. A valid account prefix remains
+required in this mode. Pool mode rejects a nonempty account prefix.
+
+The native **Claude - Direct login** profile uses the local Claude login.
+It does not use CLIProxy. A turn rejected by that login cannot execute an
+instruction to find another account. Select a pool profile before resuming
+that thread. Existing running sessions keep their launch environment.
+
 `claude_account_launcher.mjs` lets separate T3 Claude provider entries use
 specific CLIProxy accounts. Each entry runs the normal Claude binary through
 the same launcher. The launcher starts an ephemeral loopback listener for that
@@ -19,6 +36,40 @@ trying a different account. The listener closes when Claude exits.
 The launcher accepts only `POST /v1/messages`, `POST /v1/messages/count_tokens`,
 and `GET /v1/models`. Message requests require an `application/json` body.
 Unsupported routes are rejected before they reach the shared account pool.
+
+### Configure a shared pool profile
+
+Run `configure_claude_pool.mjs` on the T3 host. It uses the running server's
+settings API, stores the proxy key in T3's secret store, and revokes its
+temporary configuration session. It preserves existing profiles and labels
+the native login explicitly. An existing pool profile can be updated by
+running the command again with a new backup directory.
+
+```sh
+node ops/configure_claude_pool.mjs \
+  --base-dir <T3-base-directory> \
+  --profile-id claude_cliproxy \
+  --label 'Claude - CLIProxy pool (Will primary)' \
+  --upstream <proxy-origin> \
+  --claude-binary <absolute-Claude-binary> \
+  --api-key-file <private-file-containing-only-the-proxy-key> \
+  --backup-dir <new-private-backup-directory>
+```
+
+The key file must have mode `0600`. Delete that temporary file after setup.
+The backup contains redacted settings before and after the change. The tool
+uses the installed T3 runtime and its `undici` package. It requires
+orchestration protocol 2. It does not restart T3 or either proxy.
+
+On the Mac, configure `claude_cliproxy` for Will and
+`claude_cliproxy_mac` for the local fallback. On Will, use its own loopback
+proxy. Selecting another host remains manual. No route can produce a reply
+while every eligible account is at its upstream limit.
+
+To roll back, use `server.updateSettings` to remove only the added profile
+IDs and restore the prior native display name from the backup. Preserve
+later edits to other settings. Restore the previous launcher from the host's
+private deployment backup after confirming no task-owned client uses it.
 
 On `SIGTERM`, `SIGINT`, or `SIGHUP`, the launcher closes its listener and
 connections, then forwards the signal to its child. If the child has not exited

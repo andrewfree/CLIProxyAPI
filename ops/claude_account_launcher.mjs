@@ -40,8 +40,10 @@ async function requestBody(request) {
   return Buffer.concat(chunks);
 }
 
-export async function startAccountProxy({ prefix, upstream }) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(prefix ?? "")) throw new Error("A valid CLIPROXY_ACCOUNT_PREFIX is required.");
+export async function startAccountProxy({ route = "account", prefix, upstream }) {
+  if (route !== "account" && route !== "shared-pool") throw new Error("CLIPROXY_CLAUDE_ROUTE must be account or shared-pool.");
+  if (route === "shared-pool" && prefix) throw new Error("The shared-pool route must not set CLIPROXY_ACCOUNT_PREFIX.");
+  if (route === "account" && !/^[a-zA-Z0-9_-]+$/.test(prefix ?? "")) throw new Error("A valid CLIPROXY_ACCOUNT_PREFIX is required.");
   const target = new URL(upstream);
   if (!["http:", "https:"].includes(target.protocol) || target.username || target.password || target.search || target.hash) {
     throw new Error("CLIPROXY_BASE_URL must be an HTTP origin without credentials or query parameters.");
@@ -59,16 +61,22 @@ export async function startAccountProxy({ prefix, upstream }) {
           return fail(response, 415, "Compressed requests are not supported by the account launcher.");
         }
         if (!/^\s*application\/json\s*(;|$)/i.test(request.headers["content-type"] ?? "")) {
-          return fail(response, 415, "An account-pinned request requires an application/json body.");
+          return fail(response, 415, "A Claude request requires an application/json body.");
         }
         const value = JSON.parse(await requestBody(request));
         if (value === null || typeof value !== "object" || Array.isArray(value) || typeof value.model !== "string" || !value.model) {
-          return fail(response, 400, "A model is required for an account-pinned request.");
+          return fail(response, 400, "A model is required for a Claude request.");
         }
-        if (value.model.includes("/") && !value.model.startsWith(`${prefix}/`)) {
-          return fail(response, 400, "This Claude entry is pinned to a different account.");
+        if (route === "shared-pool") {
+          if (!value.model.startsWith("claude-") || value.model.includes("/")) {
+            return fail(response, 400, "The shared Claude pool requires an unprefixed Claude model.");
+          }
+        } else {
+          if (value.model.includes("/") && !value.model.startsWith(`${prefix}/`)) {
+            return fail(response, 400, "This Claude entry is pinned to a different account.");
+          }
+          if (!value.model.startsWith(`${prefix}/`)) value.model = `${prefix}/${value.model}`;
         }
-        if (!value.model.startsWith(`${prefix}/`)) value.model = `${prefix}/${value.model}`;
         body = Buffer.from(JSON.stringify(value));
       } else {
         body = await requestBody(request);
@@ -90,9 +98,11 @@ export async function startAccountProxy({ prefix, upstream }) {
           const chunks = [];
           for await (const chunk of upstreamResponse) chunks.push(chunk);
           const value = JSON.parse(Buffer.concat(chunks));
-          value.data = value.data.filter((model) => model.id.startsWith(`${prefix}/`)).map((model) => ({
-            ...model, id: model.id.slice(prefix.length + 1),
-          }));
+          value.data = route === "shared-pool"
+            ? value.data.filter((model) => model.id.startsWith("claude-") && !model.id.includes("/"))
+            : value.data.filter((model) => model.id.startsWith(`${prefix}/`)).map((model) => ({
+              ...model, id: model.id.slice(prefix.length + 1),
+            }));
           response.writeHead(200, outgoing);
           response.end(JSON.stringify(value));
         } catch {
@@ -104,7 +114,7 @@ export async function startAccountProxy({ prefix, upstream }) {
       upstreamResponse.on("error", () => response.destroy());
       upstreamResponse.pipe(response);
     });
-    upstreamRequest.on("error", () => fail(response, 502, "CLIProxy is unavailable for the selected account."));
+    upstreamRequest.on("error", () => fail(response, 502, "CLIProxy is unavailable for the selected Claude route."));
     response.on("close", () => upstreamRequest.destroy());
     upstreamRequest.end(body);
   });
@@ -117,6 +127,7 @@ async function main() {
   const binary = process.env.CLIPROXY_CLAUDE_BINARY;
   if (!binary) throw new Error("CLIPROXY_CLAUDE_BINARY is required.");
   const { server, baseURL } = await startAccountProxy({
+    route: process.env.CLIPROXY_CLAUDE_ROUTE,
     prefix: process.env.CLIPROXY_ACCOUNT_PREFIX,
     upstream: process.env.CLIPROXY_BASE_URL,
   });
