@@ -54,3 +54,26 @@ func TestSafeResponseHeadersBoundClientWaits(t *testing.T) {
 		})
 	}
 }
+
+func TestTrustedRetryAfterBoundsClientHintWithoutChangingInternalDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hint time.Duration
+		want string
+	}{
+		{"short", 30 * time.Second, "30"},
+		{"long", 256 * time.Second, ""},
+		{"multi day", 5 * 24 * time.Hour, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := withTrustedRetryAfter(&Error{HTTPStatus: http.StatusTooManyRequests}, &tc.hint)
+			if got := SafeResponseHeaders(err).Get("Retry-After"); got != tc.want {
+				t.Fatalf("client Retry-After = %q, want %q", got, tc.want)
+			}
+			remaining := retryAfterFromError(err)
+			if remaining == nil || *remaining > tc.hint || *remaining < tc.hint-time.Second {
+				t.Fatalf("internal deadline changed: %v, want near %v", remaining, tc.hint)
+			}
+		})
+	}
+}
