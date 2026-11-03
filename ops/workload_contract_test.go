@@ -14,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const pinnedImage = "sha256:9ecc0f8d67e4c39732695152ef421e7e730a70709c0baaaa8739015a062450a7"
+const pinnedImage = "sha256:3615ac678a7b9b3e428d6dfd03e56d019b71a944df34d498012dbf6f4365ecaf"
 
 var (
 	errDuplicateJSONObjectMember  = errors.New("duplicate JSON object member")
