@@ -4,12 +4,13 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { startAccountProxy } from "./claude_account_launcher.mjs";
 
-async function fixture(t, handler, prefix = "icloud") {
+async function fixture(t, handler, options = { prefix: "icloud" }) {
   const upstream = http.createServer(handler);
   upstream.listen(0, "127.0.0.1");
   await once(upstream, "listening");
-  const proxy = await startAccountProxy({ prefix, upstream: `http://127.0.0.1:${upstream.address().port}` });
-  t.after(() => { proxy.server.closeAllConnections(); proxy.server.close(); upstream.closeAllConnections(); upstream.close(); });
+  t.after(() => { upstream.closeAllConnections(); upstream.close(); });
+  const proxy = await startAccountProxy({ ...options, upstream: `http://127.0.0.1:${upstream.address().port}` });
+  t.after(() => { proxy.server.closeAllConnections(); proxy.server.close(); });
   return proxy.baseURL;
 }
 
@@ -54,7 +55,7 @@ test("returns chosen account cooldown without retrying another account", async (
     assert.equal((await readJSON(req)).model, "gmail/claude-sonnet-5");
     res.writeHead(429, { "retry-after": "3600", "content-type": "application/json" });
     res.end('{"error":{"type":"rate_limit_error"}}');
-  }, "gmail");
+  }, { prefix: "gmail" });
   const res = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: '{"model":"claude-sonnet-5"}' });
   assert.equal(res.status, 429);
   assert.equal(res.headers.get("retry-after"), "3600");
@@ -62,14 +63,14 @@ test("returns chosen account cooldown without retrying another account", async (
   assert.equal(calls, 1);
 });
 
-test("forwards SSE incrementally and keeps account trace headers", async (t) => {
+for (const [label, options] of [["account", { prefix: "icloud" }], ["shared pool", { route: "shared-pool" }]]) test(`${label} route forwards SSE incrementally and keeps account trace headers`, async (t) => {
   let finish;
   const base = await fixture(t, async (req, res) => {
-    await readJSON(req);
+    assert.equal((await readJSON(req)).model, options.prefix ? "icloud/claude-sonnet-5" : "claude-sonnet-5");
     res.writeHead(200, { "content-type": "text/event-stream", "x-cpa-trace-id": "icloud-proof" });
     finish = () => res.end('event: message_stop\ndata: {}\n\n');
     res.write('event: message_start\ndata: {}\n\n');
-  });
+  }, options);
   const res = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: '{"model":"claude-sonnet-5","stream":true}' });
   assert.equal(res.headers.get("x-cpa-trace-id"), "icloud-proof");
   const reader = res.body.getReader();
@@ -150,4 +151,69 @@ test("count_tokens requires an object body with a nonempty model", async (t) => 
     await res.text();
   }
   assert.equal(called, 0);
+});
+
+test("route configuration is explicit and never mixes pool and account pinning", async (t) => {
+  const upstream = "http://127.0.0.1:9";
+  const check = (options, pattern) => assert.rejects(async () => {
+    const proxy = await startAccountProxy({ ...options, upstream });
+    t.after(() => { proxy.server.closeAllConnections(); proxy.server.close(); });
+  }, pattern);
+  await check({}, /CLIPROXY_ACCOUNT_PREFIX is required/);
+  await check({ route: "shared-pool", prefix: "t3-pro" }, /shared-pool route must not set CLIPROXY_ACCOUNT_PREFIX/);
+  await check({ route: "any" }, /CLIPROXY_CLAUDE_ROUTE must be/);
+});
+
+test("shared pool forwards ordinary model IDs unchanged, preserving queries and auth", async (t) => {
+  const calls = [];
+  const base = await fixture(t, async (req, res) => {
+    calls.push({ path: req.url, auth: req.headers.authorization, body: await readJSON(req) });
+    res.end("{}");
+  }, { route: "shared-pool" });
+  for (const path of ["/v1/messages?beta=true", "/v1/messages/count_tokens"]) {
+    const res = await fetch(base + path, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer test-key" }, body: JSON.stringify({ model: "claude-opus-5-5", messages: [] }) });
+    assert.equal(res.status, 200);
+    await res.text();
+  }
+  assert.deepEqual(calls.map((x) => [x.path, x.auth, x.body.model]), [
+    ["/v1/messages?beta=true", "Bearer test-key", "claude-opus-5-5"],
+    ["/v1/messages/count_tokens", "Bearer test-key", "claude-opus-5-5"],
+  ]);
+});
+
+test("shared pool rejects account-qualified and malformed requests before contacting the pool", async (t) => {
+  let called = 0;
+  const base = await fixture(t, (_req, res) => { called++; res.end(); }, { route: "shared-pool" });
+  for (const body of ['{"model":"t3-pro/claude-sonnet-5"}', '{"model":"gpt-6-luna"}', '{}', 'invalid']) {
+    const res = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body });
+    assert.equal(res.status, 400, body);
+    await res.text();
+  }
+  assert.equal(called, 0);
+});
+
+test("shared pool returns the pool's exhaustion error unchanged without retrying", async (t) => {
+  let calls = 0;
+  const base = await fixture(t, async (req, res) => {
+    calls++;
+    assert.equal((await readJSON(req)).model, "claude-sonnet-5");
+    res.writeHead(429, { "retry-after": "3600", "content-type": "application/json" });
+    res.end('{"error":{"type":"rate_limit_error"}}');
+  }, { route: "shared-pool" });
+  const res = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: '{"model":"claude-sonnet-5"}' });
+  assert.equal(res.status, 429);
+  assert.equal(res.headers.get("retry-after"), "3600");
+  assert.equal((await res.json()).error.type, "rate_limit_error");
+  assert.equal(calls, 1);
+});
+
+test("shared pool model discovery hides account-qualified entries", async (t) => {
+  const base = await fixture(t, (_req, res) => {
+    res.setHeader("content-type", "application/json");
+    const body = JSON.stringify({ data: [{ id: "gpt-6-luna" }, { id: "t3-icloud/claude-sonnet-5" }, { id: "claude-sonnet-5" }, { id: "t3-pro/claude-opus-5-5" }, { id: "claude-opus-5-5" }] });
+    res.setHeader("content-length", Buffer.byteLength(body));
+    res.end(body);
+  }, { route: "shared-pool" });
+  const res = await fetch(base + "/v1/models");
+  assert.deepEqual((await res.json()).data, [{ id: "claude-sonnet-5" }, { id: "claude-opus-5-5" }]);
 });

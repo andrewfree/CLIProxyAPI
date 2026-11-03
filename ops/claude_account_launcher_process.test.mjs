@@ -51,20 +51,21 @@ async function waitFor(predicate, label, ms = 15000) {
   }
 }
 
-async function run(t, { binary, args = [] }) {
+async function run(t, { binary, args = [], env = {} }) {
   const upstream = net.createServer((socket) => socket.destroy());
   upstream.listen(0, "127.0.0.1");
   await new Promise((resolve, reject) => { upstream.once("listening", resolve); upstream.once("error", reject); });
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
-  const proc = spawn(launcher, args, {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      CLIPROXY_CLAUDE_BINARY: binary,
-      CLIPROXY_ACCOUNT_PREFIX: "acct",
-      CLIPROXY_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
-    },
-  });
+  const childEnv = {
+    ...process.env,
+    CLIPROXY_CLAUDE_BINARY: binary,
+    CLIPROXY_CLAUDE_ROUTE: "account",
+    CLIPROXY_ACCOUNT_PREFIX: "acct",
+    CLIPROXY_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
+    ...env,
+  };
+  for (const [name, value] of Object.entries(childEnv)) if (value === null) delete childEnv[name];
+  const proc = spawn(launcher, args, { stdio: ["ignore", "pipe", "pipe"], env: childEnv });
   let stdout = "";
   let stderr = "";
   proc.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -89,11 +90,15 @@ async function run(t, { binary, args = [] }) {
 }
 
 function launch(t, ...stubArgs) {
+  return launchWith(t, {}, ...stubArgs);
+}
+
+function launchWith(t, env, ...stubArgs) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-stub-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const stub = path.join(dir, "stub.mjs");
   fs.writeFileSync(stub, stubSource);
-  return run(t, { binary: process.execPath, args: [stub, ...stubArgs] });
+  return run(t, { binary: process.execPath, args: [stub, ...stubArgs], env });
 }
 
 async function started(r) {
@@ -163,4 +168,19 @@ test("spawn failure cleans up and exits nonzero", async (t) => {
   const result = await withDeadline(r.exited, 15000, "launcher exit");
   assert.deepEqual(result, { code: 1, signal: null });
   assert.match(r.stderr(), /Unable to launch Claude Code\./);
+});
+
+test("shared-pool route launches Claude without an account prefix", async (t) => {
+  const r = await launchWith(t, { CLIPROXY_CLAUDE_ROUTE: "shared-pool", CLIPROXY_ACCOUNT_PREFIX: null }, "exit", "0");
+  const result = await withDeadline(r.exited, 15000, "launcher exit");
+  assert.deepEqual(result, { code: 0, signal: null });
+  assert.ok(r.ready());
+});
+
+test("a shared-pool route that also names an account fails before launching Claude", async (t) => {
+  const r = await launchWith(t, { CLIPROXY_CLAUDE_ROUTE: "shared-pool" }, "exit", "0");
+  const result = await withDeadline(r.exited, 15000, "launcher exit");
+  assert.deepEqual(result, { code: 1, signal: null });
+  assert.equal(r.ready(), null);
+  assert.match(r.stderr(), /shared-pool route must not set CLIPROXY_ACCOUNT_PREFIX/);
 });
