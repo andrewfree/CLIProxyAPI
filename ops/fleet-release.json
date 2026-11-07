@@ -1,8 +1,8 @@
 {
-  "version": "v8.0.52-fleet.3",
+  "version": "v8.0.52-fleet.4",
   "upstream": "v8.0.52",
-  "source_commit": "53ff3c26a440e9b35eefdfae4868a9106b223ce5",
-  "image_tag": "cliproxy-fleet:v8.0.52-fleet.3",
+  "source_commit": "92e0ac1e7d153a031ecf187fed8d251b0e3b1b9d",
+  "image_tag": "cliproxy-fleet:v8.0.52-fleet.4",
   "primary": {
     "host": "will.local",
     "address": "100.98.74.67",
@@ -29,8 +29,8 @@
     }
   },
   "images": {
-    "amd64": "sha256:318107e9333148eac12889eacf8b1db5e1fc184f39869500377d25e243684168",
-    "arm64": "sha256:3615ac678a7b9b3e428d6dfd03e56d019b71a944df34d498012dbf6f4365ecaf"
+    "amd64": "sha256:47e2118e0b940b0d14ed59badb819b88c035d70de7f76f2c359057066e08e770",
+    "arm64": "sha256:da5e2f6a4ea9fa3ffa6a1b962e6000e531bf1d72e1e8d8951e649d91ade83abf"
   },
   "runtime_policy": {
     "quota-cooldown-max-seconds": 3600,
@@ -38,14 +38,14 @@
   },
   "routing_policy": {
     "arm64": {
-      "strategy": "round-robin",
+      "strategy": "quota-aware",
       "session-affinity": false,
       "session-affinity-ttl": "1h",
       "session-affinity-subagents": false,
       "session-affinity-rebind-on": "any"
     },
     "amd64": {
-      "strategy": "round-robin",
+      "strategy": "quota-aware",
       "session-affinity": false,
       "session-affinity-ttl": "1h",
       "session-affinity-subagents": false,

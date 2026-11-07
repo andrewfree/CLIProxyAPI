@@ -15,7 +15,7 @@
     "request-retry": 3,
     "max-retry-credentials": 0,
     "max-retry-interval": 75,
-    "routing.strategy": "round-robin",
+    "routing.strategy": "quota-aware",
     "plugins.enabled": true,
     "plugins.configs.auth-cursor.enabled": true,
     "request-log": true,
