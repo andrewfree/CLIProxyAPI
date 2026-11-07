@@ -426,7 +426,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
 	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
-		s.observeShadowLocked(ctx, provider, model, picked, []*modelScheduler{shard}, authPriority(picked), preferWebsocket, predicate)
+		s.observeShadowLocked(ctx, provider, model, picked, []*modelScheduler{shard}, predicate)
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -488,7 +488,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
 		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
-			s.observeShadowLocked(ctx, "mixed", model, picked, []*modelScheduler{shard}, authPriority(picked), false, predicate)
+			s.observeShadowLocked(ctx, "mixed", model, picked, []*modelScheduler{shard}, predicate)
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -623,27 +623,31 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			continue
 		}
 		s.mixedCursors[cursorKey] = slot + 1
-		s.observeShadowLocked(ctx, "mixed", model, picked, candidateShards, bestPriority, false, predicate)
+		s.observeShadowLocked(ctx, "mixed", model, picked, candidateShards, predicate)
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 }
 
-// observeShadowLocked reads the same ready views and predicate as the actual
-// scheduler pick without advancing any provider or credential cursor.
-func (s *authScheduler) observeShadowLocked(ctx context.Context, provider, model string, actual *Auth, shards []*modelScheduler, priority int, preferWebsocket bool, predicate func(*scheduledAuth) bool) {
+// Forecasts need every ready tier to exclude zero weights before priority and
+// WebSocket preferences. Reading the views does not advance actual cursors.
+func (s *authScheduler) observeShadowLocked(ctx context.Context, provider, model string, actual *Auth, shards []*modelScheduler, predicate func(*scheduledAuth) bool) {
 	if s.shadow == nil {
 		return
 	}
 	var candidates []*Auth
 	for _, shard := range shards {
-		view := shard.readyViewAtPriorityLocked(preferWebsocket, priority, predicate)
-		if view == nil {
+		if shard == nil {
 			continue
 		}
-		for _, entry := range view.flat {
-			if entry != nil && entry.auth != nil && (predicate == nil || predicate(entry)) {
-				candidates = append(candidates, entry.auth)
+		for _, bucket := range shard.readyByPriority {
+			if bucket == nil {
+				continue
+			}
+			for _, entry := range bucket.all.flat {
+				if entry != nil && entry.auth != nil && (predicate == nil || predicate(entry)) {
+					candidates = append(candidates, entry.auth)
+				}
 			}
 		}
 	}
