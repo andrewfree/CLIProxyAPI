@@ -1,0 +1,5 @@
+**Verdict: resolved.** Shadow forecasts now retain lower-priority positive-weight candidates across legacy and scheduler paths, while actual round-robin routing remains highest-priority and scheduler cursors are unchanged. The regression covers both single and multiple high-priority zero-weight credentials.
+
+No concrete remaining defects found.
+
+Reviewed head: 96f8e36e4533cfc7da77c3c0ab7339268cdacc22
