@@ -1,0 +1,242 @@
+{
+  "recorded_at": "2026-11-07T07:41:15.400597+00:00",
+  "models": {
+    "coordinator": "GPT-6 Astra",
+    "workers": "GPT-6.1 Sol"
+  },
+  "release": "v8.0.52-fleet.4",
+  "application_source": "92e0ac1e7d153a031ecf187fed8d251b0e3b1b9d",
+  "reviewed_source": "96f8e36e4533cfc7da77c3c0ab7339268cdacc22",
+  "release_pin_commit": "0818bece",
+  "pisec_commit": "2aa2e02",
+  "authorization": "Deploy now; allow brief request interruption",
+  "strategy": "quota-aware",
+  "session_affinity": false,
+  "hosts": {
+    "mac": {
+      "image_id": "sha256:da5e2f6a4ea9fa3ffa6a1b962e6000e531bf1d72e1e8d8951e649d91ade83abf",
+      "binary_sha256": "885dac3ad2d26c211d62cf7f3196750ffbdaa2888ed0d2c37005f948a39e223c",
+      "started_at": "2026-11-07T07:13:51.362599928Z",
+      "activation": {
+        "stop_started": "2026-11-07T07:13:49.111140+00:00",
+        "compose_finished": "2026-11-07T07:13:51.548581+00:00",
+        "request_interruption_authorized": true,
+        "pre_stop_activity_samples": [
+          {
+            "captured_at": "2026-11-07T07:13:48.834103+00:00",
+            "active_request_goroutines": 23,
+            "refresh_goroutines": 0,
+            "management_handler_goroutines": 0
+          },
+          {
+            "captured_at": "2026-11-07T07:13:49.106781+00:00",
+            "active_request_goroutines": 23,
+            "refresh_goroutines": 0,
+            "management_handler_goroutines": 0
+          }
+        ]
+      },
+      "fleet_verifier_failures": [],
+      "observed_routing": {
+        "strategy": "quota-aware",
+        "session-affinity": false,
+        "session-affinity-ttl": "1h",
+        "session-affinity-subagents": false,
+        "session-affinity-rebind-on": "any"
+      },
+      "generation": {
+        "captured_at": "2026-11-07T07:14:56.387577+00:00",
+        "model": "gpt-6-luna",
+        "http_status": 200,
+        "completed": true,
+        "response_matches": true,
+        "selected_account_evidence": true,
+        "selected_account_sha256": "15b159329b6753a58e614c93259c32b0cfeab25ee8249ec23050edb17aca0485"
+      },
+      "preservation": {
+        "config_only_routing_strategy_changed": true,
+        "environment_only_image_changed": true,
+        "config_mode_preserved": true,
+        "image_matches_contract": true,
+        "loopback_ports_preserved": true,
+        "state_mounts_preserved": true,
+        "host_container_config_identical": true,
+        "restart_always": true,
+        "pprof_listener_absent": true,
+        "no_home_bootstrap": true
+      },
+      "plugins": {
+        "auth-cursor-v2.1.1.so": "4a2bb071c75f1bd83df561168da2a5a667777d422c41a83ac0f95315adce809a"
+      }
+    },
+    "will": {
+      "image_id": "sha256:47e2118e0b940b0d14ed59badb819b88c035d70de7f76f2c359057066e08e770",
+      "binary_sha256": "3cedb646ffc3a2f23e38ceb5f3f2a0b0075d4c0370b0e017c6678d9b126c2a5e",
+      "started_at": "2026-11-07T07:17:58.572998788Z",
+      "activation": {
+        "stop_started": "2026-11-07T07:17:57.807944+00:00",
+        "compose_finished": "2026-11-07T07:17:58.754071+00:00",
+        "request_interruption_authorized": true,
+        "pre_stop_activity_samples": [
+          {
+            "captured_at": "2026-11-07T07:17:57.519400+00:00",
+            "active_request_goroutines": 0,
+            "refresh_goroutines": 0,
+            "management_handler_goroutines": 0
+          },
+          {
+            "captured_at": "2026-11-07T07:17:57.802738+00:00",
+            "active_request_goroutines": 0,
+            "refresh_goroutines": 0,
+            "management_handler_goroutines": 0
+          }
+        ]
+      },
+      "fleet_verifier_failures": [],
+      "observed_routing": {
+        "strategy": "quota-aware",
+        "session-affinity": false,
+        "session-affinity-ttl": "1h",
+        "session-affinity-subagents": false,
+        "session-affinity-rebind-on": "any"
+      },
+      "generation": {
+        "captured_at": "2026-11-07T07:18:17.347758+00:00",
+        "model": "gpt-6-luna",
+        "http_status": 200,
+        "completed": true,
+        "response_matches": true,
+        "selected_account_evidence": true,
+        "selected_account_sha256": "15b159329b6753a58e614c93259c32b0cfeab25ee8249ec23050edb17aca0485"
+      },
+      "preservation": {
+        "config_only_routing_strategy_changed": true,
+        "environment_only_image_changed": true,
+        "config_mode_preserved": true,
+        "image_matches_contract": true,
+        "loopback_ports_preserved": true,
+        "state_mounts_preserved": true,
+        "host_container_config_identical": true,
+        "restart_always": true,
+        "pprof_listener_absent": true,
+        "no_home_bootstrap": true
+      },
+      "plugins": {
+        "auth-cursor-v2.1.1.so": "75bfdcf6f9dd7b177d7b6e3970c9bdc66101dd2c67b98c1bfa399ef84e290894",
+        "cliproxybar-quota.so": "524baa3a82a93ad09efa041d9ebd3e2d233546b8bb8dd2d37dafd94865aea3ff"
+      },
+      "owner_verifier": {
+        "findings": [],
+        "schema_version": 1,
+        "status": "ok",
+        "target": "will.local"
+      }
+    }
+  },
+  "native_workloads": [
+    {
+      "host": "mac",
+      "native_request_logs": 34,
+      "http200": 34,
+      "completed_nonempty_text": 8,
+      "completed_nonempty_output": 31,
+      "terminal_error_events": 1,
+      "all_examined_native_logs_fleet4": true,
+      "families": [
+        "claude_code",
+        "t3"
+      ],
+      "models": [
+        "claude-opus-5-5",
+        "gpt-6.1-sol",
+        "t3-gmail/claude-opus-5-5"
+      ],
+      "limits": [
+        "Only stable completed request-log files within latest40 and <=5MiB examined; other files skipped.",
+        "Nonempty output includes tool output and text; nonempty text is reported separately.",
+        "Native client family from user-agent; t3 Originator reported independently. Claude Code family alone cannot prove T3 launch.",
+        "No prompts, full responses, paths, emails, raw auth/session/request IDs, or secrets retained."
+      ]
+    },
+    {
+      "host": "will",
+      "native_request_logs": 24,
+      "http200": 24,
+      "completed_nonempty_text": 1,
+      "completed_nonempty_output": 24,
+      "terminal_error_events": 0,
+      "all_examined_native_logs_fleet4": true,
+      "families": [
+        "t3"
+      ],
+      "models": [
+        "gpt-6-astra",
+        "gpt-6.1-sol"
+      ],
+      "limits": [
+        "Only stable finalized logs within latest40 and <=5MiB.",
+        "Synthetic exclusion matches exact Luna connectivity instructions and empty tools; mere marker mentions in natural request context remain eligible.",
+        "Nonempty output includes tools and text; text reported separately.",
+        "Native client family is user-agent evidence; t3 Originator reported independently.",
+        "No prompts, responses, paths, emails, raw IDs or secrets retained."
+      ]
+    }
+  ],
+  "tests": {
+    "required_server_build": "passed",
+    "quota_race": "passed",
+    "affected_packages": "four packages passed rerun",
+    "known_intermittent_failure": "TestServiceHeartbeatFailoverDoesNotDrainBlockingScope failed initial affected run and isolated repetition; passed subsequent affected suite",
+    "full_suite": "not rerun to green; earlier media ICE failure also retained",
+    "contract_checks": [
+      {
+        "log": "ops/runtime/quota-activation-20261106/tests/live-contract-go.log",
+        "sha256": "854b5bf56a0c3e16376cbc416ced331a45310c6802201f2807477e863ff6643a",
+        "result": "passed"
+      },
+      {
+        "log": "ops/runtime/quota-activation-20261106/tests/live-contract-python.log",
+        "sha256": "5a43d4878003b89c6bd363e20b1ce2e815f0be6710ad576f377c53bcd4243983",
+        "result": "passed"
+      },
+      {
+        "log": "ops/runtime/quota-activation-20261106/tests/pisec-inventory-final.log",
+        "sha256": "aedd0204d5a5c8fe050d34f09ca3df013a9943c01d421bcd9b01d717839cc58b",
+        "result": "passed"
+      }
+    ],
+    "tests_changed": "Updated CLIProxy and PiSec expected image IDs to the deployed fleet.4 images. PiSec expectations were already stale. Assertions and runtime behavior were not weakened."
+  },
+  "preserved": [
+    "named Claude account routes",
+    "session affinity disabled",
+    "retry and cooldown settings",
+    "analytics disabled",
+    "existing credential directories",
+    "plugin libraries",
+    "loopback port bindings",
+    "Tailscale forwarding",
+    "manual host selection"
+  ],
+  "rollback": {
+    "mac_backup": "/Users/rever/cliproxy/ops/runtime/quota-activation-20261106/backup-20261107T055818Z",
+    "will_backup": "/home/andrew/cliproxy/ops/runtime/quota-activation-20261106/backup-20261107T055819Z",
+    "prior_images_present": true,
+    "credentials_must_not_be_restored_from_old_snapshots": true,
+    "rollback_executed": false
+  },
+  "limits": [
+    "Active policy and native generation are proven; live quota preference, quota savings, cache benefit and latency benefit are not measured.",
+    "M1 SSH timed out. Its backend Will is validated, but no fresh direct M1 client check succeeded.",
+    "PiSec CLIProxy comparison is clean; one pre-existing unrelated Will host_projects_drift finding remains.",
+    "Three M5 native streams lacked terminal completion, including one request_timeout. The sample does not establish a regression or root cause."
+  ],
+  "publication": false,
+  "new_automation": false,
+  "background_work_remaining": false,
+  "native_stream_limits": {
+    "mac": "One request_timeout/server_error after text deltas, plus two streams ending during tool input without terminal completion. No selector or config error evidence; cancellation versus upstream/network cause unresolved.",
+    "will": "All24 examined native requests completed with nonempty output.",
+    "classification_receipt": "ops/runtime/quota-activation-20261106/passive-clients/mac-terminal-categories.json"
+  }
+}
