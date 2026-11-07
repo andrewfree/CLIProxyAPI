@@ -1099,6 +1099,28 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if isActiveQuotaAwareSelector(s.fallback) {
+		if pinnedID := pinnedAuthIDFromMetadata(opts.Metadata); pinnedID != "" {
+			var pinned []*Auth
+			for _, candidate := range auths {
+				if candidate != nil && candidate.ID == pinnedID {
+					pinned = append(pinned, candidate)
+					break
+				}
+			}
+			auths = pinned
+		}
+		available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, auths, provider, model, time.Now())
+		if errAvailable != nil {
+			return nil, errAvailable
+		}
+		if len(available) > 1 || authWeight(available[0]) > 0 {
+			auths = positiveWeightAuths(auths)
+			if len(auths) == 0 {
+				return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
+			}
+		}
+	}
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)
