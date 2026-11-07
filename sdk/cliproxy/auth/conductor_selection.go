@@ -626,12 +626,13 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 
 // availableAuthsForSelector reports the candidates handed to priority-scoped consumers such as
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
-// unless session affinity or an across-priorities scheduler is active, in which case the selector
-// or scheduler additionally receives lower priority tiers.
+// unless session affinity, quota-aware selection, or an across-priorities scheduler is active,
+// in which case the selector or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
+	quotaAware := isActiveQuotaAwareSelector(selector)
 
-	if !sessionAffinity && !schedulerAcross {
+	if !sessionAffinity && !schedulerAcross && !quotaAware {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 		if err != nil {
 			return nil, nil, err
@@ -654,7 +655,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 		priorityAuths = highestPriorityAuths(allAuths)
 	}
 
-	if sessionAffinity {
+	if sessionAffinity || quotaAware {
 		selectorAuths = allAuths
 	} else {
 		selectorAuths = highestPriorityAuths(allAuths)
@@ -672,7 +673,9 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
 	if !isBuiltInSelector(selector) {
-		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
+		switch selector.(type) {
+		case *SessionAffinitySelector, *QuotaAwareSelector:
+		default:
 			return ctx
 		}
 	}
@@ -687,7 +690,7 @@ func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(selector Selector
 	if !ok || affinity == nil || !affinity.rebindOnQuotaOnly || len(affinityCandidates) == 0 {
 		return nil
 	}
-	if _, weighted := affinity.fallback.(*WeightedRoundRobinSelector); weighted {
+	if _, weighted := affinity.fallback.(*WeightedRoundRobinSelector); weighted || isActiveQuotaAwareSelector(affinity.fallback) {
 		affinityCandidates = positiveWeightAuths(affinityCandidates)
 	}
 	var authIDs map[string]struct{}
@@ -1813,7 +1816,7 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	return isBuiltInSelector(m.Selector())
+	return isBuiltInSelector(selectorForActualRouting(m.Selector()))
 }
 
 func shouldRetrySchedulerPick(err error) bool {
@@ -1910,7 +1913,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	pluginScheduler, schedulerAcross := m.snapshotPluginScheduler()
 
 	m.mu.RLock()
-	selector := m.selector
+	configuredSelector := m.selector
+	selector := selectorForActualRouting(configuredSelector)
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
 	executor, okExecutor := m.executorLocked(provider)
 	if !okExecutor {
@@ -1984,6 +1988,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 			}
 			m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
 			return nil, nil, errPick
+		}
+		if shadow := quotaAwareShadowSelector(configuredSelector); shadow != nil {
+			shadow.observeShadow(selectorCtx, provider, model, selectorAuths, selected)
 		}
 	}
 	if selected == nil {
@@ -2255,7 +2262,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	pluginScheduler, schedulerAcross := m.snapshotPluginScheduler()
 
 	m.mu.RLock()
-	selector := m.selector
+	configuredSelector := m.selector
+	selector := selectorForActualRouting(configuredSelector)
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
@@ -2333,6 +2341,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			}
 			m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
 			return nil, nil, "", errPick
+		}
+		if shadow := quotaAwareShadowSelector(configuredSelector); shadow != nil {
+			shadow.observeShadow(selectorCtx, "mixed", model, selectorAuths, selected)
 		}
 	}
 	if selected == nil {
