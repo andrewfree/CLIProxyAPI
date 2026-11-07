@@ -1,0 +1,301 @@
+{
+  "sourceBase": "b98030486ce71ca24f21df80c603911218133614",
+  "sourceHead": "1881aeffa3ec387147d3bcd108e1d8ab88c61a3f",
+  "requestedModel": "kimi-k3.1-pro",
+  "endpoint": "http://127.0.0.1:8317/v1/responses",
+  "reasoningEffort": "high",
+  "minimalResponse": {
+    "startedAt": "2026-11-07T02:37:15.831173+00:00",
+    "endpoint": "http://127.0.0.1:8317/v1/responses",
+    "requestedModel": "kimi-k3.1-pro",
+    "reasoningEffort": "high",
+    "toolCount": 0,
+    "credentialFallback": false,
+    "listedKimiModels": [
+      "kimi-k2.7-code-highspeed",
+      "kimi-k3-256k",
+      "kimi-k3",
+      "kimi-k2",
+      "kimi-k2-thinking",
+      "kimi-fallback",
+      "kimi-default",
+      "kimi-k2.7-code",
+      "kimi-k2.8-code",
+      "kimi-k3.1-pro-highspeed",
+      "kimi-k2.5",
+      "kimi-k2.8",
+      "kimi-k2.6"
+    ],
+    "httpStatus": 200,
+    "elapsedSeconds": 3.752,
+    "eventCount": 44,
+    "eventTypes": [
+      "response.completed",
+      "response.content_part.added",
+      "response.content_part.done",
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.output_item.done",
+      "response.output_text.delta",
+      "response.output_text.done",
+      "response.reasoning_summary_part.added",
+      "response.reasoning_summary_part.done",
+      "response.reasoning_summary_text.delta",
+      "response.reasoning_summary_text.done"
+    ],
+    "completed": true,
+    "expectedTextObserved": true,
+    "servedModelFields": [
+      "k3.1-pro"
+    ]
+  },
+  "differential": {
+    "passing": {
+      "startedAt": "2026-11-07T02:39:18.722959+00:00",
+      "label": "no-tools",
+      "model": "kimi-k3.1-pro",
+      "endpoint": "http://127.0.0.1:8317/v1/responses",
+      "toolCount": 0,
+      "toolBytes": 2,
+      "reasoning": {
+        "effort": "high"
+      },
+      "completed": true,
+      "expectedTextObserved": true,
+      "changedFactor": "tools array only",
+      "httpStatus": 200,
+      "elapsedSeconds": 2.643,
+      "eventTypes": [
+        "response.completed",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done"
+      ],
+      "eventCount": 44
+    },
+    "failing": {
+      "startedAt": "2026-11-07T02:39:21.366221+00:00",
+      "label": "full-tools",
+      "model": "kimi-k3.1-pro",
+      "endpoint": "http://127.0.0.1:8317/v1/responses",
+      "toolCount": 53,
+      "toolBytes": 1227893,
+      "reasoning": {
+        "effort": "high"
+      },
+      "completed": false,
+      "expectedTextObserved": false,
+      "changedFactor": "tools array only",
+      "httpStatus": 500,
+      "error": "{\"error\":{\"message\":\"empty_stream: upstream stream closed before first payload\",\"type\":\"server_error\",\"code\":\"internal_server_error\"}}",
+      "elapsedSeconds": 16.906,
+      "eventTypes": [],
+      "eventCount": 0
+    },
+    "isolatedFactor": "The tools array was the only field changed.",
+    "retainedOriginal": {
+      "requestFile": "/Users/rever/cliproxy/logs/v1-responses-2026-11-07T103118-7b3cb105.log",
+      "bodyBytes": 1305217,
+      "topKeys": [
+        "model",
+        "stream",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "include",
+        "prompt_cache_key",
+        "text",
+        "client_metadata"
+      ],
+      "model": "kimi-k3.1-pro",
+      "reasoning": {
+        "effort": "high",
+        "summary": "detailed"
+      },
+      "stream": true,
+      "toolTypes": {
+        "function": 13,
+        "namespace": 39,
+        "web_search": 1
+      },
+      "topToolCount": 53,
+      "functionCount": 1225,
+      "toolBytes": 1227893,
+      "inputItems": 13,
+      "upstreamModel": "k3.1-pro",
+      "upstreamToolCount": 53,
+      "responses": {
+        "API RESPONSE 1": {
+          "statusLines": [
+            "Status: 200",
+            "Content-Length: 0",
+            "Content-Type: text/event-stream;charset=utf-8"
+          ],
+          "characterCount": 739
+        },
+        "API ERROR RESPONSE": {
+          "statusLines": [],
+          "characterCount": 74
+        },
+        "API RESPONSE": {
+          "statusLines": [],
+          "characterCount": 181
+        }
+      }
+    }
+  },
+  "diagnosis": "The full retained T3 tool catalogue triggers an empty upstream stream on a minimal prompt. The experiment does not isolate a size limit, tool count limit, or particular schema.",
+  "firstDifferentialAttempt": "The first r1 fixtures returned HTTP400 both with and without tools and are excluded from the causal comparison. Receipts remain under ops/runtime/kimi-recovery-20261106.",
+  "repairScope": "No proxy source, live configuration, credentials, endpoint or model changed. A tool-free source review is a task-specific workaround.",
+  "reviewStatus": "completed through a task-specific tool-free workaround",
+  "reviewExecutionLimits": {
+    "r4": "Temporary auth_unavailable following the full-tools reproduction; no source review.",
+    "r5": "Received reasoning but probe timed out before a verdict; no PASS.",
+    "r6": {
+      "status": "response.incomplete",
+      "reason": "max_output_tokens",
+      "inputTokens": 33952,
+      "outputTokens": 6000,
+      "reasoningTokens": 5997,
+      "reviewTextBytes": 0
+    },
+    "r7": "Completed with a concrete finding. Exact model/endpoint, no tools, low effort."
+  },
+  "initialCompletedReview": {
+    "receipt": {
+      "startedAt": "2026-11-07T02:56:58.244470+00:00",
+      "endpoint": "http://127.0.0.1:8317/v1/responses",
+      "requestedModel": "kimi-k3.1-pro",
+      "effort": "low",
+      "head": "1881aeffa3ec387147d3bcd108e1d8ab88c61a3f",
+      "base": "b98030486ce71ca24f21df80c603911218133614",
+      "patchSha256": "b646a61fd3164f3a8adb8c436bcc2133b6fda9467bafcd0165bb7ded0e6866cb",
+      "promptBytes": 119854,
+      "promptSha256": "fe8e6cf8870ad0725618e36d9f3f9bdfba3ac60f9dc9a6ec61d16210203e87f6",
+      "tools": 0,
+      "method": "tool-free source review through same selected Mac proxy endpoint",
+      "credentialFallback": false,
+      "completed": true,
+      "httpStatus": 200,
+      "elapsedSeconds": 207.397,
+      "servedModelFields": [
+        "k3.1-pro"
+      ],
+      "eventTypes": [
+        "response.completed",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done"
+      ],
+      "outputBytes": 1572,
+      "outputSha256": "f085b1eba84d1b93d62de8c1a956327ac8952c178188b888f57bdf5bf235a800",
+      "usage": {
+        "input_tokens": 33966,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 4833,
+        "output_tokens_details": {
+          "reasoning_tokens": 4499
+        },
+        "total_tokens": 38799
+      }
+    },
+    "verdictFile": "kimi-initial-review.txt",
+    "finding": "P2: shadow forecast candidate gathering loses eligible lower-priority positive-weight credentials.",
+    "verdictFileSha256": "cfaf753af118972666972b2259b75bbcfbab65e6d586ec18ed43941279e8a856",
+    "verdictFileNormalization": "Trailing whitespace removed and final newline added for the tracked copy. The exact raw provider response and its original hash remain in ops/runtime/kimi-recovery-20261106."
+  },
+  "correction": {
+    "reviewedOriginalHead": "1881aeffa3ec387147d3bcd108e1d8ab88c61a3f",
+    "regressionCommit": "c95370374b5e1d577faf8be4d1f40d11215ef1b2",
+    "fixedHead": "96f8e36e4533cfc7da77c3c0ab7339268cdacc22",
+    "patchSha256": "3a037863847e792e06654fb3b37144482d293bfaad61f3cf482ffbc7e92c5ef7",
+    "regression": "TestManagerQuotaAwareShadowForecastIncludesLowerPositivePriority",
+    "before": "8 of8 subcases failed before production change; retained shadow-priority-before.log",
+    "after": "Passed; retained shadow-priority-after.log",
+    "affectedPackages": "go test -p1 -count=1 auth, service, config, v8 management passed; shadow-priority-affected.log",
+    "race": "go test -race -p1 -count=1 auth -run TestQuotaBalance|TestQuotaAware|TestManagerQuotaAware passed; shadow-priority-race.log",
+    "build": "go build ./cmd/server passed; artifact SHA25605ef2ac82d69eb8c915f138a471f29e367eb995dccb7118f340e9cddf2054f04",
+    "testsChanged": "Added regression coverage; no assertions weakened or existing tests changed."
+  },
+  "finalRecheck": {
+    "receipt": {
+      "startedAt": "2026-11-07T03:06:13.397540+00:00",
+      "endpoint": "http://127.0.0.1:8317/v1/responses",
+      "requestedModel": "kimi-k3.1-pro",
+      "effort": "low",
+      "head": "96f8e36e4533cfc7da77c3c0ab7339268cdacc22",
+      "base": "1881aeffa3ec387147d3bcd108e1d8ab88c61a3f",
+      "patchSha256": "3a037863847e792e06654fb3b37144482d293bfaad61f3cf482ffbc7e92c5ef7",
+      "promptBytes": 16442,
+      "promptSha256": "0b64ef5855502a2b2e4892cfd6bb787c57d2050c4ce690b7b7dc8b856bcfc997",
+      "tools": 0,
+      "method": "tool-free source review through same selected Mac proxy endpoint",
+      "credentialFallback": false,
+      "completed": true,
+      "httpStatus": 200,
+      "elapsedSeconds": 33.507,
+      "servedModelFields": [
+        "k3.1-pro"
+      ],
+      "eventTypes": [
+        "response.completed",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done"
+      ],
+      "outputBytes": 403,
+      "outputSha256": "bd8bee562f06b49c5f48406c9a141d2ef97e2133d2d0ee3b68661fac3343ebf7",
+      "usage": {
+        "input_tokens": 4410,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 303,
+        "output_tokens_details": {
+          "reasoning_tokens": 201
+        },
+        "total_tokens": 4713
+      }
+    },
+    "verdictFile": "kimi-correction-review.txt",
+    "verdict": "Resolved. No concrete remaining defects found in the correction.",
+    "verdictFileSha256": "066aba7b5412b02c1063726bf4d802adf0c7f0e7661b3d196fafcf97ca8bb4bb",
+    "verdictFileNormalization": "Trailing whitespace removed and final newline added for the tracked copy. The exact raw provider response and its original hash remain in ops/runtime/kimi-recovery-20261106."
+  },
+  "fullToolCatalogueStatus": "Still reproduces empty_stream. Size versus particular schema remains unisolated. No general T3 tool-heavy agent fix is claimed."
+}

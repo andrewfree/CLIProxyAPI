@@ -1,0 +1,10 @@
+### P2 — Shadow forecasting loses lower-priority positive-weight candidates
+
+- **Files/lines:** `sdk/cliproxy/auth/scheduler.go:638`; same defect on the legacy paths at `sdk/cliproxy/auth/conductor_selection.go:1993` and `:2346`.
+- **Failing scenario:** A high-priority credential has configured weight `0`, while a lower-priority credential has positive weight. Active quota-aware selection correctly removes the zero-weight credential before applying priority and selects the lower-priority credential. Shadow mode’s actual round-robin choice correctly remains the high-priority credential, but its forecast is built only from the actual/highest priority view. Consequently, forecasting sees only the zero-weight credential, filters it out, and reports no prediction instead of proposing the lower-priority credential.
+- **Smallest corrective direction:** Keep actual shadow routing unchanged, but construct a separate all-priority eligible forecast candidate set. In the scheduler, inspect all applicable ready priority views rather than only `priority`; in legacy selection, retain the pre-`highestPriorityAuths` set for `observeShadow`. Add a shadow regression with high-priority zero weight and lower-priority positive weight.
+
+The prior active-selection and transient-affinity corrections otherwise appear coherent in the supplied source. No additional concrete defects identified.
+
+**Source-review verdict:** One shadow-only forecasting defect; no evidence of changed default round-robin routing.
+**Reviewed HEAD:** `1881aeffa3ec387147d3bcd108e1d8ab88c61a3f`

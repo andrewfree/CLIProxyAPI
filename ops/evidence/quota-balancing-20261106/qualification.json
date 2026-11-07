@@ -1,0 +1,68 @@
+{
+  "recordedAt": "2026-11-07T03:07:54.845760+00:00",
+  "base": "b98030486ce71ca24f21df80c603911218133614",
+  "sourceHead": "96f8e36e4533cfc7da77c3c0ab7339268cdacc22",
+  "featureCommits": [
+    "2cee87eabbd68f3c32eb5e4391756ce2c370a1ce",
+    "1881aeffa3ec387147d3bcd108e1d8ab88c61a3f",
+    "c95370374b5e1d577faf8be4d1f40d11215ef1b2",
+    "96f8e36e4533cfc7da77c3c0ab7339268cdacc22"
+  ],
+  "models": [
+    "GPT-6.1 Sol",
+    "Kimi K3.1 Pro"
+  ],
+  "checks": [
+    {
+      "command": "go test -p 1 -count=1 ./sdk/cliproxy/auth -run '^TestManagerQuotaAwareShadowForecastIncludesLowerPositivePriority$'",
+      "exitCode": 0,
+      "log": "/Users/rever/cliproxy/ops/runtime/kimi-recovery-20261106/shadow-priority-after.log",
+      "sha256": "0a65c1f674a726f828855c4df744840e2b6d2cb62f08247edfb5ceb5c0b12239",
+      "results": [
+        "ok  \tgithub.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth\t0.266s"
+      ]
+    },
+    {
+      "command": "go test -p 1 -count=1 ./sdk/cliproxy/auth ./sdk/cliproxy ./internal/config ./internal/api/handlers/management",
+      "exitCode": 0,
+      "log": "/Users/rever/cliproxy/ops/runtime/kimi-recovery-20261106/shadow-priority-affected.log",
+      "sha256": "5b4af64f8ba96fa90ff6e2baf99ffb6df612757f9ff012d514ea4d75b4e3f3d0",
+      "results": [
+        "ok  \tgithub.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth\t1.899s",
+        "ok  \tgithub.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy\t13.582s",
+        "ok  \tgithub.com/router-for-me/CLIProxyAPI/v8/internal/config\t2.437s",
+        "ok  \tgithub.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management\t9.128s"
+      ]
+    },
+    {
+      "command": "go test -race -p 1 -count=1 ./sdk/cliproxy/auth -run 'TestQuotaBalance|TestQuotaAware|TestManagerQuotaAware'",
+      "exitCode": 0,
+      "log": "/Users/rever/cliproxy/ops/runtime/kimi-recovery-20261106/shadow-priority-race.log",
+      "sha256": "65d9327e2e4c3847fcb1b51a15a209005f34e0c743ada3ad58eb51bced3e4acc",
+      "results": [
+        "ok  \tgithub.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth\t1.558s"
+      ]
+    }
+  ],
+  "build": {
+    "command": "go build -o /Users/rever/cliproxy/ops/runtime/kimi-recovery-20261106/cli-proxy-api-shadow-priority ./cmd/server",
+    "exitCode": 0,
+    "sha256": "05ef2ac82d69eb8c915f138a471f29e367eb995dccb7118f340e9cddf2054f04"
+  },
+  "fullSuite": {
+    "status": "failed in earlier full run",
+    "failure": "TestPionMediaRelayBridgesAudioAndDataChannel: ICE gathering did not complete",
+    "alsoObservedOnTrackedBase": true,
+    "finalSourceFullSuiteRerun": false,
+    "scope": "All affected packages and targeted auth race checks reran after the correction; no whole-suite green claim."
+  },
+  "testsChanged": "Added the shadow forecast regression after eight failing-before cases. Existing tests and assertions were preserved.",
+  "reviews": {
+    "Kimi": "Completed source review at1881aeff found the shadow forecast omission. Focused recheck at96f8e36e says resolved and no concrete remaining defects in the correction.",
+    "method": "Same Mac proxy endpoint and exact kimi-k3.1-pro model; tool-free API review at low effort. Full tool catalogue remains a known failure."
+  },
+  "activation": false,
+  "publication": false,
+  "recoveryRoot": "/Users/rever/cliproxy/ops/runtime/quota-balancing-20261106",
+  "kimiRecoveryRoot": "/Users/rever/cliproxy/ops/runtime/kimi-recovery-20261106"
+}
