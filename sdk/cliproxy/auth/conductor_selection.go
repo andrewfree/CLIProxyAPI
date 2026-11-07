@@ -630,7 +630,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // in which case the selector or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
-	quotaAware := isActiveQuotaAwareSelector(selector)
+	quotaAware := isActiveQuotaAwareSelector(selector) || quotaAwareShadowSelector(selector) != nil
 
 	if !sessionAffinity && !schedulerAcross && !quotaAware {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
@@ -1964,7 +1964,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, provider, model, now, schedulerAcross)
+	available, selectorAuths, errAvailable := m.availableAuthsForSelector(configuredSelector, candidates, provider, model, now, schedulerAcross)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
@@ -2317,7 +2317,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, now, schedulerAcross)
+	available, selectorAuths, errAvailable := m.availableAuthsForSelector(configuredSelector, candidates, "mixed", model, now, schedulerAcross)
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
