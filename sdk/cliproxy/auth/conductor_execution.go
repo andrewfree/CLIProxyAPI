@@ -150,7 +150,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
-			preferredUpstreamErr = errExec
+			preferredUpstreamErr = preferSoonerRetryableError(preferredUpstreamErr, errExec)
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
@@ -212,7 +212,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
-			preferredUpstreamErr = errExec
+			preferredUpstreamErr = preferSoonerRetryableError(preferredUpstreamErr, errExec)
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
@@ -269,7 +269,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return result, nil
 		}
 		if hasUpstreamExecutionAttempt(errStream) {
-			preferredUpstreamErr = errStream
+			preferredUpstreamErr = preferSoonerRetryableError(preferredUpstreamErr, errStream)
 		}
 		if m.HomeEnabled() && retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errStream, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
@@ -507,7 +507,37 @@ func syncPreferredUpstreamError(upstreamErr *error, errExec error) {
 		}
 		return
 	}
-	*upstreamErr = errExec
+	*upstreamErr = preferSoonerRetryableError(*upstreamErr, errExec)
+}
+
+// preferSoonerRetryableError chooses which upstream failure terminal selection
+// reports. When both are 429s with retry hints, the one that recovers first
+// wins, so a client of an exhausted pool sees the earliest credential reset
+// rather than whichever credential was tried last. Otherwise the newer
+// failure replaces the older one.
+func preferSoonerRetryableError(current, candidate error) error {
+	currentWait, okCurrent := rateLimitRetryWait(current)
+	candidateWait, okCandidate := rateLimitRetryWait(candidate)
+	if okCurrent && okCandidate && currentWait < candidateWait {
+		return current
+	}
+	return candidate
+}
+
+func rateLimitRetryWait(err error) (time.Duration, bool) {
+	if err == nil || statusCodeFromError(err) != http.StatusTooManyRequests {
+		return 0, false
+	}
+	// A Home round owns its aggregated retry timing; keep its ordering.
+	var exhausted *homeRetryRoundExhaustedError
+	if errors.As(err, &exhausted) {
+		return 0, false
+	}
+	wait := trustedRetryAfterHint(err)
+	if wait == nil || *wait <= 0 {
+		return 0, false
+	}
+	return *wait, true
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
@@ -630,7 +660,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			durationExec := time.Since(startExec)
 			if errExec != nil {
 				if hasUpstreamExecutionAttempt(errExec) {
-					upstreamErr = errExec
+					upstreamErr = preferSoonerRetryableError(upstreamErr, errExec)
 				}
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -648,7 +678,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
 						if hasUpstreamExecutionAttempt(errExec) {
-							upstreamErr = errExec
+							upstreamErr = preferSoonerRetryableError(upstreamErr, errExec)
 						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
@@ -852,7 +882,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			durationExec := time.Since(startExec)
 			if errExec != nil {
 				if hasUpstreamExecutionAttempt(errExec) {
-					upstreamErr = errExec
+					upstreamErr = preferSoonerRetryableError(upstreamErr, errExec)
 				}
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -870,7 +900,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
 						if hasUpstreamExecutionAttempt(errExec) {
-							upstreamErr = errExec
+							upstreamErr = preferSoonerRetryableError(upstreamErr, errExec)
 						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
@@ -1234,7 +1264,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
 			if hasUpstreamExecutionAttempt(errStream) {
-				upstreamErr = errStream
+				upstreamErr = preferSoonerRetryableError(upstreamErr, errStream)
 			}
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errStream)
