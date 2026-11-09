@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -12,46 +11,47 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-// soonerRetryExecutor rejects every attempt with a quota 429. Only the first
-// credential tried recovers soon, so the last-tried error is the latest reset.
-type soonerRetryExecutor struct {
+// scriptedFailureExecutor fails the Nth attempt with the Nth scripted error,
+// whichever credential the manager picked for it.
+type scriptedFailureExecutor struct {
 	identifier string
+	script     []error
 	calls      atomic.Int32
 }
 
-func (e *soonerRetryExecutor) Identifier() string { return e.identifier }
+func (e *scriptedFailureExecutor) Identifier() string { return e.identifier }
 
-func (e *soonerRetryExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *scriptedFailureExecutor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, e.nextError(ctx)
 }
 
-func (e *soonerRetryExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *scriptedFailureExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	return nil, e.nextError(ctx)
 }
 
-func (*soonerRetryExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+func (*scriptedFailureExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
 	return auth, nil
 }
 
-func (e *soonerRetryExecutor) CountTokens(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *scriptedFailureExecutor) CountTokens(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, e.nextError(ctx)
 }
 
-func (*soonerRetryExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+func (*scriptedFailureExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
 }
 
-func (e *soonerRetryExecutor) nextError(ctx context.Context) error {
+func (e *scriptedFailureExecutor) nextError(ctx context.Context) error {
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
-	wait := 30 * time.Hour
-	if e.calls.Add(1) == 1 {
-		wait = 2 * time.Hour
+	call := int(e.calls.Add(1)) - 1
+	if call >= len(e.script) {
+		return &Error{HTTPStatus: http.StatusInternalServerError, Message: "unexpected extra attempt"}
 	}
-	return &retryAfterStatusError{
-		status:     http.StatusTooManyRequests,
-		message:    fmt.Sprintf("usage limit reached, resets in %s", wait),
-		retryAfter: wait,
-	}
+	return e.script[call]
+}
+
+func quotaRejection(message string, wait time.Duration) error {
+	return &retryAfterStatusError{status: http.StatusTooManyRequests, message: message, retryAfter: wait}
 }
 
 func TestExhaustedPoolReportsSoonestRetryableQuotaError(t *testing.T) {
@@ -81,32 +81,58 @@ func TestExhaustedPoolReportsSoonestRetryableQuotaError(t *testing.T) {
 			},
 		},
 	}
+	serverFailure := &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream server failure"}
+	scenarios := []struct {
+		name    string
+		script  []error
+		wantMsg string
+	}{
+		{
+			name:    "soonest tried first",
+			script:  []error{quotaRejection("resets in 2h", 2*time.Hour), quotaRejection("resets in 30h", 30*time.Hour), quotaRejection("resets in 31h", 31*time.Hour)},
+			wantMsg: "resets in 2h",
+		},
+		{
+			name:    "other failure between quota rejections",
+			script:  []error{quotaRejection("resets in 2h", 2*time.Hour), serverFailure, quotaRejection("resets in 30h", 30*time.Hour)},
+			wantMsg: "resets in 2h",
+		},
+		{
+			name:    "newest failure is not a quota rejection",
+			script:  []error{quotaRejection("resets in 2h", 2*time.Hour), quotaRejection("resets in 30h", 30*time.Hour), serverFailure},
+			wantMsg: serverFailure.Message,
+		},
+	}
 
 	for _, path := range paths {
-		t.Run(path.name, func(t *testing.T) {
-			provider := "sooner-retry-" + path.name
-			model := provider + "-model"
-			manager := NewManager(nil, nil, nil)
-			manager.SetRetryConfig(0, 0, 0)
-			executor := &soonerRetryExecutor{identifier: provider}
-			manager.RegisterExecutor(executor)
-			registerRetryRoundLocalAuths(t, manager, provider, model, map[string]int{
-				provider + "-a": 0,
-				provider + "-b": 0,
-				provider + "-c": 0,
-			})
+		for _, scenario := range scenarios {
+			t.Run(path.name+"/"+scenario.name, func(t *testing.T) {
+				provider := "sooner-retry-" + path.name
+				model := provider + "-model"
+				manager := NewManager(nil, nil, nil)
+				manager.SetRetryConfig(0, 0, 0)
+				executor := &scriptedFailureExecutor{identifier: provider, script: scenario.script}
+				manager.RegisterExecutor(executor)
+				registerRetryRoundLocalAuths(t, manager, provider, model, map[string]int{
+					provider + "-a": 0,
+					provider + "-b": 0,
+					provider + "-c": 0,
+				})
 
-			errInvoke := path.invoke(manager, provider, model)
-			if got := executor.calls.Load(); got != 3 {
-				t.Fatalf("executor calls = %d, want one attempt per credential", got)
-			}
-			if status := statusCodeFromError(errInvoke); status != http.StatusTooManyRequests {
-				t.Fatalf("status = %d (%v), want 429", status, errInvoke)
-			}
-			var quotaErr *retryAfterStatusError
-			if !errors.As(errInvoke, &quotaErr) || quotaErr.retryAfter != 2*time.Hour {
-				t.Fatalf("client error = %v, want the credential that resets in 2h", errInvoke)
-			}
-		})
+				errInvoke := path.invoke(manager, provider, model)
+				if got := executor.calls.Load(); got != 3 {
+					t.Fatalf("executor calls = %d, want one attempt per credential", got)
+				}
+				if errInvoke == nil || errInvoke.Error() != scenario.wantMsg {
+					t.Fatalf("client error = %v, want %q", errInvoke, scenario.wantMsg)
+				}
+				var quotaErr *retryAfterStatusError
+				if errors.As(errInvoke, &quotaErr) {
+					if hint := retryAfterFromError(errInvoke); hint == nil || *hint > quotaErr.retryAfter {
+						t.Fatalf("retry hint = %v, want at most %s from the reported credential", hint, quotaErr.retryAfter)
+					}
+				}
+			})
+		}
 	}
 }

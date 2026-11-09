@@ -122,6 +122,11 @@ func TestQuotaBalanceCodexIgnoresAllZeroSecondaryWindow(t *testing.T) {
 	if !snapshot.Known || len(snapshot.Windows) != 1 {
 		t.Fatalf("snapshot = %#v, want the weekly primary window only", snapshot)
 	}
+	withoutResetAfter := liveShape()
+	delete(withoutResetAfter.Quota.Signals, "X-Codex-Secondary-Reset-After-Seconds")
+	if got := quotaBalanceSnapshotFor(withoutResetAfter, "gpt-6.1-sol", now, defaultQuotaBalanceMaxAge); !got.Known || len(got.Windows) != 1 {
+		t.Fatalf("placeholder without reset-after = %#v, want the weekly primary window only", got)
+	}
 	if window := snapshot.Windows[0]; window.Duration != 7*24*time.Hour || window.RemainingBasisPoints != 0 ||
 		!window.ResetAt.Equal(now.Add(136159*time.Second)) {
 		t.Fatalf("primary window = %#v, want exhausted weekly window", window)
