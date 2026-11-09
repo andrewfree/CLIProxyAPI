@@ -94,6 +94,61 @@ func TestQuotaBalanceCodexDurationsAndObservedRelativeReset(t *testing.T) {
 	}
 }
 
+// Live Codex responses for plans without a second window report it as all
+// zeros. That placeholder must not discard the real primary window.
+func TestQuotaBalanceCodexIgnoresAllZeroSecondaryWindow(t *testing.T) {
+	now := quotaBalanceTestNow()
+	liveShape := func() *Auth {
+		auth := quotaBalanceTestAuth("codex", now)
+		auth.Quota.Signals = map[string]string{
+			"X-Codex-Active-Limit":                         "premium",
+			"X-Codex-Credits-Balance":                      "0",
+			"X-Codex-Credits-Has-Credits":                  "False",
+			"X-Codex-Credits-Unlimited":                    "False",
+			"X-Codex-Plan-Type":                            "pro",
+			"X-Codex-Primary-Over-Secondary-Limit-Percent": "0",
+			"X-Codex-Primary-Reset-After-Seconds":          "136159",
+			"X-Codex-Primary-Reset-At":                     strconv.FormatInt(now.Add(136159*time.Second).Unix(), 10),
+			"X-Codex-Primary-Used-Percent":                 "100",
+			"X-Codex-Primary-Window-Minutes":               "10080",
+			"X-Codex-Secondary-Reset-After-Seconds":        "0",
+			"X-Codex-Secondary-Used-Percent":               "0",
+			"X-Codex-Secondary-Window-Minutes":             "0",
+		}
+		return auth
+	}
+
+	snapshot := quotaBalanceSnapshotFor(liveShape(), "gpt-6.1-sol", now, defaultQuotaBalanceMaxAge)
+	if !snapshot.Known || len(snapshot.Windows) != 1 {
+		t.Fatalf("snapshot = %#v, want the weekly primary window only", snapshot)
+	}
+	withoutResetAfter := liveShape()
+	delete(withoutResetAfter.Quota.Signals, "X-Codex-Secondary-Reset-After-Seconds")
+	if got := quotaBalanceSnapshotFor(withoutResetAfter, "gpt-6.1-sol", now, defaultQuotaBalanceMaxAge); !got.Known || len(got.Windows) != 1 {
+		t.Fatalf("placeholder without reset-after = %#v, want the weekly primary window only", got)
+	}
+	if window := snapshot.Windows[0]; window.Duration != 7*24*time.Hour || window.RemainingBasisPoints != 0 ||
+		!window.ResetAt.Equal(now.Add(136159*time.Second)) {
+		t.Fatalf("primary window = %#v, want exhausted weekly window", window)
+	}
+
+	for name, modify := range map[string]func(map[string]string){
+		"nonzero usage":       func(s map[string]string) { s["X-Codex-Secondary-Used-Percent"] = "10" },
+		"nonzero reset-after": func(s map[string]string) { s["X-Codex-Secondary-Reset-After-Seconds"] = "1800" },
+		"absolute reset": func(s map[string]string) {
+			s["X-Codex-Secondary-Reset-At"] = strconv.FormatInt(now.Add(time.Hour).Unix(), 10)
+		},
+	} {
+		t.Run("zero length with "+name, func(t *testing.T) {
+			auth := liveShape()
+			modify(auth.Quota.Signals)
+			if snapshot := quotaBalanceSnapshotFor(auth, "gpt-6.1-sol", now, defaultQuotaBalanceMaxAge); snapshot.Known {
+				t.Fatalf("zero-length window with data was accepted: %#v", snapshot)
+			}
+		})
+	}
+}
+
 func TestQuotaBalanceRejectsUntrustworthySnapshots(t *testing.T) {
 	now := quotaBalanceTestNow()
 	tests := []struct {

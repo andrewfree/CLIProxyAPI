@@ -86,6 +86,11 @@ func quotaBalanceSnapshotFor(auth *Auth, routeModel string, now time.Time, maxAg
 			if !hasUsed && !hasMinutes && !hasReset && !hasAfter {
 				continue
 			}
+			// Plans without this window report it as all zeros. That
+			// placeholder carries no forecast, unlike a malformed window.
+			if used == "0" && minutes == "0" && !hasReset && (!hasAfter || after == "0") {
+				continue
+			}
 			remaining, okUsed := quotaBalanceRemaining(used, 100)
 			durationMinutes, errMinutes := strconv.ParseInt(minutes, 10, 64)
 			if !okUsed || errMinutes != nil || durationMinutes <= 0 || durationMinutes > (math.MaxInt64-int64(time.Hour))/int64(time.Minute) {
