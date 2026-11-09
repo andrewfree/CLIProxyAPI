@@ -22,14 +22,14 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 	attempt := 0
 	retryRoundPending := false
 	retryRoundWaited := false
-	var preferredUpstreamErr error
+	var preferredUpstream upstreamFailureChoice
 	for {
 		response, errExecute := m.executeHomeOnce(ctx, providers, req, opts, countTokens, maxRetryCredentials, &homeRetryLimit, attempt)
 		if errExecute == nil {
 			return response, nil
 		}
 		if hasUpstreamExecutionAttempt(errExecute) {
-			preferredUpstreamErr = errExecute
+			preferredUpstream.observe(errExecute)
 		}
 		if retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errExecute, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
@@ -50,8 +50,8 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExecute, attempt, providers, retryModel, maxWait, homeRetryLimit, defaultRequestRetry)
 		if !shouldRetry {
-			if preferredUpstreamErr != nil && isHomeRetryRoundExhausted(errExecute) {
-				errExecute = preferredExecutionAttemptError(errExecute, preferredUpstreamErr)
+			if preferredUpstream.err() != nil && isHomeRetryRoundExhausted(errExecute) {
+				errExecute = preferredExecutionAttemptError(errExecute, preferredUpstream.err())
 			}
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExecute)
 		}
@@ -77,12 +77,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
-	var upstreamErr error
+	var upstream upstreamFailureChoice
 	var roundTiming homeRetryRoundTiming
 	for homeAuthCount := 1; ; homeAuthCount++ {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstreamErr), roundTiming.RetryAfter(), true)
+				return cliproxyexecutor.Response{}, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstream.err()), roundTiming.RetryAfter(), true)
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -91,7 +91,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
 		if errSelection != nil {
-			preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+			preferredErr := preferredExecutionAttemptError(lastErr, upstream.err())
 			var homeCooldown *homeDispatchRetryAfterError
 			if lastErr != nil && errors.As(errSelection, &homeCooldown) && homeCooldown != nil {
 				observeHomeCooldownRetryLimit(homeCooldown, homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == "")
@@ -113,7 +113,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return cliproxyexecutor.Response{}, errEnd
 			}
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstreamErr), roundTiming.RetryAfter(), false)
+				return cliproxyexecutor.Response{}, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstream.err()), roundTiming.RetryAfter(), false)
 			}
 			return cliproxyexecutor.Response{}, repeatedHomeAuthError()
 		}
@@ -255,7 +255,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			if errExecute != nil {
 				if hasUpstreamExecutionAttempt(errExecute) {
-					upstreamErr = errExecute
+					upstream.observe(errExecute)
 				}
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
@@ -283,7 +283,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					errExecute = annotateTrustedRetryAfterByHint(errExecute)
-					syncPreferredUpstreamError(&upstreamErr, errExecute)
+					upstream.sync(errExecute)
 					lastErr = errExecute
 					releaseAttempt()
 					selection.End("request_stopped")
