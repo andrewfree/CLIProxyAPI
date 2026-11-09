@@ -283,7 +283,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					errExecute = annotateTrustedRetryAfterByHint(errExecute)
-					upstream.sync(errExecute)
 					lastErr = errExecute
 					releaseAttempt()
 					selection.End("request_stopped")
