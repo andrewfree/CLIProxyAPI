@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -134,5 +136,51 @@ func TestExhaustedPoolReportsSoonestRetryableQuotaError(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestHomeExhaustedPoolReportsSoonestRetryableQuotaError(t *testing.T) {
+	paths := []struct {
+		name   string
+		invoke func(*Manager) error
+	}{
+		{"execute", func(manager *Manager) error {
+			_, errExecute := manager.Execute(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{})
+			return errExecute
+		}},
+		{"count-tokens", func(manager *Manager) error {
+			_, errCount := manager.ExecuteCount(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{})
+			return errCount
+		}},
+		{"stream", func(manager *Manager) error {
+			_, errStream := manager.ExecuteStream(context.Background(), []string{"home-retry-contract"}, cliproxyexecutor.Request{Model: "gpt"}, cliproxyexecutor.Options{Stream: true})
+			return errStream
+		}},
+	}
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			dispatcher := &retryContractHomeDispatcher{authIDs: []string{"home-retry-a", "home-retry-b", "home-retry-c"}}
+			executor := &retryContractHomeExecutor{
+				failAll: true,
+				failures: map[string]error{
+					"home-retry-a": quotaRejection("resets in 2h", 2*time.Hour),
+					"home-retry-b": &Error{HTTPStatus: http.StatusInternalServerError, Message: "upstream server failure"},
+					"home-retry-c": quotaRejection("resets in 30h", 30*time.Hour),
+				},
+			}
+			manager := NewManager(nil, nil, nil)
+			manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+			manager.SetRetryConfig(0, 0, 3)
+			manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+			manager.RegisterExecutor(executor)
+
+			errInvoke := path.invoke(manager)
+			if calls := executor.Calls(); len(calls) != 3 {
+				t.Fatalf("executor calls = %v, want one attempt per credential", calls)
+			}
+			if errInvoke == nil || errInvoke.Error() != "resets in 2h" {
+				t.Fatalf("client error = %v, want the credential that resets in 2h", errInvoke)
+			}
+		})
 	}
 }
