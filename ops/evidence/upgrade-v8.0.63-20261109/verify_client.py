@@ -6,7 +6,7 @@ for line in (a.root/'.env').read_text().splitlines():
   name,value=line.split('=',1);values[name]=value.strip().strip('"').strip("'")
 management=urllib.request.Request('http://127.0.0.1:8317/v0/management/config',headers={'Authorization':'Bearer '+values['MANAGEMENT_PASSWORD']})
 with urllib.request.urlopen(management,timeout=10) as response:c=json.load(response)
-key=c['api-keys'][0];base=a.url or 'http://127.0.0.1:8317' 
+key=c['api-keys'][0];base=a.url or 'http://127.0.0.1:8317'
 report={'captured_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'endpoint':base,'catalog_ok':False,'generation_attempted':a.generate}
 def request(route,payload=None):
  return urllib.request.urlopen(urllib.request.Request(base+route,data=None if payload is None else json.dumps(payload).encode(),headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'}))
