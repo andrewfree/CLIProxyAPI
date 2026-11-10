@@ -246,6 +246,10 @@ func TestManagerQuotaAwareAliasCooldownAndPrefix(t *testing.T) {
 					}
 					return cliproxyexecutor.Response{Payload: []byte(selected.ID)}, nil
 				}))
+				if _, errPick := quotaManagerTestRun(manager, mode, route, cliproxyexecutor.Options{}); statusCodeFromError(errPick) != http.StatusTooManyRequests {
+					t.Fatalf("migrated alias cooldown error=%v, want 429", errPick)
+				}
+				manager.MarkResult(context.Background(), Result{AuthID: healthy.ID, Provider: "codex", Model: target, Success: true})
 				got, errPick := quotaManagerTestRun(manager, mode, route, cliproxyexecutor.Options{})
 				if errPick != nil || got != healthy.ID {
 					t.Fatalf("resolved healthy alias auth=%q error=%v, want %q", got, errPick, healthy.ID)

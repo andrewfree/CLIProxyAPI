@@ -69,12 +69,12 @@ func TestQuotaAwareAffinityTransientMapHonorsConfiguredWeight(t *testing.T) {
 			candidate.ModelStates = map[string]*ModelState{
 				"model": {Unavailable: true, NextRetryAfter: time.Now().Add(time.Hour), LastError: &Error{HTTPStatus: 503}},
 			}
-			ids := manager.transientlyUnavailableSessionAffinityAuthIDs(affinity, []*Auth{candidate}, "model", time.Now())
+			ids := manager.transientlyUnavailableSessionAffinityAuthIDs(context.Background(), affinity, []*Auth{candidate}, "model", time.Now())
 			if _, preserved := ids[candidate.ID]; preserved != shadow {
 				t.Fatalf("zero weight preserved=%t, shadow=%t", preserved, shadow)
 			}
 			candidate.Attributes[AttributeWeight] = "1"
-			ids = manager.transientlyUnavailableSessionAffinityAuthIDs(affinity, []*Auth{candidate}, "model", time.Now())
+			ids = manager.transientlyUnavailableSessionAffinityAuthIDs(context.Background(), affinity, []*Auth{candidate}, "model", time.Now())
 			if _, preserved := ids[candidate.ID]; !preserved {
 				t.Fatal("positive-weight transient binding was discarded")
 			}
