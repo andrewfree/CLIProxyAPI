@@ -1,0 +1,26 @@
+{
+  "captured_at": "2026-11-10T02:56:46.682971+00:00",
+  "arch": "amd64",
+  "container_id": "ae865861c410cb26b49d68564cc2ff6a76ddc4540a5afb4213787654858f17e1",
+  "started_at": "2026-11-10T02:51:36.475339373Z",
+  "unrelated_container_count": 69,
+  "missing_unrelated_containers": [
+    "/mcp-web-research-searxng-mcp-run-4175e352362a"
+  ],
+  "checks": {
+    "config_content_unchanged": true,
+    "environment_only_image_changed": true,
+    "config_mode_preserved": true,
+    "image_matches_contract": true,
+    "loopback_ports_preserved": true,
+    "state_mounts_preserved": true,
+    "host_container_config_identical": true,
+    "restart_always": true,
+    "pprof_listener_absent": true,
+    "no_home_bootstrap": true,
+    "existing_unrelated_containers_unchanged": true,
+    "configuration_inode_preserved": true,
+    "cursor_plugin_unchanged": true
+  },
+  "passed": true
+}

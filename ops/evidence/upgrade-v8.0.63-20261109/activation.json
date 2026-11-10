@@ -1,0 +1,59 @@
+{
+  "version": "v8.0.63-fleet.1",
+  "upstream": "v8.0.63",
+  "source_commit": "87e90c0c7629fd2d667ef5be13e2fc775005d5d8",
+  "images": {
+    "amd64": "sha256:e3b0986909ae18210d239fb7ad769ea655f92ad70136a230f9a0e577ba1d298c",
+    "arm64": "sha256:e859340e0e1b11d4f0560d83ee347a85af0bf7151b2affaf098bffc91574f7e8"
+  },
+  "previous_images": {
+    "arm64": "sha256:da5e2f6a4ea9fa3ffa6a1b962e6000e531bf1d72e1e8d8951e649d91ade83abf",
+    "amd64": "sha256:47e2118e0b940b0d14ed59badb819b88c035d70de7f76f2c359057066e08e770"
+  },
+  "authorization": "Andrew: ok finish/deploy commit etc",
+  "rollout_order": [
+    "will",
+    "mac"
+  ],
+  "verified_at": "2026-11-10T02:57:41.558675+00:00",
+  "model_verification": {
+    "model": "gpt-6-luna",
+    "requests_per_host": 1,
+    "both_completed": true,
+    "total_tokens_per_host": 47
+  },
+  "backups": {
+    "mac": "/Users/rever/cliproxy/ops/runtime/upgrade-v8.0.63-20261109/backup-20261110T024322Z",
+    "will": "/home/andrew/cliproxy/ops/runtime/upgrade-v8.0.63-20261109/backup-20261110T024322Z"
+  },
+  "validation_workaround": "Two tests fail unchanged on unmodified upstream v8.0.63. All other Go tests pass with those two excluded; full suite is not green.",
+  "known_upstream_failures": [
+    "TestPionMediaRelayBridgesAudioAndDataChannel",
+    "TestServerResponsesWebsocketReauthorizesEachTurn"
+  ],
+  "local_ci": "2/2 jobs pass against the upstream v8.0.63 base; no workflows changed",
+  "pisec_inventory_commit": "b8d1dc4",
+  "pisec_publication": "local commit only; existing branch has unrelated unpublished history and edits",
+  "qualification_limits": [
+    "No exhaustive provider/account routing, OAuth refresh/restart or native T3 turn qualification.",
+    "Will had one pre-existing one-shot MCP container no longer present during the final observation; its cause is unknown. All other observed baseline container IDs and images were unchanged."
+  ],
+  "model": "gpt-6.1-sol",
+  "artifact_sha256": {
+    "build-receipt.json": "418bdf414458f11e74a4783aaf68950fc1fa28f592492af76f57a56974222136",
+    "validation.json": "1293f42269dd1e2bc4c8670d4aefee5251c579fb8143675f920c7aaa69deaf7b",
+    "source-integrity.json": "a2843afad2371385419173b5270a3dc3d25a584bae03ff41abd9bc05ad1cff5c",
+    "activation-amd64.json": "b43cab518bf8919ec7d89821fcb51d90e2dcc33274f059e502147d8997427ef8",
+    "activation-arm64.json": "29aa68d89f537ec062e2612346e6be32ed4a854240854a99a03ea7389e265227",
+    "mac-live-verifier.json": "9f83892a870c2254a52ef07883709573881c1d4301665ed091e0965e9d26d081",
+    "will-live-verifier.json": "0d7f8f7d970e9a563467f0a2461e9f0227f783849252a0fbcb54c0ca3ffc1953",
+    "will-owner-verifier.json": "872419d95032a9ce0159e3c141cd57f1beac63af10beca318f02f38b5185d5e8",
+    "mac-generation.json": "617aa062e60493e0b565ee09a82066e133beb261be6fb5cd821279b7f9eaebda",
+    "will-generation.json": "7562baf27744f8d083b0d4582b476a6e6ebd3537853e098c0e2c9c61c6735e59",
+    "mac-to-will-catalog.json": "793199cd7cf0154f22834a6518f168a75cc435c786ca20a5c404b3b9eda38943",
+    "mac-preservation.json": "e9d1113d720a1f925c441ec227d274d21c7372879faab07e80c587dc04120e8b",
+    "will-preservation.json": "97cea77a77260142db6cf12041b8fc7d07b8d99b7d603566352f3275d3bf4e61",
+    "local-ci-fleet-delta.log": "d26327a3c4a02fa9140c555c8d6dab4baaf047669effe21e92ea941ceca43b2a",
+    "local-ci-pins.log": "94c4ec163295be645c3eb1ead49f4f32aae8e693f3c6d09eea173fc6c31955d4"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "captured_at": "2026-11-10T02:52:17.980130+00:00",
+  "endpoint": "http://127.0.0.1:8317",
+  "catalog_ok": true,
+  "generation_attempted": true,
+  "model_count": 112,
+  "luna_models": [
+    "gpt-5.6-luna",
+    "gpt-6-luna"
+  ],
+  "kimi_fallback_visible": true,
+  "model": "gpt-6-luna",
+  "http_status": 200,
+  "selected_account_evidence": true,
+  "selected_account_sha256": "32dda6727b79e180fe732427a3eba7c0a1bd2b5d7d83e694e40e286e44c98234",
+  "elapsed_seconds": 3.45,
+  "completed": true,
+  "response_matches": true,
+  "usage": {
+    "input_tokens": 36,
+    "input_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0
+    },
+    "output_tokens": 11,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 47
+  },
+  "response_model": "gpt-6-luna"
+}

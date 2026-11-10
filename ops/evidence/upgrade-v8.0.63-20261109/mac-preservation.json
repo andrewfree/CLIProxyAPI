@@ -1,0 +1,24 @@
+{
+  "captured_at": "2026-11-10T02:56:46.127180+00:00",
+  "arch": "arm64",
+  "container_id": "78b03985c58dec7af09f9ebbbabfaa23ec4c575ae8e12e7d4c57053c1a78a6b2",
+  "started_at": "2026-11-10T02:53:01.556713458Z",
+  "unrelated_container_count": 3,
+  "missing_unrelated_containers": [],
+  "checks": {
+    "config_content_unchanged": true,
+    "environment_only_image_changed": true,
+    "config_mode_preserved": true,
+    "image_matches_contract": true,
+    "loopback_ports_preserved": true,
+    "state_mounts_preserved": true,
+    "host_container_config_identical": true,
+    "restart_always": true,
+    "pprof_listener_absent": true,
+    "no_home_bootstrap": true,
+    "existing_unrelated_containers_unchanged": true,
+    "configuration_inode_preserved": true,
+    "cursor_plugin_unchanged": true
+  },
+  "passed": true
+}

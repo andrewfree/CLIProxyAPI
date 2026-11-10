@@ -1,0 +1,20 @@
+{
+  "source_commit": "87e90c0c7629fd2d667ef5be13e2fc775005d5d8",
+  "upstream_commit": "6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a",
+  "required_compile": "passed",
+  "full_suite_exit_code": 1,
+  "known_upstream_failures": [
+    "TestPionMediaRelayBridgesAudioAndDataChannel",
+    "TestServerResponsesWebsocketReauthorizesEachTurn"
+  ],
+  "both_fail_on_unmodified_upstream": true,
+  "remainder_suite_exit_code": 0,
+  "quota_race_exit_code": 0,
+  "local_ci": {
+    "result": "pass",
+    "jobs": "2/2",
+    "base": "v8.0.63",
+    "receipt": "will:/home/andrew/.local/state/local-ci/runs/andrewfree__CLIProxyAPI/87e90c0c7629-d96a9b199744"
+  },
+  "tests_changed": "Migrate two local test calls to the upstream context signature; assert upstream alias cooldown migration and subsequent recovery; adapt new upstream Claude cooldown tests to the existing one-minute fleet Retry-After filter and retain short-hint coverage."
+}
