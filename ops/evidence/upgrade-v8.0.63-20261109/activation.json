@@ -32,8 +32,8 @@
     "TestServerResponsesWebsocketReauthorizesEachTurn"
   ],
   "local_ci": "2/2 jobs pass against the upstream v8.0.63 base; no workflows changed",
-  "pisec_inventory_commit": "b8d1dc4",
-  "pisec_publication": "local commit only; existing branch has unrelated unpublished history and edits",
+  "pisec_inventory_commit": "cd7c017bf664da3f907f1869ca8b7cf71bf5eba1",
+  "pisec_publication": "Pushed only the focused inventory update to codeone/pisec master from a separate checkout based on will/master. The active Windows branch and its unrelated history and edits were not pushed.",
   "qualification_limits": [
     "No exhaustive provider/account routing, OAuth refresh/restart or native T3 turn qualification.",
     "Will had one pre-existing one-shot MCP container no longer present during the final observation; its cause is unknown. All other observed baseline container IDs and images were unchanged."
@@ -55,5 +55,7 @@
     "will-preservation.json": "97cea77a77260142db6cf12041b8fc7d07b8d99b7d603566352f3275d3bf4e61",
     "local-ci-fleet-delta.log": "d26327a3c4a02fa9140c555c8d6dab4baaf047669effe21e92ea941ceca43b2a",
     "local-ci-pins.log": "94c4ec163295be645c3eb1ead49f4f32aae8e693f3c6d09eea173fc6c31955d4"
-  }
+  },
+  "pisec_local_branch_commit": "b8d1dc4",
+  "pisec_shared_base_inventory_tests": 40
 }
