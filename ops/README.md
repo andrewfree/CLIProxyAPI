@@ -234,9 +234,37 @@ docker exec -it cli-proxy-api \
   -no-browser
 ```
 
-The command prints an authorization URL and waits up to 5 minutes. Open that URL manually; do not have automation preview or fetch it. The browser callback to `http://localhost:54545/callback` reaches the login process through the existing loopback-only Compose port. A successful login replaces `auths/claude-<email>.json` with mode 0600 data.
+The command prints an authorization URL and waits up to 5 minutes. Open that URL manually; do not have automation preview or fetch it. When the browser and login process run on the same host, the callback to `http://localhost:54545/callback` reaches the login process through the existing loopback-only Compose port. A successful login saves the matching credential under `auths/` with mode `0600`.
 
 Do not restart CLIProxy while testing or waiting on a token refresh. Claude refresh tokens rotate; killing the process after the provider consumes the old token but before CLIProxy saves the response can strand the old token on disk.
+
+#### Recover a Claude login on Will from the Mac
+
+Use the management API on Will through SSH. Preserve the existing credential's
+prefix and account identity. Keep rotating tokens local to each proxy instance.
+
+1. Create a targeted session with `POST /v8/management/oauth/auth-url`. Set
+   `provider` to `claude` and `name` to the existing credential filename. Set
+   `verify` to `true` and `verify_model` to the exact model you need to restore.
+   Retain the returned `state` privately. Have Andrew open the authorization
+   URL and approve the intended account.
+2. Ensure the completed callback reaches Will. With `is_webui: true`, the callback
+   forwarder redirects the browser to `127.0.0.1:8317/anthropic/callback`. On the
+   Mac, that address belongs to the Mac proxy. Forwarding port `54545` alone
+   does not correct this second hop. The legacy callback page displays
+   "Authentication successful" even when that instance has no matching session.
+3. If the callback landed on the Mac, submit its response to Will with
+   `POST /v8/management/oauth/callback`. Put `provider: claude`, the exact session
+   `state`, and the returned `code` in the request body. Keep the code out of
+   logs. Do not reopen the authorization URL or copy credentials between hosts.
+4. Poll `GET /v8/management/oauth/status?state=...` on Will. Confirm `saved`,
+   `adopted`, and `inference_verified` are `true`. Then call
+   `POST /v8/management/credentials/refresh` with the same credential `name`.
+   Confirm `renewal_verified: true`, `status: active`, `unavailable: false`, and
+   no `refresh_error`. Check that the saved file still has mode `0600`.
+
+The targeted session expires after five minutes. If the session has expired,
+create a new one. Verify recovery on Will before resuming the affected T3 chat.
 
 ### Kimi
 
