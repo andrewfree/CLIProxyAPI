@@ -1,0 +1,24 @@
+=== RUN   TestPionMediaRelayBridgesAudioAndDataChannel
+time="2026-11-11T05:11:26Z" level=info msg="codex live WebRTC media session created" media_session_id=e462209e-1b11-4151-b414-0f11964b7dd9 peer=session
+time="2026-11-11T05:11:26Z" level=info msg="codex live WebRTC peer connecting" media_session_id=e462209e-1b11-4151-b414-0f11964b7dd9 peer=local state=connecting
+time="2026-11-11T05:11:26Z" level=info msg="codex live WebRTC peer connecting" call_id=call-log-test media_session_id=e462209e-1b11-4151-b414-0f11964b7dd9 peer=remote state=connecting
+    media_test.go:268: upstream DataChannel was not created
+time="2026-11-11T05:11:32Z" level=info msg="codex live WebRTC media session closing" call_id=call-log-test media_session_id=e462209e-1b11-4151-b414-0f11964b7dd9 peer=session reason=closed
+time="2026-11-11T05:11:33Z" level=info msg="codex live WebRTC peer closed" call_id=call-log-test media_session_id=e462209e-1b11-4151-b414-0f11964b7dd9 peer=local state_after=closed state_before=connecting
+time="2026-11-11T05:11:33Z" level=info msg="codex live WebRTC peer closed" call_id=call-log-test media_session_id=e462209e-1b11-4151-b414-0f11964b7dd9 peer=remote state_after=closed state_before=connecting
+time="2026-11-11T05:11:33Z" level=info msg="codex live WebRTC media session closed" call_id=call-log-test media_session_id=e462209e-1b11-4151-b414-0f11964b7dd9 peer=session reason=closed
+--- FAIL: TestPionMediaRelayBridgesAudioAndDataChannel (6.65s)
+FAIL
+FAIL	github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live	6.681s
+=== RUN   TestServerResponsesWebsocketReauthorizesEachTurn
+time="2026-11-11T05:11:33Z" level=info msg="responses websocket: client connected id=d2e4c0b9-aa20-4f67-bbd4-c3d55607f69a remote=127.0.0.1"
+time="2026-11-11T05:11:33Z" level=warning msg="401 |            0s |       127.0.0.1 | GET     \"/v1/responses\"" request_id=01a1c904-bcc2-7077-b861-c09d93cf329d
+time="2026-11-11T05:11:33Z" level=info msg="responses websocket: downstream_out id=d2e4c0b9-aa20-4f67-bbd4-c3d55607f69a type=1 event=error payload={\"type\":\"error\",\"status\":401,\"error\":{\"message\":\"Invalid API key\",\"type\":\"authentication_error\",\"code\":\"invalid_api_key\"}}"
+time="2026-11-11T05:11:33Z" level=info msg="responses websocket: upstream execution session closed id=d2e4c0b9-aa20-4f67-bbd4-c3d55607f69a"
+    testing.go:1464: TempDir RemoveAll cleanup: unlinkat /build/tmp-v8066/TestServerResponsesWebsocketReauthorizesEachTurn1578009841/001/auth/logs: directory not empty
+time="2026-11-11T05:11:33Z" level=warning msg="failed to remove request body temp file" error="remove /build/tmp-v8066/TestServerResponsesWebsocketReauthorizesEachTurn1578009841/001/auth/logs/request-body-992487172.tmp: no such file or directory"
+--- FAIL: TestServerResponsesWebsocketReauthorizesEachTurn (0.00s)
+time="2026-11-11T05:11:33Z" level=info msg="200 |           1ms |       127.0.0.1 | GET     \"/v1/responses\"" request_id=01a1c904-bcc1-71fe-a16f-8c6f4b010c5a
+FAIL
+FAIL	github.com/router-for-me/CLIProxyAPI/v8/internal/api	0.023s
+FAIL

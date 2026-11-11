@@ -1,0 +1,65 @@
+{
+  "arch": "amd64",
+  "image": "cliproxy-fleet:v8.0.66-fleet.1-amd64",
+  "plugin_file_sha256": {
+    "auth-cursor-v2.1.1.so": "75bfdcf6f9dd7b177d7b6e3970c9bdc66101dd2c67b98c1bfa399ef84e290894",
+    "cliproxybar-quota.so": "524baa3a82a93ad09efa041d9ebd3e2d233546b8bb8dd2d37dafd94865aea3ff"
+  },
+  "started_utc": "2026-11-11T05:16:01.582563+00:00",
+  "failures": [],
+  "limitations": [
+    "No upstream inference or quota fetch; no production credentials available."
+  ],
+  "health": {
+    "status": "ok"
+  },
+  "catalog_status": 200,
+  "catalog_model_count": 0,
+  "registered_plugins": [
+    {
+      "id": "auth-cursor",
+      "registered": true,
+      "effective_enabled": true,
+      "version": "2.1.1",
+      "supports_quota": false,
+      "error": null
+    },
+    {
+      "id": "cliproxybar-quota",
+      "registered": true,
+      "effective_enabled": true,
+      "version": "0.1.0",
+      "supports_quota": true,
+      "error": null
+    }
+  ],
+  "plugins_enabled": true,
+  "strategy": {
+    "strategy": "quota-aware"
+  },
+  "loaded_routing": {
+    "strategy": "quota-aware"
+  },
+  "session_affinity": false,
+  "usage_statistics_enabled": false,
+  "credential_count": 0,
+  "version": "v8.0.66-fleet.1",
+  "revision": "815987ae113117253b37c7c0755e209fadd01372",
+  "image_id": "sha256:8169e6e322b7db49c1576a608d7b2c18d957ce05ccde45bbf4f4fd58c4a4553e",
+  "network_mode": "none",
+  "published_ports": {},
+  "mounts": [
+    {
+      "destination": "/stage-config.yaml",
+      "writable": false
+    },
+    {
+      "destination": "/stage-plugins",
+      "writable": false
+    }
+  ],
+  "do_not_track": true,
+  "isolated_container_removed": true,
+  "plugin_files_unchanged": true,
+  "finished_utc": "2026-11-11T05:16:03.291841+00:00"
+}

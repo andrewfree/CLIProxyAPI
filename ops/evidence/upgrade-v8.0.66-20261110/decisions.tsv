@@ -1,0 +1,5 @@
+ts	phase	decision	why	evidence	result
+2026-11-11T05:06:17.897762+00:00	frame	Build both Linux binaries on Will and deploy primary before fallback	Mac disk is low; retain custom fleet policy and a verified fallback	ops/runtime/upgrade-v8.0.66-20261110/status.md	baseline captured
+2026-11-11T05:12:36.076834+00:00	validation	Adapt new cooldown header coverage to the existing one-minute fleet policy	Preserve the deployed retry contract and test provider reset headers independently of omitted long Retry-After	815987ae113117253b37c7c0755e209fadd01372	test changed for fleet policy
+2026-11-11T05:12:36.077004+00:00	validation	Reproduce two full-suite failures on untouched v8.0.66 and run all remaining tests	Do not label upstream WebRTC and websocket cleanup failures as green	ops/runtime/upgrade-v8.0.66-20261110/upstream-baseline.log	validation workaround
+2026-11-11T05:15:31.167759+00:00	build	Assemble COPY-only runtime images using the local image builder	BuildKit interpreted a local image ID as a Docker Hub repository; binaries already built and hashed	ops/evidence/upgrade-v8.0.66-20261110/assemble_images.py	image-only retry

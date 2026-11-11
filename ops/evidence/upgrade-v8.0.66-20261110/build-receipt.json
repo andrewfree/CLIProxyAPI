@@ -1,0 +1,85 @@
+{
+  "version": "v8.0.66-fleet.1",
+  "upstream": "v8.0.66",
+  "source_commit": "815987ae113117253b37c7c0755e209fadd01372",
+  "source_archive_sha256": "51729044b2061992eec064354b649bae8bd52a63a68b8ae3bfe336de5c22c245",
+  "build_date": "2026-11-11T05:10:43.930377+00:00",
+  "authorization": "Andrew: do it and get everything commit/live/deployed/working tested etc.",
+  "build_only": true,
+  "binaries": {
+    "amd64": "411c38e5fb514813516cb9079ffa11e36972d40bd8611152cb1cd9ae614d0ad7",
+    "arm64": "e52fe92802789062d47ed9dc4e01f09a4d7f2779fadea15669c05d0bab9363b8"
+  },
+  "required_compilation": "passed: go build -o /build/test-output-v8066 ./cmd/server",
+  "validation": {
+    "version": "v8.0.66-fleet.1",
+    "upstream": "v8.0.66",
+    "source_commit": "815987ae113117253b37c7c0755e209fadd01372",
+    "source_archive_sha256": "51729044b2061992eec064354b649bae8bd52a63a68b8ae3bfe336de5c22c245",
+    "build_date": "2026-11-11T05:10:43.930377+00:00",
+    "authorization": "Andrew: do it and get everything commit/live/deployed/working tested etc.",
+    "checks": {
+      "required-compile": {
+        "exit_code": 0
+      },
+      "full-go-suite": {
+        "exit_code": 1,
+        "failed": [
+          {
+            "package": "github.com/router-for-me/CLIProxyAPI/v8/internal/api",
+            "test": "TestServerResponsesWebsocketReauthorizesEachTurn"
+          },
+          {
+            "package": "github.com/router-for-me/CLIProxyAPI/v8/internal/api",
+            "test": null
+          },
+          {
+            "package": "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live",
+            "test": "TestPionMediaRelayBridgesAudioAndDataChannel"
+          },
+          {
+            "package": "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live",
+            "test": null
+          }
+        ],
+        "passed_tests": 24206
+      },
+      "quota-race": {
+        "exit_code": 0
+      },
+      "remainder-go-suite": {
+        "exit_code": 0,
+        "passed_tests": 24206,
+        "excluded_tests": [
+          "TestPionMediaRelayBridgesAudioAndDataChannel",
+          "TestServerResponsesWebsocketReauthorizesEachTurn"
+        ],
+        "both_excluded_fail_on_unmodified_upstream": true
+      },
+      "local-ci": {
+        "exit_code": 0,
+        "jobs_passed": "2/2",
+        "source_commit": "815987ae113117253b37c7c0755e209fadd01372",
+        "comparison_base": "v8.0.66",
+        "receipt": "will:/home/andrew/.local/state/local-ci/runs/andrewfree__CLIProxyAPI/815987ae1131-97d43682977c"
+      }
+    },
+    "tests_changed": "Adapt the newly added long Claude cooldown header test to the one-minute Retry-After filter; retain authoritative provider reset-header assertions independently."
+  },
+  "amd64_image": {
+    "id": "sha256:8169e6e322b7db49c1576a608d7b2c18d957ce05ccde45bbf4f4fd58c4a4553e",
+    "architecture": "amd64",
+    "labels": {
+      "org.opencontainers.image.revision": "815987ae113117253b37c7c0755e209fadd01372",
+      "org.opencontainers.image.version": "v8.0.66-fleet.1"
+    }
+  },
+  "arm64_image": {
+    "id": "sha256:7d6204c451faa133207817b05515bff1c96959cafee677b810c33ac4854d4bdd",
+    "architecture": "arm64",
+    "labels": {
+      "org.opencontainers.image.revision": "815987ae113117253b37c7c0755e209fadd01372",
+      "org.opencontainers.image.version": "v8.0.66-fleet.1"
+    }
+  }
+}

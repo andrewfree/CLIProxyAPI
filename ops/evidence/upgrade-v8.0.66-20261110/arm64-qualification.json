@@ -1,0 +1,56 @@
+{
+  "arch": "arm64",
+  "image": "cliproxy-fleet:v8.0.66-fleet.1-arm64",
+  "plugin_file_sha256": {
+    "auth-cursor-v2.1.1.so": "4a2bb071c75f1bd83df561168da2a5a667777d422c41a83ac0f95315adce809a"
+  },
+  "started_utc": "2026-11-11T05:17:13.032975+00:00",
+  "failures": [],
+  "limitations": [
+    "No upstream inference or quota fetch; no production credentials available."
+  ],
+  "health": {
+    "status": "ok"
+  },
+  "catalog_status": 200,
+  "catalog_model_count": 0,
+  "registered_plugins": [
+    {
+      "id": "auth-cursor",
+      "registered": true,
+      "effective_enabled": true,
+      "version": "2.1.1",
+      "supports_quota": false,
+      "error": null
+    }
+  ],
+  "plugins_enabled": true,
+  "strategy": {
+    "strategy": "quota-aware"
+  },
+  "loaded_routing": {
+    "strategy": "quota-aware"
+  },
+  "session_affinity": false,
+  "usage_statistics_enabled": false,
+  "credential_count": 0,
+  "version": "v8.0.66-fleet.1",
+  "revision": "815987ae113117253b37c7c0755e209fadd01372",
+  "image_id": "sha256:7d6204c451faa133207817b05515bff1c96959cafee677b810c33ac4854d4bdd",
+  "network_mode": "none",
+  "published_ports": {},
+  "mounts": [
+    {
+      "destination": "/stage-config.yaml",
+      "writable": false
+    },
+    {
+      "destination": "/stage-plugins",
+      "writable": false
+    }
+  ],
+  "do_not_track": true,
+  "isolated_container_removed": true,
+  "plugin_files_unchanged": true,
+  "finished_utc": "2026-11-11T05:17:14.042787+00:00"
+}
