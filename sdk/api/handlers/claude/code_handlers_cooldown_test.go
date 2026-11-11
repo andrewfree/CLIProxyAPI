@@ -280,16 +280,13 @@ func TestClaudeCooldownMessagesRoute_PassthroughUnifiedRateLimitHeaders(t *testi
 				request.Header.Set("Content-Type", "application/json")
 				recorder := httptest.NewRecorder()
 
-				before := time.Now().Unix()
 				router.ServeHTTP(recorder, request)
-				after := time.Now().Unix()
 
 				if recorder.Code != http.StatusTooManyRequests {
 					t.Fatalf("status = %d, want 429; body=%s", recorder.Code, recorder.Body.String())
 				}
-				seconds, errSeconds := strconv.ParseInt(recorder.Header().Get("Retry-After"), 10, 64)
-				if errSeconds != nil || seconds <= 0 {
-					t.Fatalf("Retry-After = %q, want positive seconds", recorder.Header().Get("Retry-After"))
+				if got := recorder.Header().Get("Retry-After"); got != "" {
+					t.Fatalf("Retry-After = %q, want long cooldown hint omitted", got)
 				}
 
 				if !passthrough {
@@ -312,8 +309,8 @@ func TestClaudeCooldownMessagesRoute_PassthroughUnifiedRateLimitHeaders(t *testi
 					t.Fatalf("Anthropic-Ratelimit-Unified-5h-Status = %q, want rejected", got)
 				}
 				resetAt, errReset := strconv.ParseInt(recorder.Header().Get("Anthropic-Ratelimit-Unified-Reset"), 10, 64)
-				if errReset != nil || resetAt < before+seconds || resetAt > after+seconds {
-					t.Fatalf("Anthropic-Ratelimit-Unified-Reset = %q, want unix epoch in [%d, %d]", recorder.Header().Get("Anthropic-Ratelimit-Unified-Reset"), before+seconds, after+seconds)
+				if errReset != nil || resetAt < next.Unix() || resetAt > next.Unix()+1 {
+					t.Fatalf("Anthropic-Ratelimit-Unified-Reset = %q, want unix epoch in [%d, %d]", recorder.Header().Get("Anthropic-Ratelimit-Unified-Reset"), next.Unix(), next.Unix()+1)
 				}
 				if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-5h-Reset"); got != strconv.FormatInt(resetAt, 10) {
 					t.Fatalf("Anthropic-Ratelimit-Unified-5h-Reset = %q, want %d", got, resetAt)
