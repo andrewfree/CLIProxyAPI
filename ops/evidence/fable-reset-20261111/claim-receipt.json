@@ -1,0 +1,73 @@
+{
+  "started_at": "2026-11-11T09:46:08-08:00",
+  "dry_run": false,
+  "before": {
+    "fable_percent": 100,
+    "weekly_percent": 77,
+    "eligible": true,
+    "cooldown_until": null,
+    "grants": {
+      "full-reset-2611": {
+        "resets_left": 1,
+        "usable_now": true,
+        "unavailable_reason": null
+      },
+      "launch-2610-fable": {
+        "resets_left": 1,
+        "usable_now": true,
+        "unavailable_reason": null
+      },
+      "launch-2610-fable-6mo": {
+        "resets_left": 1,
+        "usable_now": true,
+        "unavailable_reason": null
+      }
+    }
+  },
+  "grant_id": "launch-2610-fable",
+  "request": {
+    "url": "https://api.anthropic.com/api/organizations/<org>/reset_rate_limits",
+    "body": {
+      "program": "cedar_ember",
+      "grant_id": "launch-2610-fable",
+      "request_id": "ee0de3aa2df94e2db8f32af34c3e4685"
+    }
+  },
+  "claim_http_status": 200,
+  "claim_response": {
+    "result": "reset",
+    "reason": null,
+    "reset": true,
+    "grant_id": "launch-2610-fable",
+    "resets_left": 0,
+    "cleared": [
+      "seven_day_overage_included"
+    ],
+    "weekly_resets_at": "2026-11-18T02:00:00+00:00",
+    "cooldown_until": "2026-11-11T17:49:09.467015+00:00"
+  },
+  "after": {
+    "fable_percent": 2,
+    "weekly_percent": 28,
+    "eligible": true,
+    "cooldown_until": null,
+    "grants": {
+      "full-reset-2611": {
+        "resets_left": 1,
+        "usable_now": true,
+        "unavailable_reason": null
+      },
+      "launch-2610-fable": {
+        "resets_left": 0,
+        "usable_now": false,
+        "unavailable_reason": "unavailable"
+      },
+      "launch-2610-fable-6mo": {
+        "resets_left": 1,
+        "usable_now": true,
+        "unavailable_reason": null
+      }
+    }
+  },
+  "finished_at": "2026-11-11T09:49:10-08:00"
+}

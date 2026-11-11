@@ -292,6 +292,24 @@ docker exec -it cli-proxy-api \
   -no-browser
 ```
 
+## Claude usage resets
+
+`claude_usage_resets.py` reads each Claude account's weekly and per-model
+limits, plus its Anthropic reset grants. It can also watch a limit or redeem a
+grant. Every request goes through this proxy's management API, so tokens never
+leave CLIProxy. `status` and `watch` are read-only. `claim` consumes a grant
+and needs Andrew's approval for that account and grant.
+
+```sh
+python3 ops/claude_usage_resets.py status
+python3 ops/claude_usage_resets.py watch --account <email> --limit Fable --threshold 99 --notify
+python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --dry-run
+python3 -m unittest -v ops.test_claude_usage_resets
+```
+
+[`CLAUDE_USAGE_RESETS.md`](CLAUDE_USAGE_RESETS.md) documents the endpoints, the
+claim request copied from Claude Code, and the 2026-11-11 Fable reset record.
+
 ## Log retention
 
 `config.yaml` deliberately sets `logs-max-total-size-mb: 0`, disabling CLIProxy's delete-based cleaner. Do not set a positive cap: the cleaner deletes immediately on config reload and cannot verify an archive first.
