@@ -1,0 +1,15 @@
+{
+  "architecture": "amd64",
+  "version": "v8.0.66-fleet.1",
+  "source_commit": "815987ae113117253b37c7c0755e209fadd01372",
+  "image": "sha256:8169e6e322b7db49c1576a608d7b2c18d957ce05ccde45bbf4f4fd58c4a4553e",
+  "previous_image": "sha256:e3b0986909ae18210d239fb7ad769ea655f92ad70136a230f9a0e577ba1d298c",
+  "previous_container_id": "ae865861c410cb26b49d68564cc2ff6a76ddc4540a5afb4213787654858f17e1",
+  "backup": "/home/andrew/cliproxy/ops/runtime/upgrade-v8.0.66-20261110/backup-20261111T050853Z",
+  "authorization": "Andrew: do it and get everything commit/live/deployed/working tested etc.",
+  "config_sha256": "4abccefe8ab1008796171bf9b689f0d670447edfcf38aee183d9ab65344e964e",
+  "config_inode": 32397311,
+  "started_at": "2026-11-11T05:21:41.139519+00:00",
+  "compose_exit_code": 0,
+  "finished_at": "2026-11-11T05:21:47.821964+00:00"
+}

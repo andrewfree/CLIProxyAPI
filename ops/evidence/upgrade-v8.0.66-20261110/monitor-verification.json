@@ -1,0 +1,57 @@
+{
+  "checked_at": "2026-11-11T05:32:18.968797+00:00",
+  "account_count": 3,
+  "accounts": [
+    {
+      "profile": "claude",
+      "email": "andrewfree@icloud.com",
+      "profile_http_status": 200,
+      "usage_http_status": 200,
+      "matches_cliproxy": true,
+      "matches_app_recorded_weekly": true,
+      "tier": "default_claude_max_20x",
+      "quota": {
+        "sevenDay": {
+          "used_percent": 100.0,
+          "resets_at": "2026-11-12T23:00:00.129384+00:00"
+        }
+      }
+    },
+    {
+      "profile": "claude-gmail-monitor",
+      "email": "andrewthefree@gmail.com",
+      "profile_http_status": 200,
+      "usage_http_status": 200,
+      "matches_cliproxy": true,
+      "matches_app_recorded_weekly": true,
+      "tier": "default_claude_max_20x",
+      "quota": {
+        "sevenDay": {
+          "used_percent": 5.0,
+          "resets_at": "2026-11-18T02:00:00.548602+00:00"
+        }
+      }
+    },
+    {
+      "profile": "claude-lockdown",
+      "email": "l0ckd0wn.3.2.1.0@gmail.com",
+      "profile_http_status": 200,
+      "usage_http_status": 200,
+      "matches_cliproxy": true,
+      "matches_app_recorded_weekly": true,
+      "tier": "default_claude_ai",
+      "quota": {
+        "fiveHour": {
+          "used_percent": 100.0,
+          "resets_at": "2026-11-11T07:20:00.910497+00:00"
+        },
+        "sevenDay": {
+          "used_percent": 95.0,
+          "resets_at": "2026-11-15T01:00:00.910518+00:00"
+        }
+      }
+    }
+  ],
+  "duplicate_profile_excluded": true,
+  "codexbar_switching_disabled": true
+}

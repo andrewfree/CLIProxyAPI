@@ -1,0 +1,79 @@
+{
+  "captured_at": "2026-11-11T05:25:20.905255+00:00",
+  "accounts": [
+    {
+      "email": "andrewfree@icloud.com",
+      "disabled": false,
+      "profile_http_status": 200,
+      "tier": "default_claude_max_20x",
+      "subscription_status": "active",
+      "usage_http_status": 200,
+      "quota": {
+        "seven_day": {
+          "used_percent": 100.0,
+          "resets_at": "2026-11-12T23:00:00.212264+00:00"
+        }
+      }
+    },
+    {
+      "email": "andrewthefree@gmail.com",
+      "disabled": false,
+      "profile_http_status": 200,
+      "tier": "default_claude_max_20x",
+      "subscription_status": "active",
+      "usage_http_status": 200,
+      "quota": {
+        "seven_day": {
+          "used_percent": 5.0,
+          "resets_at": "2026-11-18T02:00:00.551072+00:00"
+        }
+      }
+    },
+    {
+      "email": "l0ckd0wn.3.2.1.0@gmail.com",
+      "disabled": false,
+      "profile_http_status": 200,
+      "tier": "default_claude_ai",
+      "subscription_status": "active",
+      "usage_http_status": 200,
+      "quota": {
+        "five_hour": {
+          "used_percent": 100.0,
+          "resets_at": "2026-11-11T07:20:00.951138+00:00"
+        },
+        "seven_day": {
+          "used_percent": 95.0,
+          "resets_at": "2026-11-15T01:00:00.951166+00:00"
+        }
+      }
+    }
+  ],
+  "generation_attempted": true,
+  "generation": {
+    "requested_model": "t3-gmail/claude-fable-5-2",
+    "response_model": "claude-fable-5-2",
+    "http_status": 200,
+    "response_matches": true,
+    "response_text": "CLIPROXY_UPGRADE_OK",
+    "content_types": [
+      "text"
+    ],
+    "stop_reason": "end_turn",
+    "usage": {
+      "input_tokens": 157,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 0
+      },
+      "output_tokens": 19,
+      "output_tokens_details": {
+        "thinking_tokens": 0
+      },
+      "service_tier": "standard",
+      "inference_geo": "global",
+      "speed": "standard"
+    }
+  }
+}

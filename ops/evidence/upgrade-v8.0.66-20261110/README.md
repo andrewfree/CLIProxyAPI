@@ -10,4 +10,16 @@ Both Linux binaries were built on Will with the existing Go 1.26.10 cross-builde
 
 BuildKit's local-ID interpretation failure and the imported ARM64 parent snapshot failure are retained in ignored runtime logs. Completed binaries were reused after checking their recorded hashes; no failed image was deployed.
 
-Live activation receipts and final validation will be recorded here after both server gates pass.
+Will was activated at 05:21 UTC and the Mac at 05:27 UTC on November 11, corresponding to November 10 Pacific time. Both exact source and image checks passed with health healthy, all three Claude credentials present, unchanged policies, and analytics off. Each host returned the exact expected reply from pooled gpt-6-luna and the pinned t3-gmail/claude-fable-5-2 route. Each Claude account returned HTTP 200 for profile and usage. The Mac read Will's authenticated catalog. The monitor verification reports three distinct accounts with matching current quotas.
+
+The first Claude smoke request used a 32-token output budget without disabling thinking and did not return the expected text. The bounded retry explicitly disabled thinking and used 128 output tokens. Both hosts returned end_turn, the requested model, and the expected text. The first failed check is not counted as a pass.
+
+The initial monitor verifier compared a historical curve point against current usage and failed after Gmail usage advanced. SessionWatcher's latest-observation file and visible menu preview both showed the new value. The verifier now compares that current observation; it does not rewrite application data or loosen quota equality.
+
+Configuration contents, inode and permissions, loopback ports, state mounts, restart policy, and plugin hashes passed preservation checks. The Mac had no missing unrelated containers. Five transient baseline containers on Will were absent later, including an auto-removed build container and four MCP web-research containers. Their disappearance does not prove causation; rollout commands targeted only the proxy and owned staging/build containers. Present unrelated containers retained their IDs and images.
+
+PiSec shared inventory commits a596403 and 62370cc are published to codeone/pisec master. The focused inventory change was also applied locally as fbaf16b to the existing Windows branch without publishing its unrelated history or changing its four dirty Windows files. Inventory tests passed on both the shared-base worktree and the active checkout.
+
+No independent agent review, forced OAuth rotation, exhaustive account selection, or full provider qualification was run. The current T3 session continued through its existing Mac proxy route after deployment. Source review and direct verification were performed by GPT-6.1 Sol without delegates.
+
+Private rollback backups and retained previous images are listed in activation.json and ops/FLEET.md. Restore image/owner metadata only and preserve newer config and OAuth state.

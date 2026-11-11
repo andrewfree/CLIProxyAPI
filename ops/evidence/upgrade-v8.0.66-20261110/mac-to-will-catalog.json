@@ -1,0 +1,12 @@
+{
+  "captured_at": "2026-11-11T05:28:23.171299+00:00",
+  "endpoint": "http://100.98.74.67:8317",
+  "catalog_ok": true,
+  "generation_attempted": false,
+  "model_count": 112,
+  "luna_models": [
+    "gpt-5.6-luna",
+    "gpt-6-luna"
+  ],
+  "kimi_fallback_visible": true
+}

@@ -1,0 +1,7 @@
+[local-ci] started will:/home/andrew/.local/state/local-ci/runs/andrewfree__CLIProxyAPI/1ed43738bfb7-1e50773618dc (1ed43738bfb7)
+[local-ci] preparing: starting
+[local-ci] running: starting
+local-ci PASS: pass: 2/2 jobs on will; base fa11a573b252b30256bef4de952a95feee3c8c9d
+  success      pr-test-build / build
+  success      translator-path-guard / ensure-no-translator-changes
+  logs: will:/home/andrew/.local/state/local-ci/runs/andrewfree__CLIProxyAPI/1ed43738bfb7-1e50773618dc

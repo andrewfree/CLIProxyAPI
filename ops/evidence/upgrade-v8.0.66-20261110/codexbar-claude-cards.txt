@@ -1,0 +1,12 @@
+codexbar • AI Usage & Limits                                2026-11-10 21:32 PST
+Next reset: Claude in 1h 48m
+
+┌─────────────────────────────────┬──────────────────────────────┬──────────┐
+│ Provider                        │ Usage                        │    Reset │
+├─────────────────────────────────┼──────────────────────────────┼──────────┤
+│ Claude · iCloud · claude-swap   │ 100% ██████████████████████  │   1d 17h │
+│ Claude · Gmail · claude-swap    │ 5% █░░░░░░░░░░░░░░░░░░░░░    │   6d 20h │
+│ Claude · Lockdown · claude-swap │ 100% ██████████████████████  │   1h 48m │
+└─────────────────────────────────┴──────────────────────────────┴──────────┘
+
+⚠ Warnings: Claude Weekly: 100% used; Claude Session: 100% used
