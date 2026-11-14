@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+config_path="${1:-$HOME/cliproxy/config.yaml}"
+
+exec /usr/bin/ruby -ryaml -e '
+  begin
+    config = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true)
+  rescue SystemCallError, Psych::Exception
+    abort("CLIProxyAPI config could not be read or parsed")
+  end
+
+  abort("CLIProxyAPI config must be a mapping") unless config.is_a?(Hash)
+  access = config["access"]
+  if config.key?("access") && !access.is_a?(Hash)
+    abort("CLIProxyAPI access config must be a mapping")
+  end
+
+  keys = access&.key?("api-keys") ? access["api-keys"] : config["api-keys"]
+  unless keys.is_a?(Array) && !keys.empty? && keys.all? { |key| key.is_a?(String) }
+    abort("CLIProxyAPI client keys must be a nonempty list of strings")
+  end
+
+  token = keys.first.strip
+  abort("CLIProxyAPI first client key is blank") if token.empty?
+  STDOUT.write(token)
+' "$config_path"
