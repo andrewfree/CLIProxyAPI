@@ -64,6 +64,8 @@ For exact-model discovery and an authorized T3 task, follow [the Kimi CLIProxy r
 
 Since November 11, M5's proxy also serves three NVIDIA-hosted models as an OpenAI-compatible upstream, selected in T3 through `codex_cliproxy_mac`. Will has no NVIDIA provider or key. See [the NVIDIA routing guide](NVIDIA_ROUTING.md).
 
+The November 14 direct Z.ai Coding Plan activation added GLM 5.3 routes on both hosts. See [the GLM routing guide](GLM_ROUTING.md) for verified aliases, client-key layout compatibility, and the extra-reload workaround required on Will.
+
 M1 is a client, not a third proxy host. On November 2, its T3 instance gained an enabled `codex_cliproxy` profile named `Codex - CLIProxy Will primary`, using `http://100.98.74.67:8317/v1`. The profile uses the Responses API and a local token helper. The client key has mode `0600`, and the helper has mode `0700`. Setup preserved all existing profiles and unrelated settings, and revoked its temporary T3 setup session. This profile is available for selection in new sessions. Existing threads keep their selected providers.
 
 Authenticated model-catalog and synthetic generation checks passed from M1 through Will, and from M5 through both Will and its local fallback. The [client validation receipt](evidence/cache-affinity-20261102/client-validation.json) records these checks and the native T3 smoke results. Both proxy instances now run the verified quota-aware policy with affinity disabled. M1 could not be reached over SSH for a fresh client check during the November 6 rollout; the November 2 M1 receipt remains historical. M5's proxy remains loopback-only, so M1 cannot use it directly as a fallback. The M1 profile does not add a Claude account route or another proxy server.
