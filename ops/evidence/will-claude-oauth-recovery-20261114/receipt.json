@@ -1,0 +1,605 @@
+{
+  "schema_version": 1,
+  "incident_date_utc": "2026-11-14",
+  "investigator": {
+    "model": "gpt-6-astra",
+    "harness": "Codex"
+  },
+  "source": {
+    "checkout_branch": "main",
+    "checkout_sha": "caca0a047155bc3b53d9eb0c199cde93d51c0db6",
+    "deployed_source": "815987ae113117253b37c7c0755e209fadd01372",
+    "deployed_version": "v8.0.66-fleet.1"
+  },
+  "routing": {
+    "captured_at": "2026-11-14T02:40:51.298942+00:00",
+    "profiles": {
+      "claude_cliproxy": {
+        "driver": "claudeAgent",
+        "route": "shared-pool",
+        "upstream": "http://100.98.74.67:8317",
+        "account_prefix": ""
+      },
+      "claude_cliproxy_mac": {
+        "driver": "claudeAgent",
+        "route": "shared-pool",
+        "upstream": "http://127.0.0.1:8317",
+        "account_prefix": ""
+      }
+    },
+    "launcher_sha256": "cf76c00d30478da4e600c3ac408ab03f9b2af93048411245727344664ab49d82",
+    "strategy": "quota-aware",
+    "session_affinity": false,
+    "quota_cooldown_max_seconds": 3600
+  },
+  "before": {
+    "captured_at": "2026-11-14T02:39:10.260723+00:00",
+    "will_accounts": [
+      {
+        "label": "iCloud",
+        "status": "error",
+        "disabled": false,
+        "unavailable": true,
+        "access_token_expires_at": "2026-11-12T06:46:59Z",
+        "refresh_error": {
+          "code": "invalid_grant",
+          "http_status": 400,
+          "message": "token refresh failed after 3 attempts: token refresh failed with status 400: {\"error\": \"invalid_grant\", \"error_description\": \"Refresh token expired\"}"
+        },
+        "renewal_state": "retry_scheduled",
+        "requires_sign_in": false,
+        "registered_opus_models": [
+          "claude-opus-5-5",
+          "t3-icloud/claude-opus-5-5"
+        ],
+        "cooldowns": [],
+        "quota_observed_at": null,
+        "quota_signals": {}
+      },
+      {
+        "label": "Gmail",
+        "status": "error",
+        "disabled": false,
+        "unavailable": true,
+        "access_token_expires_at": "2026-11-14T07:05:29Z",
+        "refresh_error": null,
+        "renewal_state": "renewal_verified",
+        "requires_sign_in": false,
+        "registered_opus_models": [
+          "claude-opus-5-5",
+          "t3-gmail/claude-opus-5-5"
+        ],
+        "cooldowns": [
+          {
+            "scope": "credential",
+            "reason": "credential_quota",
+            "retry_at": "2026-11-14T03:09:02.013444964Z",
+            "remaining_seconds": 1792
+          },
+          {
+            "scope": "model",
+            "model_key": "claude-opus-5-5",
+            "reason": "quota",
+            "retry_at": "2026-11-14T03:09:02.013444964Z",
+            "remaining_seconds": 1792,
+            "backoff_level": 0,
+            "http_status": 429
+          }
+        ],
+        "quota_observed_at": "2026-11-14T10:09:02.013444964+08:00",
+        "quota_signals": {
+          "Anthropic-Ratelimit-Unified-7d-Reset": "1794967200",
+          "Anthropic-Ratelimit-Unified-7d-Status": "rejected",
+          "Anthropic-Ratelimit-Unified-7d-Utilization": "1.0",
+          "Anthropic-Ratelimit-Unified-Overage-Status": "rejected",
+          "Anthropic-Ratelimit-Unified-Representative-Claim": "seven_day",
+          "Anthropic-Ratelimit-Unified-Reset": "1794967200",
+          "Anthropic-Ratelimit-Unified-Status": "rejected"
+        }
+      },
+      {
+        "label": "Pro",
+        "status": "error",
+        "disabled": false,
+        "unavailable": true,
+        "access_token_expires_at": "2026-11-14T06:47:36Z",
+        "refresh_error": null,
+        "renewal_state": "renewal_verified",
+        "requires_sign_in": false,
+        "registered_opus_models": [
+          "claude-opus-5-5",
+          "t3-pro/claude-opus-5-5"
+        ],
+        "cooldowns": [
+          {
+            "scope": "credential",
+            "reason": "credential_quota",
+            "retry_at": "2026-11-14T03:16:38.335895688Z",
+            "remaining_seconds": 2249
+          },
+          {
+            "scope": "model",
+            "model_key": "claude-opus-5-5",
+            "reason": "quota",
+            "retry_at": "2026-11-14T03:16:38.335895688Z",
+            "remaining_seconds": 2249,
+            "backoff_level": 0,
+            "http_status": 429
+          }
+        ],
+        "quota_observed_at": "2026-11-14T10:16:38.335895688+08:00",
+        "quota_signals": {
+          "Anthropic-Ratelimit-Unified-5h-Reset": "1794633600",
+          "Anthropic-Ratelimit-Unified-5h-Status": "rejected",
+          "Anthropic-Ratelimit-Unified-5h-Utilization": "1.01",
+          "Anthropic-Ratelimit-Unified-7d-Reset": "1794704400",
+          "Anthropic-Ratelimit-Unified-7d-Status": "allowed_warning",
+          "Anthropic-Ratelimit-Unified-7d-Utilization": "0.99",
+          "Anthropic-Ratelimit-Unified-Overage-Status": "rejected",
+          "Anthropic-Ratelimit-Unified-Representative-Claim": "five_hour",
+          "Anthropic-Ratelimit-Unified-Reset": "1794633600",
+          "Anthropic-Ratelimit-Unified-Status": "rejected"
+        }
+      }
+    ],
+    "mac_icloud": {
+      "status": "active",
+      "disabled": false,
+      "unavailable": false,
+      "access_token_expires_at": "2026-11-14T09:57:43Z",
+      "renewal_state": "renewal_verified",
+      "refresh_error": null,
+      "cooldowns": []
+    }
+  },
+  "failed_runs": [
+    {
+      "run": "v1",
+      "attempt_count": 11,
+      "attempts": [
+        {
+          "file": "error-v1-messages-2026-11-14T102707-af79cd25.log",
+          "source_sha256": "f0615ccef877f0c61b54e9f1ae694db36b31d04881a149c2e1c01951c4bc0bd7",
+          "timestamp": "2026-11-14T10:27:07.102565367+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102707-e4f1e7b2.log",
+          "source_sha256": "814123d1ac45d50db187ea6a17265cc20cefae117289ce146deef2e5ecf25d39",
+          "timestamp": "2026-11-14T10:27:07.663524811+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102708-e9f2d1ff.log",
+          "source_sha256": "ffeb5d68d708e462b7293fa1fce46c03d4386c0618b232d14876da4a389fe784",
+          "timestamp": "2026-11-14T10:27:08.766639415+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102710-adaa42c0.log",
+          "source_sha256": "9571a2688d98199d15c9f792e310ea35434de281519d233a70d0765d38b22190",
+          "timestamp": "2026-11-14T10:27:10.99055188+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102715-44029b65.log",
+          "source_sha256": "b8ae61cb037dc821d48195e4845992d19c579e87056f96b78946e0d6636fc2be",
+          "timestamp": "2026-11-14T10:27:15.548202479+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102725-26deb002.log",
+          "source_sha256": "20bb152b14b9190bd5161759829b9c2c9951c02d1dba3969ba5c0c5cfbb9b1bc",
+          "timestamp": "2026-11-14T10:27:25.279008923+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102741-a8ee02af.log",
+          "source_sha256": "6f233f93ad66fba8eb06183e457affee5170e1f9eea9a671f4d34fccf8dc02b3",
+          "timestamp": "2026-11-14T10:27:41.438178898+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102821-1f96455b.log",
+          "source_sha256": "56b07725494cced3dc724f22a99f77fdedf4ed49c64ce883042e336e1e19d4ff",
+          "timestamp": "2026-11-14T10:28:21.445295263+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102854-27d1fbac.log",
+          "source_sha256": "e6c5f0e0727441d6b937414d20bd7b7d308e14ba8554dbd3678756801cff4eca",
+          "timestamp": "2026-11-14T10:28:54.613026478+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T102930-bc0de12b.log",
+          "source_sha256": "a7dc048db7943ecf1a13c0aa1024af8156460db80c192b0698904e7bb72c686a",
+          "timestamp": "2026-11-14T10:29:30.403980003+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103009-8bbc7cd9.log",
+          "source_sha256": "21633b556affc507c323d76d00e959a6e70b1b176c9ff339f46613f3654d694c",
+          "timestamp": "2026-11-14T10:30:09.792590683+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        }
+      ]
+    },
+    {
+      "run": "v2",
+      "attempt_count": 11,
+      "attempts": [
+        {
+          "file": "error-v1-messages-2026-11-14T103052-362f61ec.log",
+          "source_sha256": "e569ef2b45a66582cdeb79af13601a4578c75d50d378f1718ebb5d5e41ca88e1",
+          "timestamp": "2026-11-14T10:30:52.198623311+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103052-48938b65.log",
+          "source_sha256": "36972141ab47b85124df7f4bdb70abfd8197ce87a3db902fa055f15ce48f5082",
+          "timestamp": "2026-11-14T10:30:52.780838416+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103053-122b004d.log",
+          "source_sha256": "1cf899dc69531baca0f3a233ced01d1d882dbb777a28b893370fad1a5a9b1ddd",
+          "timestamp": "2026-11-14T10:30:53.820780342+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103056-c9ed0dfc.log",
+          "source_sha256": "acbeb164fcad0eeb12777f2641eeb5b5ee96b22ec0832d0c1c8a4d2e3eed4444",
+          "timestamp": "2026-11-14T10:30:56.197926659+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103100-f41ebd12.log",
+          "source_sha256": "4a2418b65b24a424c3ca335c203dcf36d0ab2636733578057f22babeba5ea39e",
+          "timestamp": "2026-11-14T10:31:00.298510414+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103108-136613e8.log",
+          "source_sha256": "17bb426396677effa740282cce6082e40b8776ab8f6244deab01109a0c4cf1da",
+          "timestamp": "2026-11-14T10:31:08.723325144+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103125-3f62ecb1.log",
+          "source_sha256": "2b958882959daeb0bdc3f5a2dd3ca1064b6b11c60aa18f4c4ca60ab9d8beee42",
+          "timestamp": "2026-11-14T10:31:25.03538598+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103157-14c57b6d.log",
+          "source_sha256": "81417a66c24a06d8f8d8938f2084ca789f4ba69c2dd09b5613064339d21b429f",
+          "timestamp": "2026-11-14T10:31:57.183285644+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103229-c0c7a309.log",
+          "source_sha256": "1c6d8be4a949a5fa2fe482c3773ef1d905eeb3ab8afa9e721220af6d18fec4e2",
+          "timestamp": "2026-11-14T10:32:29.828942212+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103303-56cc3026.log",
+          "source_sha256": "063f3021267d3374cbec9d63bda7804f29c02fff4922981e9218d9f9b265e394",
+          "timestamp": "2026-11-14T10:33:03.824744545+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        },
+        {
+          "file": "error-v1-messages-2026-11-14T103342-f067c74a.log",
+          "source_sha256": "111c9be35913f4d4986c852ee5f5f7b47dccfda7dd421511594354ae11204258",
+          "timestamp": "2026-11-14T10:33:42.98544704+08:00",
+          "model": "claude-opus-5-5",
+          "status_503": true,
+          "auth_unavailable": true,
+          "api_request_section_present": false,
+          "routing_headers_present": [],
+          "body_routing_fields": []
+        }
+      ]
+    }
+  ],
+  "recovery": {
+    "authorization": "Andrew requested help performing the Will iCloud re-login from M5.",
+    "oauth_completed_at": "2026-11-14T02:47:36.505873+00:00",
+    "credential": {
+      "label": "iCloud",
+      "status": "active",
+      "disabled": false,
+      "unavailable": false,
+      "access_token_expires_at": "2026-11-14T10:47:36Z",
+      "refresh_error": null,
+      "renewal_state": "awaiting_first_renewal",
+      "requires_sign_in": false,
+      "registered_opus_models": [
+        "claude-opus-5-5",
+        "t3-icloud/claude-opus-5-5"
+      ],
+      "cooldowns": []
+    },
+    "existing_successful_opus_requests": [
+      {
+        "source_file": "v1-messages-2026-11-14T104748-2996063b.log",
+        "source_sha256": "961840dbf525f18562b4fad1cf0dfe16ee970b9382e2e327c6a0de8966a94832",
+        "model": "claude-opus-5-5",
+        "auth_labels": [
+          "iCloud"
+        ],
+        "response_status_lines": [
+          "Status: 200",
+          "Status: 200"
+        ],
+        "downstream_message_stop": true,
+        "downstream_error_event": false
+      },
+      {
+        "source_file": "v1-messages-2026-11-14T104751-1983b4c2.log",
+        "source_sha256": "3739f24efda3db36100e2b0edde35a7caec8b2c75c8179aa6017d53eea03537f",
+        "model": "claude-opus-5-5",
+        "auth_labels": [
+          "iCloud"
+        ],
+        "response_status_lines": [
+          "Status: 200",
+          "Status: 200"
+        ],
+        "downstream_message_stop": true,
+        "downstream_error_event": false
+      },
+      {
+        "source_file": "v1-messages-2026-11-14T104757-cb9490c6.log",
+        "source_sha256": "523295c02e5269981f600e48d9d22d4d5fc287550e45dae0bf26d77331822762",
+        "model": "claude-opus-5-5",
+        "auth_labels": [
+          "iCloud"
+        ],
+        "response_status_lines": [
+          "Status: 200",
+          "Status: 200"
+        ],
+        "downstream_message_stop": true,
+        "downstream_error_event": false
+      },
+      {
+        "source_file": "v1-messages-2026-11-14T104759-e80bef5f.log",
+        "source_sha256": "128b99d6834c21d71d11da5d2f45a26682c6e5ddc6fb3a46c77e75da246954fd",
+        "model": "claude-opus-5-5",
+        "auth_labels": [
+          "iCloud"
+        ],
+        "response_status_lines": [
+          "Status: 200",
+          "Status: 200"
+        ],
+        "downstream_message_stop": true,
+        "downstream_error_event": false
+      }
+    ],
+    "new_inference_probes_sent": 0,
+    "preservation": {
+      "gmail_file_unchanged": true,
+      "pro_background_renewal_at_four_hour_lead": true,
+      "mac_credential_files_unchanged": true,
+      "container_not_restarted": true,
+      "config_and_env_unchanged": true,
+      "callback_pipe_removed": true,
+      "consumed_secret_file_removed": true,
+      "original_project_file_hashes_unchanged": true
+    },
+    "account_file_identities_preserved": true,
+    "prefixes_preserved": true,
+    "modes_0600": true,
+    "pro_file_changed_during_normal_renewal": true,
+    "initial_whole_file_comparison_claimed_all_unchanged": false
+  },
+  "fleet_verification": {
+    "Mac": {
+      "platform": "arm64",
+      "observed": {
+        "image_id": "sha256:7d6204c451faa133207817b05515bff1c96959cafee677b810c33ac4854d4bdd",
+        "image_ref": "sha256:7d6204c451faa133207817b05515bff1c96959cafee677b810c33ac4854d4bdd",
+        "source_commit": "815987ae113117253b37c7c0755e209fadd01372",
+        "version": "v8.0.66-fleet.1",
+        "health": "healthy",
+        "plugins_enabled": true,
+        "cursor_registered": true,
+        "cursor_enabled": true,
+        "cursor_version": "2.1.1",
+        "cursor_sha256": "4a2bb071c75f1bd83df561168da2a5a667777d422c41a83ac0f95315adce809a",
+        "usage_statistics_enabled": false,
+        "quota_cooldown_max_seconds": 3600,
+        "save_cooldown_status": true,
+        "routing": {
+          "strategy": "quota-aware",
+          "session-affinity": false,
+          "session-affinity-ttl": "1h",
+          "session-affinity-subagents": false,
+          "session-affinity-rebind-on": "any"
+        },
+        "routing_policy_matches": true,
+        "do_not_track": true,
+        "account_counts": {
+          "claude": 3,
+          "codex": 3,
+          "cursor": 1,
+          "kimi": 1
+        }
+      },
+      "failures": [],
+      "checked_at": "2026-11-14T02:40:52.048767+00:00",
+      "exit_code": 0
+    },
+    "Will": {
+      "platform": "amd64",
+      "observed": {
+        "image_id": "sha256:8169e6e322b7db49c1576a608d7b2c18d957ce05ccde45bbf4f4fd58c4a4553e",
+        "image_ref": "sha256:8169e6e322b7db49c1576a608d7b2c18d957ce05ccde45bbf4f4fd58c4a4553e",
+        "source_commit": "815987ae113117253b37c7c0755e209fadd01372",
+        "version": "v8.0.66-fleet.1",
+        "health": "healthy",
+        "plugins_enabled": true,
+        "cursor_registered": true,
+        "cursor_enabled": true,
+        "cursor_version": "2.1.1",
+        "cursor_sha256": "75bfdcf6f9dd7b177d7b6e3970c9bdc66101dd2c67b98c1bfa399ef84e290894",
+        "usage_statistics_enabled": false,
+        "quota_cooldown_max_seconds": 3600,
+        "save_cooldown_status": true,
+        "routing": {
+          "strategy": "quota-aware",
+          "session-affinity": false,
+          "session-affinity-ttl": "1h",
+          "session-affinity-subagents": false,
+          "session-affinity-rebind-on": "any"
+        },
+        "routing_policy_matches": true,
+        "do_not_track": true,
+        "account_counts": {
+          "claude": 3,
+          "codex": 3,
+          "kimi": 1,
+          "kimi-ai": 1
+        }
+      },
+      "failures": [],
+      "checked_at": "2026-11-14T02:49:59.618408+00:00",
+      "exit_code": 0
+    }
+  },
+  "closeout": {
+    "captured_at": "2026-11-14T03:14:25.451915+00:00",
+    "icloud": {
+      "status": "active",
+      "disabled": false,
+      "unavailable": false,
+      "access_token_expires_at": "2026-11-14T10:47:36Z",
+      "requires_sign_in": false,
+      "refresh_error": null,
+      "renewal_state": "awaiting_first_renewal",
+      "last_inference_verified_at": "2026-11-14T03:08:11Z"
+    },
+    "claude_accounts": 3,
+    "login_processes_exited": {
+      "bridge_pid": true,
+      "ssh_pid": true
+    },
+    "callback_pipe_absent": true,
+    "no_wait_for_automatic_renewal_requested": true,
+    "source_diagnostic_fix_outside_completed_recovery_scope": true
+  },
+  "limitations": [
+    "First automatic iCloud renewal after re-login remains unobserved.",
+    "The reason Anthropic expired the refresh grant remains unknown.",
+    "Diagnostic classification and mixed-cause error code were not changed.",
+    "Successful pool traffic does not establish completion of the separate rotary-design task."
+  ]
+}
