@@ -71,6 +71,9 @@ func TestClaudeQuotaVerifyReleasesCredentialButPreservesIndependentSibling(t *te
 	if exec.lastOptions.SourceFormat != sdktranslator.FormatClaude || ojson.GetBytes(exec.lastPayload, "max_tokens").Int() != 32 {
 		t.Fatal("Claude verification must use a small native Messages request")
 	}
+	if !ojson.GetBytes(exec.lastPayload, "stream").Bool() {
+		t.Fatal("Claude streaming verification must explicitly request an SSE response")
+	}
 	sibling := updated.ModelStates["claude-fable-5-2"]
 	if !sibling.Unavailable || sibling.Quota.Reason != "quota" || !sibling.NextRetryAfter.Equal(deadline.Add(time.Hour)) {
 		t.Fatalf("independent sibling restriction was not preserved: %+v", sibling)

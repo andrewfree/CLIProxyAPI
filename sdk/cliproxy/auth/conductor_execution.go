@@ -2471,7 +2471,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	payloadDoc := ojson.NewDocString(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":16,"store":false}`)
 	sourceFormat := sdktranslator.FormatOpenAIResponse
 	if provider == "claude" {
-		payloadDoc = ojson.NewDocString(`{"messages":[{"role":"user","content":"Reply with exactly OK."}],"max_tokens":32,"thinking":{"type":"disabled"}}`)
+		payloadDoc = ojson.NewDocString(`{"messages":[{"role":"user","content":"Reply with exactly OK."}],"max_tokens":32,"stream":true,"thinking":{"type":"disabled"}}`)
 		sourceFormat = sdktranslator.FormatClaude
 	}
 	if errSet := payloadDoc.Set("model", verifyModel); errSet != nil {
