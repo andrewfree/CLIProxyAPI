@@ -11,7 +11,7 @@
       "compose_file": "/home/andrew/cliproxy/docker-compose.yml",
       "service": "cli-proxy-api",
       "container_name": "cli-proxy-api",
-      "image": "sha256:b0b2c8bcf4817b09924fdf84c1cf6329681f9ec6bbe3588d3f616426faa61710",
+      "image": "sha256:bd8ebc2b1ee329d88ac4ada235aaaa2744856740933e404966ec8a9eca18f473",
       "restart_policy": "always"
     },
     "expected_lan_exposure": [
