@@ -1032,6 +1032,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 		retainAuthCooldown := modelKey == "" && !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
 			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
+		if applyClaudeVerifiedQuotaRecovery(auth, result, modelKey, responseHeaders, now) {
+			result.CredentialScope = true
+		}
 
 		if result.Success {
 			if result.CompletedResponse && !result.SkipQuotaObservation && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown {
