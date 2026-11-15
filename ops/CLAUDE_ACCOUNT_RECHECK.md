@@ -35,6 +35,10 @@ a minimal prompt with a 32-output-token Claude budget using its normal executor,
 translation, and payload configuration. There is no fallback account. The
 command never calls the blanket cooldown reset endpoint.
 
+Recovery also applies to a direct account-pinned
+`POST /v8/management/credentials/verify` and to the optional verification after
+an OAuth login. Only this helper performs the identity and expected-tier checks.
+
 The server requires a completed response and allowed quota signals before
 releasing a Claude credential-wide restriction. It compares the credential
 generation captured before the probe under the same mutation lock that applies
@@ -42,6 +46,11 @@ the result. A credential replacement, quota rejection, or other state change
 during the probe prevents early recovery. Independent restrictions for sibling
 models survive, including those hidden beneath the credential-wide restriction.
 Ordinary successful requests retain the existing cooldown behavior.
+
+The current guard refuses early recovery if any reported unified quota window
+is rejected, including a scoped model limit. This can retain a cooldown even
+when the selected model could run. It preserves the restriction until the
+provider's signals establish capacity or the cooldown expires.
 
 This requires the server-side quota recheck fix. An older server may complete
 the probe while retaining the credential cooldown. The command reports that
@@ -61,5 +70,5 @@ Run the tests from the repository root:
 
 ```sh
 python3 -m unittest -v ops.test_claude_account_recheck ops.test_claude_usage_resets
-go test ./sdk/cliproxy/auth -run TestClaudeQuotaVerify -count=1
+go test ./sdk/cliproxy/auth -run TestClaudeQuota -count=1
 ```

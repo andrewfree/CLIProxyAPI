@@ -8,6 +8,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -18,6 +19,7 @@ type claudeQuotaVerifyExecutor struct {
 	during      func()
 	lastPayload []byte
 	lastOptions cliproxyexecutor.Options
+	terminal    []byte
 }
 
 func (e *claudeQuotaVerifyExecutor) ExecuteStream(ctx context.Context, _ *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
@@ -28,7 +30,11 @@ func (e *claudeQuotaVerifyExecutor) ExecuteStream(ctx context.Context, _ *Auth, 
 		e.during()
 	}
 	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
-	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"status":"completed"}}`)}
+	terminal := e.terminal
+	if len(terminal) == 0 {
+		terminal = []byte(`data: {"type":"response.completed","response":{"status":"completed"}}`)
+	}
+	chunks <- cliproxyexecutor.StreamChunk{Payload: terminal}
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -49,7 +55,12 @@ func claudeQuotaVerifyFixture(t *testing.T) (*Manager, *claudeQuotaVerifyExecuto
 				Quota: QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: deadline}, credentialQuotaPropagated: true,
 				credentialQuotaShadow: &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: deadline.Add(time.Hour),
 					Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline.Add(time.Hour)}}},
+			"claude-haiku-5-5": {Status: StatusError, Unavailable: true, NextRetryAfter: deadline,
+				Quota: QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: deadline}, credentialQuotaPropagated: true},
 		}}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5"}, {ID: "claude-fable-5-2"}, {ID: "claude-haiku-5-5"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
 	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
 		t.Fatal(errRegister)
 	}
@@ -67,6 +78,9 @@ func TestClaudeQuotaVerifyReleasesCredentialButPreservesIndependentSibling(t *te
 	}
 	if state := updated.ModelStates["claude-opus-5-5"]; state.Unavailable || state.Quota.Exceeded {
 		t.Fatal("verified model remains blocked")
+	}
+	if state := updated.ModelStates["claude-haiku-5-5"]; state.Unavailable || state.Quota.Exceeded || state.credentialQuotaPropagated {
+		t.Fatal("sibling blocked only by credential propagation remains blocked")
 	}
 	if exec.lastOptions.SourceFormat != sdktranslator.FormatClaude || ojson.GetBytes(exec.lastPayload, "max_tokens").Int() != 32 {
 		t.Fatal("Claude verification must use a small native Messages request")
@@ -163,5 +177,72 @@ func TestClaudeQuotaVerifyPreservesDisabledTargetShadow(t *testing.T) {
 	updated, _ := m.GetByID(id)
 	if !updated.Quota.Exceeded || updated.ModelStates["claude-opus-5-5"].credentialQuotaShadow.Status != StatusDisabled {
 		t.Fatal("disabled model state was erased")
+	}
+}
+
+func TestClaudeQuotaVerifyPreservesDisabledSiblingShadow(t *testing.T) {
+	m, _, id, _ := claudeQuotaVerifyFixture(t)
+	m.mu.Lock()
+	m.auths[id].ModelStates["claude-fable-5-2"].credentialQuotaShadow = &ModelState{Status: StatusDisabled, Unavailable: true}
+	m.mu.Unlock()
+	updated, errVerify := m.VerifyInference(context.Background(), id, "claude-opus-5-5")
+	if errVerify != nil {
+		t.Fatal(errVerify)
+	}
+	if updated.ModelStates["claude-fable-5-2"].Status != StatusDisabled {
+		t.Fatal("recovery enabled an independently disabled sibling")
+	}
+}
+
+func TestClaudeQuotaVerifyOverallAllowedDoesNotOverrideRejectedWindow(t *testing.T) {
+	for _, window := range []string{"5h", "7d", "7d_oi"} {
+		t.Run(window, func(t *testing.T) {
+			m, exec, id, _ := claudeQuotaVerifyFixture(t)
+			exec.headers.Set("Anthropic-Ratelimit-Unified-"+window+"-Status", "rejected")
+			if _, errVerify := m.VerifyInference(context.Background(), id, "claude-opus-5-5"); errVerify == nil {
+				t.Fatal("rejected window must prevent early quota recovery")
+			}
+			updated, _ := m.GetByID(id)
+			if updated.Quota.Reason != "credential_quota" || !updated.Quota.Exceeded {
+				t.Fatal("overall allowed signal erased a rejected window")
+			}
+		})
+	}
+}
+
+func TestClaudeQuotaVerifyRefreshesSchedulerAndRegistry(t *testing.T) {
+	m, _, id, _ := claudeQuotaVerifyFixture(t)
+	ctx := context.Background()
+	reg := registry.GetGlobalRegistry()
+	reg.SetModelQuotaExceeded(id, "claude-opus-5-5")
+	reg.SuspendClientModel(id, "claude-opus-5-5", "quota")
+	if _, errPick := m.scheduler.pickSingle(ctx, "claude", "claude-opus-5-5", cliproxyexecutor.Options{}, nil); errPick == nil {
+		t.Fatal("scheduler must reject account before quota recovery")
+	}
+	if _, errVerify := m.VerifyInference(ctx, id, "claude-opus-5-5"); errVerify != nil {
+		t.Fatal(errVerify)
+	}
+	for _, model := range []string{"claude-opus-5-5", "claude-haiku-5-5"} {
+		picked, errPick := m.scheduler.pickSingle(ctx, "claude", model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil || picked == nil || picked.ID != id {
+			t.Fatalf("scheduler did not release %s after recovery: %v", model, errPick)
+		}
+		if reg.IsModelSuspendedForClient(id, model) || reg.IsModelQuotaExceededForClient(id, model) {
+			t.Fatalf("registry still blocks recovered model %s", model)
+		}
+	}
+	if _, errPick := m.scheduler.pickSingle(ctx, "claude", "claude-fable-5-2", cliproxyexecutor.Options{}, nil); errPick == nil {
+		t.Fatal("scheduler released independently blocked sibling")
+	}
+	if !reg.IsModelSuspendedForClient(id, "claude-fable-5-2") {
+		t.Fatal("registry released independently blocked sibling")
+	}
+}
+
+func TestClaudeQuotaVerifyAcceptsNativeMessageStop(t *testing.T) {
+	m, exec, id, _ := claudeQuotaVerifyFixture(t)
+	exec.terminal = []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	if _, errVerify := m.VerifyInference(context.Background(), id, "claude-opus-5-5"); errVerify != nil {
+		t.Fatalf("native Claude completion did not recover quota: %v", errVerify)
 	}
 }

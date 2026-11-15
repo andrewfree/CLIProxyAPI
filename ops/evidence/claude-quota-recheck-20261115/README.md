@@ -30,8 +30,19 @@ Private working artifacts and the failed attempt are retained under
 under `/srv/share/drives/disk12/cliproxy-claude-recheck-fleet3-20261115/artifacts/`.
 
 Source and release metadata local-ci runs each passed two jobs. Focused quota
-race checks, complete auth and management package tests, and 24 Python tests
-passed. The complete Go suite passed with three untouched-HEAD reproduced
+race checks and complete auth and management package tests passed. The historical
+working-tree Python run reported 24 tests and included the user's pre-existing,
+uncommitted usage-reset test changes. The exact command was:
+
+```sh
+python3 -m unittest -v ops.test_claude_account_recheck ops.test_claude_usage_resets ops.test_cliproxy_codex_token
+```
+
+A fresh export of committed `8087828a` passes 21 tests with that same command:
+9 recheck tests, 11 usage-reset tests, and 1 client-key test. The two-module
+command in the recheck instructions runs 20 tests on the committed tree.
+
+The complete Go suite passed with three untouched-HEAD reproduced
 failures excluded: WebRTC DataChannel creation, websocket temporary-directory
 cleanup, and heartbeat failover. This is a validation workaround. New regression
 tests and expected release-image pins changed; existing assertions were not
