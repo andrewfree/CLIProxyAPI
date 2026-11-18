@@ -63,6 +63,79 @@ test("returns chosen account cooldown without retrying another account", async (
   assert.equal(calls, 1);
 });
 
+const selectorCooldown = (seconds) => JSON.stringify({
+  error: { code: "model_cooldown", reset_seconds: seconds },
+});
+const claudeCooldown = (duration) => JSON.stringify({
+  type: "error",
+  error: { type: "rate_limit_error", message: `Upstream quota exceeded (reset after ${duration})` },
+});
+
+for (const { label, status = 429, body, retryAfter, shouldRetry = null } of [
+  { label: "long selector cooldown", body: selectorCooldown(61), shouldRetry: "false" },
+  { label: "long Claude cooldown", body: claudeCooldown("2h17m30s"), shouldRetry: "false" },
+  { label: "long cooldown at the 64 KiB limit", body: selectorCooldown(3600).padEnd(64 * 1024), shouldRetry: "false" },
+  { label: "short selector cooldown", body: selectorCooldown(30) },
+  { label: "one-minute Claude cooldown", body: claudeCooldown("1m0s") },
+  { label: "429 with Retry-After", body: selectorCooldown(3600), retryAfter: "30" },
+  { label: "non-JSON 429", body: "Too Many Requests" },
+  { label: "plain provider rate limit", body: '{"type":"error","error":{"type":"rate_limit_error","message":"Quota exceeded"}}' },
+  { label: "non-429 error", status: 503, body: selectorCooldown(3600) },
+]) {
+  test(`forwards ${label} with the expected retry headers`, async (t) => {
+    const base = await fixture(t, (_req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (retryAfter !== undefined) res.setHeader("retry-after", retryAfter);
+      res.writeHead(status);
+      res.end(body);
+    });
+    const res = await fetch(base + "/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"model":"claude-sonnet-5","stream":true}',
+    });
+    assert.equal(res.status, status);
+    assert.equal(res.headers.get("retry-after"), retryAfter ?? null);
+    assert.equal(res.headers.get("x-should-retry"), shouldRetry);
+    assert.equal(await res.text(), body);
+  });
+}
+
+test("forwards an oversized chunked 429 before the upstream finishes", { timeout: 3000 }, async (t) => {
+  const prefix = selectorCooldown(3600).padEnd(64 * 1024 + 1);
+  const suffix = "\n";
+  let finish;
+  const base = await fixture(t, (_req, res) => {
+    res.writeHead(429, { "content-type": "application/json" });
+    res.write(prefix.slice(0, 1024));
+    res.write(prefix.slice(1024));
+    finish = () => res.end(suffix);
+  });
+  const res = await fetch(base + "/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"model":"claude-sonnet-5"}',
+  });
+  assert.equal(res.status, 429);
+  assert.equal(res.headers.get("x-should-retry"), null);
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (received < prefix.length) {
+    const { value, done } = await reader.read();
+    assert.equal(done, false);
+    chunks.push(value);
+    received += value.length;
+  }
+  finish();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  assert.equal(Buffer.concat(chunks).toString(), prefix + suffix);
+});
+
 for (const [label, options] of [["account", { prefix: "icloud" }], ["shared pool", { route: "shared-pool" }]]) test(`${label} route forwards SSE incrementally and keeps account trace headers`, async (t) => {
   let finish;
   const base = await fixture(t, async (req, res) => {
@@ -72,6 +145,8 @@ for (const [label, options] of [["account", { prefix: "icloud" }], ["shared pool
     res.write('event: message_start\ndata: {}\n\n');
   }, options);
   const res = await fetch(base + "/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: '{"model":"claude-sonnet-5","stream":true}' });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("x-should-retry"), null);
   assert.equal(res.headers.get("x-cpa-trace-id"), "icloud-proof");
   const reader = res.body.getReader();
   const first = await reader.read();

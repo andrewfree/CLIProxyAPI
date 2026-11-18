@@ -33,6 +33,10 @@ Claude process and adds the selected account's model prefix before forwarding
 requests to the existing proxy. It streams replies and forwards errors without
 trying a different account. The listener closes when Claude exits.
 
+The launcher sends `x-should-retry: false` so Claude Code can stop retrying
+when CLIProxy returns HTTP 429 without `Retry-After` and a JSON body of at
+most 64 KiB reports a cooldown reset more than 60 seconds away.
+
 The launcher accepts only `POST /v1/messages`, `POST /v1/messages/count_tokens`,
 and `GET /v1/models`. Message requests require an `application/json` body.
 Unsupported routes are rejected before they reach the shared account pool.

@@ -16,6 +16,7 @@ const supportedOperations = new Set([
 ]);
 
 const childShutdownGraceMs = 5000;
+const maxCooldownBodyBytes = 64 * 1024;
 
 function forwardedHeaders(headers) {
   const excluded = new Set(hopHeaders);
@@ -38,6 +39,74 @@ async function requestBody(request) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+
+function isLongCooldown(body) {
+  let payload;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  const error = payload?.error;
+  if (error?.code === "model_cooldown") {
+    return Number.isFinite(error.reset_seconds) && error.reset_seconds > 60;
+  }
+  if (payload?.type !== "error" || error?.type !== "rate_limit_error" || typeof error.message !== "string") {
+    return false;
+  }
+  // The Claude handler renders the selector's reset as a Go duration at the end of its message.
+  const reset = / \(reset after (?:(\d+)h)?(?:(\d+)m)?(\d+)s\)$/.exec(error.message);
+  if (!reset) return false;
+  const [, hours = "0", minutes = "0", seconds] = reset;
+  const totalSeconds = Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds);
+  return Number.isFinite(totalSeconds) && totalSeconds > 60;
+}
+
+function forwardUpstreamResponse(upstream, response, outgoing) {
+  const { statusCode, headers } = upstream;
+  upstream.on("error", () => response.destroy());
+
+  function stream(prefix) {
+    response.writeHead(statusCode, outgoing);
+    if (prefix?.length) response.write(prefix);
+    upstream.pipe(response);
+  }
+
+  if (statusCode !== 429 || headers["retry-after"] !== undefined ||
+      !/^\s*application\/json\s*(;|$)/i.test(headers["content-type"] ?? "") ||
+      !/^identity$/i.test(headers["content-encoding"] ?? "identity") ||
+      Number(headers["content-length"]) > maxCooldownBodyBytes) {
+    return stream();
+  }
+
+  const chunks = [];
+  let size = 0;
+  function read() {
+    const available = upstream.readableLength;
+    if (size + available > maxCooldownBodyBytes) {
+      upstream.off("readable", read);
+      upstream.off("end", finish);
+      stream(Buffer.concat(chunks, size));
+      return;
+    }
+    const chunk = upstream.read(available);
+    // An exact-size read can drain the final chunk without emitting "end".
+    if (available > 0) upstream.read(0);
+    if (chunk === null) return;
+    chunks.push(chunk);
+    size += chunk.length;
+  }
+
+  function finish() {
+    const body = Buffer.concat(chunks, size);
+    if (isLongCooldown(body)) outgoing["x-should-retry"] = "false";
+    response.writeHead(statusCode, outgoing);
+    response.end(body);
+  }
+
+  upstream.on("readable", read);
+  upstream.once("end", finish);
 }
 
 export async function startAccountProxy({ route = "account", prefix, upstream }) {
@@ -110,9 +179,7 @@ export async function startAccountProxy({ route = "account", prefix, upstream })
         }
         return;
       }
-      response.writeHead(upstreamResponse.statusCode, outgoing);
-      upstreamResponse.on("error", () => response.destroy());
-      upstreamResponse.pipe(response);
+      forwardUpstreamResponse(upstreamResponse, response, outgoing);
     });
     upstreamRequest.on("error", () => fail(response, 502, "CLIProxy is unavailable for the selected Claude route."));
     response.on("close", () => upstreamRequest.destroy());
