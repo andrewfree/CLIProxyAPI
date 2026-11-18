@@ -6,6 +6,21 @@ import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// A copy of T3 settings in which every sensitive variable and every ANTHROPIC_API_KEY has its value
+// replaced, in case T3 failed to flag or redact one. Restoring through this tool supplies the key
+// again, and it never changes another sensitive variable, so nothing a restore needs is lost.
+export function withoutSecrets(settings) {
+  const copy = structuredClone(settings);
+  for (const instance of Object.values(copy?.providerInstances ?? {})) {
+    for (const variable of instance?.environment ?? []) {
+      if ((variable.sensitive || variable.name === "ANTHROPIC_API_KEY") && typeof variable.value === "string" && variable.value) {
+        variable.value = "<redacted>";
+      }
+    }
+  }
+  return copy;
+}
+
 export function httpOrigin(value, name) {
   const origin = new URL(value);
   if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/") {
@@ -128,13 +143,13 @@ async function main() {
       id: values["profile-id"], label: values.label, upstream: values.upstream, fallback: values.fallback,
       launcher: fileURLToPath(new URL("./claude_account_launcher.mjs", import.meta.url)), binary: values["claude-binary"], apiKey,
     });
-    fs.writeFileSync(path.join(values["backup-dir"], "settings-before.json"), JSON.stringify(settings, null, 2), { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(path.join(values["backup-dir"], "settings-before.json"), JSON.stringify(withoutSecrets(settings), null, 2), { flag: "wx", mode: 0o600 });
     await client.rpc("server.updateSettings", { patch: { providerInstances: providers } });
     const { settings: after } = await client.rpc("server.getConfig");
     const saved = after.providerInstances[values["profile-id"]];
     const secret = saved.environment.find((variable) => variable.name === "ANTHROPIC_API_KEY");
     if (!secret?.sensitive || !secret.valueRedacted || secret.value) throw new Error("API key secret storage was not confirmed.");
-    fs.writeFileSync(path.join(values["backup-dir"], "settings-after.json"), JSON.stringify(after, null, 2), { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(path.join(values["backup-dir"], "settings-after.json"), JSON.stringify(withoutSecrets(after), null, 2), { flag: "wx", mode: 0o600 });
     console.log(JSON.stringify({ profile: values["profile-id"], label: saved.displayName, upstream: values.upstream, fallback: values.fallback ?? null, secretStoredAndRedacted: true, serverVersion: client.runtime.serverVersion }));
   } finally {
     client.close();

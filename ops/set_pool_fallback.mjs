@@ -7,7 +7,9 @@ import tty from "node:tty";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { maskHosts } from "./claude_failover_drill.mjs";
-import { connectT3, httpOrigin } from "./configure_claude_pool.mjs";
+import { connectT3, httpOrigin, withoutSecrets } from "./configure_claude_pool.mjs";
+
+export { withoutSecrets };
 
 const usage = `Usage: set_pool_fallback.mjs --base-dir <t3-base-dir> --profile-id <id> --primary <origin> (--fallback <origin> | --no-fallback) --backup-dir <private-dir> [--no-key-check], with the profile's API key on stdin.
 Before it opens a T3 session, it checks the key with GET /v1/models on the primary and the fallback and requires HTTP 200. --no-key-check skips that check, for example while an origin is down.`;
@@ -86,18 +88,6 @@ export function poolFallbackEnvironment(environment, options) {
 
 // Compares the provider instances T3 saved with the edit that was sent. The report holds no secret
 // values and no tailnet name; `ok` is false when any check failed.
-const credentialName = /KEY|TOKEN|SECRET|PASSWORD/i;
-
-// A copy of T3 settings with every non-empty credential-like variable value replaced.
-export function withoutSecrets(settings) {
-  const copy = structuredClone(settings);
-  for (const instance of Object.values(copy?.providerInstances ?? {})) {
-    for (const variable of instance?.environment ?? []) {
-      if (credentialName.test(variable.name) && typeof variable.value === "string" && variable.value) variable.value = "<redacted>";
-    }
-  }
-  return copy;
-}
 
 export function savedReport({ id, before, after, environment }) {
   const profile = before[id];
@@ -167,7 +157,7 @@ async function main() {
     if (profile?.driver !== "claudeAgent") throw new PrintableError(`Refusing ${id}: it is not a claudeAgent profile.`);
     const environment = poolFallbackEnvironment(profile.environment ?? [], request);
     const stamp = new Date().toISOString().replace(/[:.]/g, "");
-    // Backups never hold a credential value, even one T3 failed to flag or redact.
+    // Backups never hold the key or a sensitive value, even one T3 failed to flag or redact.
     const backup = (name, value) => fs.writeFileSync(path.join(values["backup-dir"], `settings-${name}-${stamp}.json`), JSON.stringify(withoutSecrets(value), null, 2), { flag: "wx", mode: 0o600 });
     backup("before", settings);
     await client.rpc("server.updateSettings", { patch: { providerInstances: { ...before, [id]: { ...profile, environment } } } });
@@ -175,7 +165,7 @@ async function main() {
     backup("after", after);
     const { report, ok } = savedReport({ id, before, after: after.providerInstances, environment });
     console.log(JSON.stringify(report));
-    if (!ok) throw new PrintableError("The saved settings did not verify. Restore the profile from the private before backup.");
+    if (!ok) throw new PrintableError("The saved settings did not verify. Compare with the private before backup and rerun this tool with the previous URLs and the key.");
   } catch (error) {
     failed = true;
     failure = error;

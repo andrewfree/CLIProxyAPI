@@ -68,7 +68,10 @@ async function runKeyCommand(command, label, env, signal) {
   } catch {
     // A command that cannot start is reported below like one that fails.
   } finally {
-    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    if (onAbort) {
+      signal?.removeEventListener("abort", onAbort);
+      onAbort(); // also stop anything the command left running in its group
+    }
   }
   if (signal?.aborted) throw signal.reason;
   if (code !== 0) throw new Error(`${label} failed.`);
@@ -223,7 +226,8 @@ sends one count_tokens request, and prints one JSON line per primary.
 
 Without --key-command, CLIPROXY_DRILL_KEY is used when set. The key reaches the child only as
 ANTHROPIC_API_KEY and is never printed. Exits 0 only when every run returned 200, 2 on a usage error,
-and 128 plus the signal number when SIGINT, SIGTERM or SIGHUP stops it.
+and 128 plus the signal number when SIGINT, SIGTERM, SIGHUP or SIGQUIT stops it. The key command runs
+in its own session without a terminal, so it cannot prompt.
 `;
 
 function usageError() {

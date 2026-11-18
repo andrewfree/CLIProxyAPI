@@ -310,7 +310,7 @@ test("the CLI never prints a key T3 saved without its sensitive flag, or a tailn
   // --no-key-check keeps the ts.net name from reaching DNS.
   const { code, stdout, stderr } = await runTool(toolArgs(t3, backupDir, "--primary", "http://will.tailabc123.ts.net:8317", "--no-fallback", "--no-key-check"));
   assert.equal(code, 1);
-  assert.match(stderr, /did not verify\. Restore the profile from the private before backup/);
+  assert.match(stderr, /did not verify\. Compare with the private before backup/);
   const report = JSON.parse(stdout);
   assert.deepEqual(report.environment, { CLIPROXY_CLAUDE_ROUTE: "shared-pool", CLIPROXY_BASE_URL: "http://will.<tailnet>.ts.net:8317" });
   assert.equal(report.apiKey.sensitive, false);
@@ -335,13 +335,15 @@ test("duplicate key or route entries and a changed driver are refused or flagged
   assert.equal(savedReport({ id: "claude_cliproxy", before: { claude_cliproxy: profile }, after, environment }).report.profileUnchanged, false);
 });
 
-test("withoutSecrets replaces credential values and keeps everything else", () => {
+test("withoutSecrets replaces the key and sensitive values and keeps everything else", () => {
   const settings = { providerInstances: { p: { environment: [
     { name: "ANTHROPIC_API_KEY", value: "fixture-key" }, { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "" },
+    { name: "CLIPROXY_CLIENT_AUTH", value: "flagged-secret", sensitive: true },
+    { name: "CLAUDE_CODE_MAX_OUTPUT_TOKENS", value: "64000", sensitive: false },
     { name: "CLIPROXY_BASE_URL", value: "http://127.0.0.1:8317" },
   ] } } };
   const safe = withoutSecrets(settings);
-  assert.deepEqual(safe.providerInstances.p.environment.map((v) => v.value), ["<redacted>", "", "http://127.0.0.1:8317"]);
+  assert.deepEqual(safe.providerInstances.p.environment.map((v) => v.value), ["<redacted>", "", "<redacted>", "64000", "http://127.0.0.1:8317"]);
   assert.equal(settings.providerInstances.p.environment[0].value, "fixture-key", "the input is not changed");
 });
 
@@ -350,7 +352,7 @@ test("a failed session revoke keeps the verification result", async (t) => {
   const unverified = fakeT3(t, { unflagKey: true, revokeFails: true });
   const failed = await runTool(toolArgs(unverified, backupDir(), "--primary", primary, "--no-fallback", "--no-key-check"));
   assert.equal(failed.code, 1);
-  assert.match(failed.stderr, /did not verify\. Restore the profile from the private before backup/);
+  assert.match(failed.stderr, /did not verify\. Compare with the private before backup/);
   assert.deepEqual(unverified.calls(), ["issue", "revoke"]);
 
   const verified = fakeT3(t, { revokeFails: true });
