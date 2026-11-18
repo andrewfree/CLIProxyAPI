@@ -50,6 +50,7 @@ secrets and logs.
 
  Only the first arrow pair is automatic. Every other profile has one fixed host.
  The two proxies share no runtime state and neither is in the other's request path.
+ CLIProxyBar (the Mac menu-bar quota app, not shown) still reaches Will by address (section 4).
 ```
 
 Sources: profile list and hosts in [FLEET.md](FLEET.md#running-fleet); per-client routes in
@@ -394,8 +395,8 @@ and the check was a resolver comparison. With the raw address, a foreign network
 ([FLEET.md](FLEET.md#running-fleet), design question 3). Since the November 18 parity cleanup the
 Mac's `codex_cliproxy` uses the name too, for the same reason: its
 `model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. It has no
-launcher, so a failed lookup fails the request instead of failing over. M1 and CLIProxyBar's Will
-entry still use the raw address (section 4).
+launcher, so a failed lookup fails the request instead of failing over. M1 and the Will entry in
+CLIProxyBar (the Mac menu-bar quota app) still use the raw address (section 4).
 
 The name does not help on a network whose resolver answers every name, as some captive portals do:
 a session already running would send requests, with the client key, in clear to that address, and

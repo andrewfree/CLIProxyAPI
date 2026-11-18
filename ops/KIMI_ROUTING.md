@@ -20,8 +20,8 @@ Kimi defaults to the direct Kimi CLI. When the owner or applicable standing inst
 
 Follow the returned `next` instruction and completion notification. Do not poll a running task. When `next` says completion wakes the thread, end the turn and resume on that notification. Read the completed result and check for pending child work before reporting completion. The authorized task can supply execution evidence. No additional paid smoke test is required by this recipe.
 
-On November 18, 2026 the `kimi-ai` login (`api.kimi.ai`) was removed from Will because its usage counters matched the `kimi` login's (`api.kimi.com`): both share one Kimi quota, so it added no capacity ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
-
 Treat route, endpoint, account, and model fallback as separate choices. Selecting CLIProxy instead of the direct CLI does not permit an endpoint switch. Selecting the Mac endpoint does not permit a named-account switch. A failure does not permit substituting another model for exact K3.1. Preserve each selection unless its existing authorization permits the change.
 
 Catalog visibility proves discovery only. A private review completed through Will's `codex_cliproxy` profile targeting `kimi-k3.1-pro` at `2026-11-02T23:25:33.200Z`. That establishes completed task execution through the selected route. It does not independently attest the upstream served model, subscription billing provenance, or available quota for a future call. This review did not exercise the Mac fallback. The earlier fleet `client-validation.json` receipt covers Luna, not Kimi.
+
+On November 18, 2026 the `kimi-ai` login (`api.kimi.ai`) was removed from Will because its usage counters matched the `kimi` login's (`api.kimi.com`): both share one Kimi quota, so it added no capacity ([FLEET.md](FLEET.md#operations-on-november-18-2026)).

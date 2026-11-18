@@ -1,10 +1,10 @@
 # Run NVIDIA-hosted models through CLIProxy
 
-Both proxies, Will and the M5 Mac at `http://127.0.0.1:8317`, serve selected models from NVIDIA's hosted API (`build.nvidia.com`) as an OpenAI-compatible upstream. Will gained the provider, the same static key and the same three aliases on November 18, 2026 ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
+Both proxies, Will (primary) and the M5 Mac (`http://127.0.0.1:8317`), serve selected models from NVIDIA's hosted API (`build.nvidia.com`) as an OpenAI-compatible upstream. Will gained the provider, the same static key and the same three aliases on November 18, 2026 ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
 
 ## Use it from T3
 
-Select the **CLIProxy pool · M** provider (`codex_cliproxy_mac`) and one of these model IDs:
+Select **CLIProxy pool · W** (`codex_cliproxy`, Will) or **CLIProxy pool · M** (`codex_cliproxy_mac`, the Mac) and one of these model IDs. Will has served the aliases since November 18. Confirm that T3 lists them for the profile you choose ([Verify](#verify)).
 
 | T3 / proxy model ID | NVIDIA model | Status on 2026-11-11 |
 |---|---|---|
@@ -12,11 +12,11 @@ Select the **CLIProxy pool · M** provider (`codex_cliproxy_mac`) and one of the
 | `nvidia-minimax-m3.1-flash` | `minimaxai/minimax-m3.1-flash` | Chat and Responses passed. About 8 to 12 seconds. |
 | `nvidia-nemotron-3-ultra` | `nvidia/nemotron-3-ultra-550b-a55b` | Passed through the proxy, but NVIDIA intermittently returns `finish_reason: stop` with empty content, also on direct calls. |
 
-The `codex` driver is only the client. CLIProxy translates Responses API requests into Chat Completions for this upstream. `codex_kimi_mac` also lists these models because it targets the same proxy.
+The `codex` driver is only the client. CLIProxy translates Responses API requests into Chat Completions for this upstream. `codex_kimi_mac` also lists these models because it targets the same Mac proxy as `codex_cliproxy_mac`.
 
 ## Configuration
 
-The provider lives in M5's ignored `config.yaml`. CLIProxy has no environment-variable reference for upstream keys, so the key is inline in that file (mode `0600`). The source copy is `~/.config/nvidia/api.env` (`NVIDIA_API_KEY`). Never commit the key or print it.
+The provider lives in each host's ignored `config.yaml`, with the same key on both hosts. CLIProxy has no environment-variable reference for upstream keys, so the key is inline in that file (mode `0600`). The source copy is the Mac's `~/.config/nvidia/api.env` (`NVIDIA_API_KEY`). Never commit the key or print it.
 
 ```yaml
 openai-compatibility:
@@ -33,7 +33,7 @@ openai-compatibility:
         alias: "nvidia-minimax-m3.1-flash"
 ```
 
-This config uses the legacy layout: root `api-keys:` is the list of client keys. In that layout the top-level `openai-compatibility` key list is named `api-key-entries`. The newer `keys:` name, shown in `config.example.yaml`, belongs to the nested `api-keys:` provider map. With `keys:` here, CLIProxy still lists the aliases in `/v1/models` but sends no `Authorization` header, and NVIDIA answers `Header of type authorization was missing`. A correct reload logs `1 OpenAI-compat`.
+The block above is the legacy layout, which Will uses: root `api-keys:` is the list of client keys, and the top-level `openai-compatibility` key list is named `api-key-entries`. The Mac has used the v8 layout since November 14 ([GLM_ROUTING.md](GLM_ROUTING.md#client-authentication-and-configuration-layout)). There the provider sits in the nested `api-keys:` provider map, and its key list is named `keys:`, as in `config.example.yaml`. With `keys:` in a legacy-layout file, CLIProxy still lists the aliases in `/v1/models` but sends no `Authorization` header, and NVIDIA answers `Header of type authorization was missing`. A correct reload logs `1 OpenAI-compat`.
 
 Edit the file in place to keep its inode, because Docker bind-mounts the single file. CLIProxy hot-reloads it without a restart.
 
@@ -56,10 +56,14 @@ tok=$(~/.local/bin/cliproxy-codex-token)
 curl -sS -H "Authorization: Bearer $tok" http://127.0.0.1:8317/v1/models   # expect the nvidia-* IDs
 ```
 
+From the Mac, check Will's catalog with the same token: `curl -sS -H "Authorization: Bearer $tok" http://will.<tailnet>.ts.net:8317/v1/models`. On Will, run the same `python3 ops/verify_fleet_instance.py` from its instance root.
+
 Then send one small chat request per alias. In T3, run `orchestrator_capabilities({"search":"nvidia"})` to confirm the catalog. T3 caches it until the next provider health refresh.
 
 ## Roll back
 
-Remove the `openai-compatibility` block from `config.yaml` in place. The pre-change copy is in the private, ignored `ops/runtime/nvidia-provider-20261111/backup-20261111T150145Z/`. Do not restore that whole file over later edits.
+On the Mac, remove only the `nvidia` entry from `openai-compatibility` in `config.yaml`, in place. The list also holds other providers, such as `zai-coding-plan` ([GLM_ROUTING.md](GLM_ROUTING.md)). The pre-change copy is in the private, ignored `ops/runtime/nvidia-provider-20261111/backup-20261111T150145Z/`. Do not restore that whole file over later edits.
+
+On Will, remove only the `nvidia` entry from `openai-compatibility` in place; it was added on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
 
 The [setup receipt](evidence/nvidia-provider-20261111.json) records the checks.

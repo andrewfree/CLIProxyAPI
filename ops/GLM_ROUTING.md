@@ -37,8 +37,8 @@ Since November 18, 2026, both hosts map client ID `glm-5.2` to upstream model
 `glm-5.3` on `zai-coding-plan`: the provider's model list has an entry with
 `name: glm-5.3` and `alias: glm-5.2`. Andrew asked for this fix.
 
-Z.ai's GLM Coding Plan now serves only GLM-5.3 and GLM-5.3-Flash. It redirects
-`glm-5.2` and `glm-5.1` requests to GLM-5.3 on its side
+Z.ai's model list for the GLM Coding Plan still names `glm-5.2`, but Z.ai
+redirects `glm-5.2` and `glm-5.1` requests to GLM-5.3 on its side
 ([Z.ai: latest model](https://docs.z.ai/devpack/latest-model)). A direct
 `glm-5.2` alias answered correctly, but every reply named `glm-5.3`. The Cursor
 plugin's `glm-5.2` entry on Will returned 503 `auth_not_found`
@@ -55,7 +55,9 @@ Verify on each host:
 - In the request log of one small `glm-5.2` request, the `model` in the
   `=== API REQUEST ===` section is `glm-5.3`, and the response's `model` is
   `glm-5.3`. The response named `glm-5.3` before the mapping too, so only the
-  `API REQUEST` model shows that the mapping applies.
+  `API REQUEST` model shows that the mapping applies. On November 18 the Mac's
+  log showed `glm-5.2` in `=== REQUEST BODY ===` and `glm-5.3` in
+  `=== API REQUEST ===`.
 
 ## Client authentication and configuration layout
 
