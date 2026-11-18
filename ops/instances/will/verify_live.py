@@ -24,7 +24,7 @@ cd "$root"
 compose=$(
   docker compose config --format json |
     jq -c '.services["cli-proxy-api"] |
-      {image,pull_policy,restart,ports,volumes,healthcheck,stop_grace_period,logging}'
+      {image,pull_policy,restart,ports,volumes,healthcheck,stop_grace_period,logging,sysctls}'
 )
 container=$(
   docker inspect "$service" |
@@ -34,6 +34,7 @@ container=$(
       state: .State.Status,
       health: (.State.Health.Status // "none"),
       restart_policy: .HostConfig.RestartPolicy.Name,
+      sysctls: .HostConfig.Sysctls,
       ports: .HostConfig.PortBindings,
       mounts: [.Mounts[] | {
         type: .Type,
@@ -186,6 +187,8 @@ def evaluate_observation(
         != compose_policy["logging_max_file"]
     ):
         findings.add("compose_logging_policy_drift")
+    if compose.get("sysctls") != compose_policy["sysctls"]:
+        findings.add("compose_sysctls_drift")
     if not isinstance(compose.get("healthcheck"), dict):
         findings.add("compose_healthcheck_missing")
 
@@ -236,6 +239,9 @@ def evaluate_observation(
         findings.add("container_not_healthy")
     if container.get("restart_policy") != runtime["restart_policy"]:
         findings.add("container_restart_policy_drift")
+    # A container created before a sysctl change keeps its old values until it is recreated.
+    if container.get("sysctls") != compose_policy["sysctls"]:
+        findings.add("container_sysctls_drift")
 
     expected_bindings = {
         f"{port}/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]

@@ -509,6 +509,7 @@ func validateComposeContract(composeText string, contract workloadContract) erro
 		"      retries: 3\n",
 		"      start_period: 10s\n",
 		"    restart: " + contract.Workload.Runtime.RestartPolicy + "\n",
+		"    sysctls:\n      net.ipv4.tcp_syn_retries: 2\n",
 	}
 	for _, expected := range requiredComposeFragments {
 		if !strings.Contains(composeText, expected) {
