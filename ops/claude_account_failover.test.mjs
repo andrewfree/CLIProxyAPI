@@ -4,15 +4,16 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { failoverDefaults, isEgressFailure, probeHealth, startAccountProxy } from "./claude_account_launcher.mjs";
 
-// Will's responses when its upstream is unreachable, captured in the unit 0 staging run
-// (refused, unresolved name, SYN drop at the default and at tcp_syn_retries=2, first-party dial path).
+// Will's responses when its upstream is unreachable. The first five were captured in the unit 0 staging run
+// (refused, unresolved name, SYN drop at the default and at tcp_syn_retries=2, first-party dial path);
+// tokenRefresh follows the "no auth available" format in sdk/api/handlers/handlers_errors.go.
 const egressBodies = {
   refused: '{"type":"error","error":{"type":"api_error","message":"Post \\"https://10.254.239.2:19443/v1/messages?beta=true\\": dial tcp 10.254.239.2:19443: connect: connection refused"}}',
   unresolved: '{"type":"error","error":{"type":"api_error","message":"Post \\"https://missing-unit0-bc-01a1efce.invalid:19443/v1/messages?beta=true\\": dial tcp: lookup missing-unit0-bc-01a1efce.invalid on 127.0.0.11:53: server misbehaving"}}',
   dialTimeout: '{"type":"error","error":{"type":"timeout_error","message":"Post \\"https://10.254.239.2:19444/v1/messages?beta=true\\": dial tcp 10.254.239.2:19444: i/o timeout"}}',
   synDrop: '{"type":"error","error":{"type":"api_error","message":"Post \\"https://10.254.239.2:19444/v1/messages?beta=true\\": dial tcp 10.254.239.2:19444: connect: connection timed out"}}',
   firstParty: '{"type":"error","error":{"type":"api_error","message":"Post \\"https://api.anthropic.com/v1/messages?beta=true\\": claude tls: dial upstream: dial tcp 10.254.239.2:443: connect: connection timed out"}}',
-  tokenRefresh: '{"error":{"type":"api_error","message":"auth_unavailable: no auth available; last upstream error: dial tcp: lookup platform.claude.com on 127.0.0.11:53: server misbehaving"}}',
+  tokenRefresh: '{"error":{"type":"api_error","message":"no auth available (providers=claude, model=claude-opus-5-5; last upstream error: dial tcp: lookup platform.claude.com on 127.0.0.11:53: server misbehaving); check Claude auth/key session and cooldown state via /v0/management/auth-files"}}',
 };
 
 const flush = async () => {
@@ -111,6 +112,8 @@ test("classifies every captured egress-down response as a failover, and nothing 
     '{"error":{"message":"auth_unavailable: invalid_grant: Refresh token not found or invalid"}}',
     '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
     '{"error":{"message":"read tcp 10.0.0.2:443: connection reset by peer"}}',
+    '{"error":{"message":"read tcp 172.18.0.2:51234->160.79.104.10:443: read: network is unreachable"}}',
+    '{"error":{"message":"write tcp 172.18.0.2:51234->160.79.104.10:443: write: network is unreachable"}}',
     "not json",
   ]) assert.equal(isEgressFailure(503, body), false, body);
 });
@@ -169,6 +172,31 @@ test("an egress hold keeps new requests on the fallback, doubles on repeat, and 
   egressDown = true;
   assert.equal(await (await message(base)).text(), "fallback");
   assert.deepEqual(transitions.map((entry) => entry.seconds), [120, 240, 120]);
+});
+
+test("requests that hit the same outage together share one hold", async (t) => {
+  const { base, transitions } = await harness(t, {
+    primary: (_req, res) => { res.writeHead(500); res.end(egressBodies.refused); },
+  });
+  const responses = await Promise.all([message(base), message(base), message(base, "/v1/messages/count_tokens")]);
+  for (const response of responses) assert.equal(await response.text(), "fallback");
+  assert.deepEqual(transitions, [{ event: "egress_hold", seconds: 120 }]);
+});
+
+test("only a successful primary answer resets the hold backoff", async (t) => {
+  let answer = [500, egressBodies.synDrop];
+  const { base, clock, transitions } = await harness(t, {
+    primary: (_req, res) => { res.writeHead(answer[0]); res.end(answer[1]); },
+  });
+  await (await message(base)).text();
+  await clock.advance(120_001);
+  answer = [429, '{"error":{"code":"model_cooldown","reset_seconds":30}}'];
+  const cooled = await message(base);
+  assert.equal(cooled.status, 429);
+  await cooled.text();
+  answer = [500, egressBodies.synDrop];
+  await (await message(base)).text();
+  assert.deepEqual(transitions.map((entry) => entry.seconds), [120, 240]);
 });
 
 for (const [status, body] of [
@@ -358,6 +386,85 @@ test("a silent request is cut after three failed probes", async (t) => {
   assert.deepEqual(events(transitions), ["primary_down", "request_cut"]);
 });
 
+test("probe failures from before a recovery do not count against the primary", async (t) => {
+  let fallbackStream;
+  let primaryStream;
+  const { base, clock, healthy, transitions } = await harness(t, {
+    primary: (_req, res) => { primaryStream = res; res.writeHead(200); res.write("start"); },
+    fallback: (_req, res) => { fallbackStream = res; res.writeHead(200); res.write("start"); },
+  });
+  const first = await message(base);
+  const firstReader = first.body.getReader();
+  await firstReader.read();
+  healthy.primary = false;
+  for (let i = 0; i < 3; i++) {
+    primaryStream.write("x");
+    await firstReader.read();
+    await clock.advance(failoverDefaults.livenessIntervalMs);
+  }
+  assert.deepEqual(events(transitions), ["primary_down"]);
+  const second = await message(base);
+  assert.equal(second.headers.get("x-cliproxy-host"), "fallback");
+  const secondReader = second.body.getReader();
+  await secondReader.read();
+  primaryStream.end();
+  await firstReader.read();
+  healthy.primary = true;
+  for (let i = 0; i < 2; i++) {
+    fallbackStream.write("y");
+    await secondReader.read();
+    await clock.advance(failoverDefaults.recoveryIntervalMs);
+  }
+  await clock.advance(1);
+  assert.deepEqual(events(transitions), ["primary_down", "primary_up"]);
+  const third = await message(base);
+  assert.equal(third.headers.get("x-cliproxy-host"), "primary");
+  const thirdReader = third.body.getReader();
+  await thirdReader.read();
+  healthy.primary = false;
+  primaryStream.write("z");
+  await thirdReader.read();
+  await clock.advance(failoverDefaults.livenessIntervalMs);
+  assert.deepEqual(events(transitions), ["primary_down", "primary_up"], "one failed probe is not three");
+});
+
+test("a request that joins just before a probe still gets a full silent window", async (t) => {
+  let streaming;
+  let arrived;
+  const received = new Promise((resolve) => { arrived = resolve; });
+  const { base, clock, healthy } = await harness(t, {
+    primary: (req, res) => {
+      if (req.url.startsWith("/v1/messages/count_tokens")) return void arrived();
+      streaming = res;
+      res.writeHead(200);
+      res.write("start");
+    },
+  });
+  // A delivering stream starts the probe timer at 0 s; its ticks fall at 20, 40, 60 and 80 s.
+  const stream = await message(base);
+  const reader = stream.body.getReader();
+  await reader.read();
+  healthy.primary = false;
+  await clock.advance(failoverDefaults.livenessIntervalMs - 100);
+  const pending = message(base, "/v1/messages/count_tokens");
+  await received;
+  let settled = false;
+  pending.then(() => { settled = true; });
+  for (const step of [100, failoverDefaults.livenessIntervalMs, failoverDefaults.livenessIntervalMs]) {
+    streaming.write("x");
+    await reader.read();
+    await clock.advance(step);
+  }
+  await flush();
+  assert.equal(settled, false, "not cut 40.1 s after it started");
+  streaming.write("x");
+  await reader.read();
+  await clock.advance(failoverDefaults.livenessIntervalMs);
+  const response = await pending;
+  assert.equal(response.status, 502);
+  await response.text();
+});
+
 test("a silent request on a healthy host is never cut", async (t) => {
   let upstream;
   let arrived;
@@ -398,19 +505,23 @@ test("a failed startup probe sends the first request to the fallback", async (t)
   assert.deepEqual(transitions, [{ event: "primary_down", reason: "startup_probe" }]);
 });
 
-test("without a fallback the launcher starts no timers and sends no probes", async (t) => {
+test("without a fallback the launcher starts no timers, sends no probes, and reuses connections", async (t) => {
   const used = [];
   const spy = new Proxy({}, { get: (_target, name) => () => { used.push(name); return 0; } });
-  const upstream = await listen(t, (_req, res) => res.end("primary"));
+  const sockets = new Set();
+  const upstream = await listen(t, (req, res) => { sockets.add(req.socket); res.end("primary"); });
   const proxy = await startAccountProxy({
     route: "shared-pool", upstream: upstream.url,
     failover: { clock: spy, probe: async () => { used.push("probe"); return true; }, log: () => used.push("log") },
   });
   t.after(() => { proxy.server.closeAllConnections(); proxy.server.close(); });
-  const response = await message(proxy.baseURL);
-  assert.equal(await response.text(), "primary");
-  assert.equal(response.headers.get("x-cliproxy-host"), null);
+  for (let i = 0; i < 3; i++) {
+    const response = await message(proxy.baseURL, "/v1/messages/count_tokens");
+    assert.equal(await response.text(), "primary");
+    assert.equal(response.headers.get("x-cliproxy-host"), null);
+  }
   assert.deepEqual(used, []);
+  assert.equal(sockets.size, 1, "the default agent keeps one upstream connection alive");
 });
 
 test("fallback configuration is limited to a distinct origin on the shared pool", async () => {

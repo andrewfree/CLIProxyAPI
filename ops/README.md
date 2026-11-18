@@ -93,9 +93,12 @@ With the variable set, the launcher:
 - Replays any request on the fallback when the primary refused it, could not
   be resolved, or did not connect in time. Nothing reached the primary.
 - Replays any request on the fallback when the primary answers 5xx with a dial
-  or lookup error. CLIProxy could not reach its upstream, so nothing ran. New
-  requests then stay on the fallback for 120 seconds, doubling on each repeat
-  up to 600 seconds, and the hold resets after the primary answers again.
+  error: CLIProxy's last attempt could not connect to its upstream. An earlier
+  attempt in the same retry round can still have reached the provider if
+  egress failed in the middle of it, so in that moment a message can run
+  twice. New requests then stay on the fallback for 120 seconds. Requests
+  that hit the same outage together share that hold; a repeat after it ends
+  doubles it, up to 600 seconds. A 2xx or 3xx from the primary resets it.
 - Passes 401, 403, 429, 529 and other 5xx responses through unchanged. Both
   hosts hold the same accounts, so the fallback would answer the same way.
 - Probes the host once when a connection closes with no response bytes.
@@ -105,16 +108,20 @@ With the variable set, the launcher:
   if the probe failed.
 - Destroys the client response, without replay, when a stream breaks after
   it started.
-- Probes each host with open requests every 20 seconds. Three failed probes in
-  a row take the host out of service for new requests. An open request is
-  ended only when, in addition, it received no bytes during those probes, so
-  a stream that is still delivering is never cut.
+- Probes each host with open requests every 20 seconds. Three failed probes of
+  the primary in a row take it out of service for new requests. An open
+  request on either host is ended only after three failed probes of its host
+  during which it received no bytes, counted from its first full 20 seconds,
+  so a stream that is still delivering is never cut.
 - Returns the primary to service after two passing probes 15 seconds apart,
   and no sooner than 30 seconds after it left.
-- Fails over at most once per request. If the fallback cannot be reached
-  either, the primary is tried once.
+- Fails over at most once per request. A request that starts on the fallback
+  while the primary is out of service tries the primary once if the fallback
+  cannot be reached. A request that has already moved from the primary gets a
+  502.
 
-Every response carries `X-CLIProxy-Host: primary` or `fallback`. Host
+Every response from a CLIProxy host carries `X-CLIProxy-Host: primary` or
+`fallback`; the launcher's own 400, 404 and 415 rejections do not. Host
 transitions are appended to `ops/runtime/fleet/failover.jsonl` (ignored by git;
 `CLIPROXY_FAILOVER_LOG` overrides the path) as one JSON line each, with no
 request bodies, URLs or keys.

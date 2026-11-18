@@ -210,6 +210,12 @@ test("an invalid connect timeout fails before launching Claude", async (t) => {
   assert.match(r.stderr(), /CLIPROXY_CONNECT_TIMEOUT_MS/);
 });
 
+test("without a fallback, the connect timeout variable is ignored", async (t) => {
+  const r = await launchWith(t, { CLIPROXY_CONNECT_TIMEOUT_MS: "soon" }, "exit", "0");
+  assert.deepEqual(await withDeadline(r.exited, 15000, "launcher exit"), { code: 0, signal: null });
+  assert.ok(r.ready());
+});
+
 test("with a fallback, an unhealthy primary sends Claude's first request to the fallback", async (t) => {
   const fallback = http.createServer((_req, res) => res.end('{"input_tokens":1}'));
   fallback.listen(0, "127.0.0.1");

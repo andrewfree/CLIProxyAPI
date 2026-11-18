@@ -190,7 +190,7 @@ Then write in place. The catalog must be unchanged, and one small request per Op
 | Zero-byte reset after connect | Probe. Idempotent ops replay; `/v1/messages` gets 502, no replay |
 | Accepted then silent, half-open | Liveness watch ends it after three failed probes with no bytes received; no replay of `/v1/messages` |
 | Probes fail while the stream still delivers bytes | Stream continues. Host marked down for new requests only |
-| Will up, upstream egress down (5xx JSON with dial or lookup text) | Replay on fallback, backoff hold. Will answered that nothing ran. Time to that answer is bounded by section 6 item 10 |
+| Will up, upstream egress down (5xx JSON with dial error text) | Replay on fallback, backoff hold. Will's last attempt did not connect; an earlier attempt in the same retry round may have reached the provider if egress failed mid-request. Time to that answer is bounded by section 6 item 10 |
 | Server's own 503 "no credential", other 5xx, 529 | Pass through (negative test) |
 | 401, 403 | Pass through. A bad client key is equal on both hosts (I4). A dead token on one host is surfaced by I6 and fixed by login there |
 | 429, pool or named prefix | Pass through. Report limit type and reset |

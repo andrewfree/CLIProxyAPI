@@ -39,10 +39,12 @@ const maxFailoverErrorBytes = 64 * 1024;
 const maxHealthBodyBytes = 4096;
 const defaultFailoverLog = fileURLToPath(new URL("./runtime/fleet/failover.jsonl", import.meta.url));
 const accountOrQuotaError = /invalid_grant|unauthorized|rate_limit_error|usage_limit_reached|quota_exceeded|model_cooldown/i;
-const dialError = /\bdial (?:tcp|udp)[46]?\b|\bdial upstream:|\blookup \S+ .*(?:no such host|server misbehaving)|\bnetwork is unreachable\b/i;
+// Only dial errors: a read or write error means an earlier connection to the upstream existed.
+const dialError = /\bdial (?:tcp|udp)[46]?\b|\bdial upstream:/i;
 
-// A 5xx whose error says CLIProxy could not dial its upstream means nothing reached the provider,
-// so the request can be replayed on the other host.
+// A 5xx whose error says CLIProxy could not dial its upstream means its last attempt never connected,
+// so the request is replayed on the other host. An earlier retry round may still have reached the
+// provider when egress fails mid-request; that window is accepted (ops/README.md).
 export function isEgressFailure(statusCode, body) {
   if (statusCode < 500) return false;
   let error;
@@ -151,6 +153,8 @@ function createHostSelector({ clock, probe, log, settings }) {
     choose: () => (down || clock.now() < holdUntil ? "fallback" : "primary"),
     markDown,
     egressDown() {
+      // Concurrent requests that hit the same outage share one hold.
+      if (clock.now() < holdUntil) return;
       holdUntil = clock.now() + holdMs;
       log({ event: "egress_hold", seconds: holdMs / 1000 });
       holdMs = Math.min(holdMs * 2, settings.egressHoldMaxMs);
@@ -180,13 +184,14 @@ function createLivenessWatch({ clock, probe, settings, onHostFailing }) {
     try {
       const hosts = [...new Set([...watched].map((entry) => entry.host))];
       const healthy = new Map(await Promise.all(hosts.map(async (host) => [host, await probe(host)])));
+      for (const host of hostFailures.keys()) if (!healthy.has(host)) hostFailures.delete(host);
       for (const host of hosts) {
         const failures = healthy.get(host) ? 0 : (hostFailures.get(host) ?? 0) + 1;
         hostFailures.set(host, failures);
         if (failures >= settings.livenessFailures) onHostFailing(host);
       }
       for (const entry of [...watched]) {
-        if (!healthy.has(entry.host)) continue;
+        if (!healthy.has(entry.host) || clock.now() - entry.joined < settings.livenessIntervalMs) continue;
         const bytes = entry.socket.bytesRead;
         entry.silent = healthy.get(entry.host) || bytes !== entry.bytes ? 0 : entry.silent + 1;
         entry.bytes = bytes;
@@ -462,7 +467,7 @@ function createFailoverRoute({ target, fallback, deliver, options }) {
         if (host === "primary" && upstreamResponse.statusCode >= 500 && !failedOver) {
           return classifyPrimaryError(upstreamRequest, upstreamResponse);
         }
-        if (host === "primary" && upstreamResponse.statusCode < 500) selector.primaryAnswered();
+        if (host === "primary" && upstreamResponse.statusCode < 400) selector.primaryAnswered();
         deliver(request, path, response, upstreamResponse);
       });
       active = upstreamRequest;
@@ -481,7 +486,7 @@ function createFailoverRoute({ target, fallback, deliver, options }) {
           connected = true;
         }
         release = watch.add({
-          host, socket: assigned, bytes: assigned.bytesRead, silent: 0,
+          host, socket: assigned, bytes: assigned.bytesRead, silent: 0, joined: clock.now(),
           cut() {
             if (active !== upstreamRequest) return;
             active = null;
@@ -579,15 +584,16 @@ function connectTimeoutSetting(value) {
 async function main() {
   const binary = process.env.CLIPROXY_CLAUDE_BINARY;
   if (!binary) throw new Error("CLIPROXY_CLAUDE_BINARY is required.");
+  const fallbackUpstream = process.env.CLIPROXY_FALLBACK_URL || undefined;
   const { server, baseURL } = await startAccountProxy({
     route: process.env.CLIPROXY_CLAUDE_ROUTE,
     prefix: process.env.CLIPROXY_ACCOUNT_PREFIX,
     upstream: process.env.CLIPROXY_BASE_URL,
-    fallbackUpstream: process.env.CLIPROXY_FALLBACK_URL || undefined,
-    failover: {
+    fallbackUpstream,
+    failover: fallbackUpstream ? {
       settings: connectTimeoutSetting(process.env.CLIPROXY_CONNECT_TIMEOUT_MS),
       log: transitionLog(process.env.CLIPROXY_FAILOVER_LOG || defaultFailoverLog),
-    },
+    } : {},
   });
   const child = spawn(binary, process.argv.slice(2), {
     stdio: "inherit",
