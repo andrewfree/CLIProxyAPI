@@ -238,15 +238,85 @@ def registered_prefix(ids, forced):
     return ""
 
 
-def credential_health(item, now):
+def model_lookup_key(model, prefix):
+    model = model.strip()
+    if prefix:
+        model = model.removeprefix(prefix + "/").strip()
+    # Match the selector's case-insensitive lookup without the thinking suffix.
+    if model.endswith(")") and "(" in model:
+        model = model.rsplit("(", 1)[0].strip() or model
+    return model.lower()
+
+
+def oauth_alias_lookup(config, item):
+    """Return the channel's upstream lookup keys, or None for an unusable table."""
+    channel = item["provider"].strip().lower()
+    if channel == "gemini" or item.get("account_type") == "api_key":
+        return {}
+    table = config.get("oauth-model-alias", {})
+    if not isinstance(table, dict):
+        return None
+    entries = table.get(channel, [])
+    if not provider_list(entries):
+        return None
+    aliases = {}
+    for entry in entries:
+        alias, name = entry.get("alias"), entry.get("name")
+        if not isinstance(alias, str) or not isinstance(name, str):
+            return None
+        alias = alias.strip().lower()
+        upstream = model_lookup_key(name, "")
+        if not alias or not upstream or alias in aliases:
+            return None
+        aliases[alias] = upstream
+    return aliases
+
+
+def model_restrictions_leave_route(item, ids, prefix, config):
+    cooldowns = item.get("cooldowns") or []
+    if not cooldowns or prefix is None:
+        return False
+    aliases = oauth_alias_lookup(config, item)
+    if aliases is None:
+        return False
+    served = set()
+    route_prefix = prefix + "/" if prefix else ""
+    for model in ids:
+        route = model.strip().removeprefix(route_prefix).strip()
+        key = model_lookup_key(route, "")
+        # The selector tries the exact alias before the thinking-suffix-free alias.
+        served.add(aliases.get(route.lower(), aliases.get(key, key)))
+    restricted = set()
+    for row in cooldowns:
+        if row.get("scope") != "model" or row["reason"] != "model_not_supported":
+            return False
+        raw_model = row.get("model_key") or ""
+        model = model_lookup_key(raw_model, "")
+        # Strip the credential prefix only when the literal upstream key is absent.
+        if model not in served:
+            model = model_lookup_key(raw_model, prefix)
+        if not model:
+            return False
+        restricted.add(model)
+    return bool(served - restricted - {""})
+
+
+def credential_health(item, now, *, partial_model_restrictions=False):
     if item["disabled"] or item["status"] == "disabled":
         return "disabled"
     message = re.sub(r"[_-]+", " ", (item.get("status_message") or "").strip().lower())
     if item.get("requires_sign_in") or HARD_CREDENTIAL_ERROR.search(message):
         return "error"
+    expires = item.get("access_token_expires_at")
+    if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) <= now:
+        return "error"
     cooldowns = item.get("cooldowns") or []
     if any(row["reason"] in HARD_CREDENTIAL_REASONS for row in cooldowns):
         return "error"
+    # Restored model restrictions can set the aggregate error status.
+    if (partial_model_restrictions and not item.get("refresh_error")
+            and item.get("next_action") != "sign_in"):
+        return "ok"
     retry = item.get("next_retry_after")
     if item["unavailable"] and retry:
         deadline = datetime.fromisoformat(retry.replace("Z", "+00:00"))
@@ -273,19 +343,19 @@ def credential_snapshot(api, config, nonce, now):
     for item in response["files"]:
         provider = item["provider"]
         disabled = item["disabled"] or item["status"] == "disabled"
-        health = credential_health(item, now)
-        counts[health] += 1
         label = item["label"]
         if not label:
             issues["P6/missing-label"] += 1
         account = tag(nonce, "account", provider, label)
         prefix = None
+        partial_model_restrictions = False
         if not disabled:
             # ID is accepted by the handler and avoids ambiguity from duplicate filenames.
             query = urlencode({"name": item["id"]})
             models, _ = api.get(V8 + "/credentials/models?" + query)
             ids = {model["id"] for model in models["models"]}
             prefix = registered_prefix(ids, config["force-model-prefix"])
+            partial_model_restrictions = model_restrictions_leave_route(item, ids, prefix, config)
             if prefix is None:
                 issues["P6/unknown-prefix"] += 1
             if provider != "cursor":
@@ -297,6 +367,8 @@ def credential_snapshot(api, config, nonce, now):
                     catalog_scopes[model["id"], model.get("owned_by")] = "kimi-ai"
                 elif provider == "codex" and prefix == "camoff-astra" and model["id"].startswith("camoff-astra/"):
                     catalog_scopes[model["id"], model.get("owned_by")] = "camoff-astra"
+        health = credential_health(item, now, partial_model_restrictions=partial_model_restrictions)
+        counts[health] += 1
         scope = "kimi-ai" if provider == "kimi-ai" else "shared"
         is_camoff = provider == "codex" and prefix == "camoff-astra"
         prefix_kind = "camoff-astra" if is_camoff else "unprefixed" if prefix == "" else "other"
