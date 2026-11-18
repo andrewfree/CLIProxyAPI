@@ -7,8 +7,8 @@ import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // A copy of T3 settings in which every sensitive variable and every ANTHROPIC_API_KEY has its value
-// replaced, in case T3 failed to flag or redact one. Restoring through this tool supplies the key
-// again, and it never changes another sensitive variable, so nothing a restore needs is lost.
+// replaced, in case T3 failed to flag or redact one. Both tools take the key again on every run, and
+// set_pool_fallback.mjs changes no other variable, so a restore loses nothing it needs.
 export function withoutSecrets(settings) {
   const copy = structuredClone(settings);
   for (const instance of Object.values(copy?.providerInstances ?? {})) {

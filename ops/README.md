@@ -149,8 +149,9 @@ uses. Before it opens a T3 session, the tool sends `GET /v1/models` with the
 key to the primary and, when `--fallback` is given, to the fallback, and
 stops unless each returns HTTP 200. Pass `--no-key-check` to skip that check,
 for example while one host is down. The tool keeps private before and after
-settings (mode `0600`, with the key and every sensitive value replaced by
-`<redacted>`) in the backup directory; to restore, rerun the tool with the
+settings (mode `0600`) in the backup directory. They hold no value for the
+key or any sensitive variable: T3 returns those empty, and the tool replaces
+any it did not with `<redacted>`. To restore, rerun the tool with the
 previous URLs and the key. It also checks that the profile's
 `config` block and every other profile are unchanged. Its report lists only
 an allowlisted set of variables, with tailnet names masked; the key is never
