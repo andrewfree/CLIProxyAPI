@@ -57,6 +57,7 @@ def matching_observation():
                 "driver": "json-file",
                 "options": {"max-size": "10m", "max-file": "3"},
             },
+            "sysctls": {"net.ipv4.tcp_syn_retries": "2"},
         },
         "container": {
             "image_ref": runtime["image"],
@@ -64,6 +65,7 @@ def matching_observation():
             "state": "running",
             "health": "healthy",
             "restart_policy": "always",
+            "sysctls": {"net.ipv4.tcp_syn_retries": "2"},
             "ports": {
                 f"{port}/tcp": [
                     {"HostIp": "127.0.0.1", "HostPort": str(port)}
@@ -161,6 +163,30 @@ class WillInstanceVerifierTests(unittest.TestCase):
 
         self.assertIn("compose_image_drift", findings)
         self.assertIn("compose_port_exposure_drift", findings)
+
+    def test_missing_or_changed_sysctl_is_drift(self):
+        observation = matching_observation()
+        observation["compose"].pop("sysctls")
+        observation["container"]["sysctls"] = None
+
+        findings = evaluate_observation(self.contract, self.policy, observation)
+
+        self.assertIn("compose_sysctls_drift", findings)
+        self.assertIn("container_sysctls_drift", findings)
+
+        observation = matching_observation()
+        observation["container"]["sysctls"] = {"net.ipv4.tcp_syn_retries": "6"}
+        findings = evaluate_observation(self.contract, self.policy, observation)
+        self.assertEqual({"container_sysctls_drift"}, set(findings))
+
+        for compose_sysctls in (
+            {"net.ipv4.tcp_syn_retries": "3"},
+            {"net.ipv4.tcp_syn_retries": "2", "net.ipv4.tcp_fin_timeout": "10"},
+        ):
+            observation = matching_observation()
+            observation["compose"]["sysctls"] = compose_sysctls
+            findings = evaluate_observation(self.contract, self.policy, observation)
+            self.assertEqual({"compose_sysctls_drift"}, set(findings))
 
     def test_remote_probe_is_secret_minimizing(self):
         self.assertNotIn("cat \"$config_file\"", REMOTE_PROBE)

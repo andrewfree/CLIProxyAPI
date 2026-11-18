@@ -40,3 +40,7 @@ services:
       retries: 3
       start_period: 10s
     restart: always
+    # Give up on an unanswered upstream connect after about 7 s instead of the kernel's
+    # default of about 130 s, so a dial error reaches the Claude launcher's failover quickly.
+    sysctls:
+      net.ipv4.tcp_syn_retries: 2
