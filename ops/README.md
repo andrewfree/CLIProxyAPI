@@ -94,8 +94,9 @@ launcher keeps the default connection agent and starts no timers or probes.
 With the variable set, the launcher:
 
 - Gives each upstream connection 3 seconds to connect
-  (`CLIPROXY_CONNECT_TIMEOUT_MS`, 100 to 60000). Nothing times out after a
-  connection exists.
+  (`CLIPROXY_CONNECT_TIMEOUT_MS`, 100 to 60000). No timer ends a client
+  request after its connection exists; only health probes are bounded after
+  connect.
 - Checks a host with `GET /healthz`, which must return 200 with
   `{"status":"ok"}` within 3 seconds. It checks the primary at startup.
 - Replays any request on the fallback when the primary refused it, could not
@@ -148,7 +149,9 @@ uses. Before it opens a T3 session, the tool sends `GET /v1/models` with the
 key to the primary and, when `--fallback` is given, to the fallback, and
 stops unless each returns HTTP 200. Pass `--no-key-check` to skip that check,
 for example while one host is down. The tool keeps private before and after
-settings (mode `0600`) in the backup directory and checks that the profile's
+settings (mode `0600`, with the key and every sensitive value replaced by
+`<redacted>`) in the backup directory; to restore, rerun the tool with the
+previous URLs and the key. It also checks that the profile's
 `config` block and every other profile are unchanged. Its report lists only
 an allowlisted set of variables, with tailnet names masked; the key is never
 printed. New sessions use the change; running sessions keep their launch
@@ -188,8 +191,8 @@ Exit 0 means only that every run returned 200. It does not say which side
 answered, so check each line's `host` (`primary` or `fallback`) against the
 expectation above. Exit 1 means at least one run did not return 200 or the
 drill could not run, for example because the key command failed. Exit 2
-means a usage error, such as no `--primary`. On `SIGINT`, `SIGTERM` or
-`SIGHUP` the drill stops the running launcher and its stub, removes its
+means a usage error, such as no `--primary`. On `SIGINT`, `SIGTERM`,
+`SIGHUP` or `SIGQUIT` the drill stops the running launcher and its stub, removes its
 temporary directory, and exits with 128 plus the signal number.
 
 On `SIGTERM`, `SIGINT`, or `SIGHUP`, the launcher closes its listener and

@@ -650,7 +650,7 @@ Nothing tracked by git holds one.
   has an extra `kimi-ai` credential (dated exceptions, section 2.1). The design's optional wrapper
   (unit 10) is not built.
 - **The Mac's `codex_cliproxy` uses Will's raw address.** It still reaches Will at
-  Will's raw tailnet address ([KIMI_ROUTING.md](KIMI_ROUTING.md)), not at the tailnet name, so
+  its raw tailnet IP address ([KIMI_ROUTING.md](KIMI_ROUTING.md)), not at the tailnet name, so
   the section 2.6 reason for the name applies to it too: with Tailscale stopped on another network,
   it would send requests, with its client key, in clear to whatever holds that address. Moving it
   to the name is a separate live change for Andrew.
@@ -744,7 +744,7 @@ text).
 - Keep failover configured on `claude_cliproxy` across profile reruns
   ([FLEET.md](FLEET.md#running-fleet)). To change only its two URLs, use `set_pool_fallback.mjs`;
   unless `--no-key-check` is given, it checks the key you pipe to it against the hosts before it
-  opens a T3 session (section 2.6, The drill). It cannot check the stored key, which T3 redacts.
+  opens a T3 session (section 2.6, The drill). It saves the piped key in place of the stored one, which T3 redacts and the tool cannot read.
 
 **Enabling failover for another profile.**
 
