@@ -87,6 +87,77 @@ func TestClaudeAgentSessionUUIDUsesExecutionAndDerivedIdentity(t *testing.T) {
 	}
 }
 
+func TestClaudeDatePinSessionID(t *testing.T) {
+	const session = "11111111-2222-4333-8444-555555555555"
+	const otherSession = "99999999-8888-4777-8666-555555555555"
+	headers := http.Header{
+		"User-Agent":               {"claude-cli/2.1.322 (external, t3-code, agent-sdk/0.3.321)"},
+		"X-Claude-Code-Session-Id": {session},
+	}
+	first := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	second := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"}]}`)
+	firstUpstream := ClaudeAgentSessionUUIDForRequest(headers, first, nil, false)
+	secondUpstream := ClaudeAgentSessionUUIDForRequest(headers, second, nil, false)
+	if firstUpstream == secondUpstream {
+		t.Log("upstream session IDs match across turns; the stability check below is then trivially satisfied")
+	}
+
+	ctx := context.Background()
+	pin := ClaudeDatePinSessionID(ctx, headers, firstUpstream)
+	if pin == session || pin == firstUpstream || pin == "" {
+		t.Fatalf("pin ID must be a new hashed ID, got %q", pin)
+	}
+	if got := ClaudeDatePinSessionID(ctx, headers, secondUpstream); got != pin {
+		t.Fatalf("pin ID changed across turns: %q then %q", pin, got)
+	}
+
+	otherHeaders := headers.Clone()
+	otherHeaders.Set("X-Claude-Code-Session-Id", otherSession)
+	if got := ClaudeDatePinSessionID(ctx, otherHeaders, secondUpstream); got == pin {
+		t.Fatal("a different client session must get a different pin ID")
+	}
+
+	mainHeaders := headers.Clone()
+	mainHeaders.Set("X-Claude-Code-Agent-Id", "main")
+	if got := ClaudeDatePinSessionID(ctx, mainHeaders, secondUpstream); got != pin {
+		t.Fatalf("main agent pin ID = %q, want the session pin %q", got, pin)
+	}
+
+	agentHeaders := headers.Clone()
+	agentHeaders.Set("X-Claude-Code-Agent-Id", "worker")
+	if got := ClaudeDatePinSessionID(ctx, agentHeaders, firstUpstream); got != pin {
+		t.Fatalf("subagent pin ID = %q, want the session pin %q", got, pin)
+	}
+	suffixHeaders := headers.Clone()
+	suffixHeaders.Set("X-Claude-Code-Session-Id", session+":agent:worker")
+	if got := ClaudeDatePinSessionID(ctx, suffixHeaders, secondUpstream); got != pin {
+		t.Fatalf("suffixed session pin ID = %q, want the session pin %q", got, pin)
+	}
+
+	noSessionHeader := headers.Clone()
+	noSessionHeader.Del("X-Claude-Code-Session-Id")
+	otherClient := headers.Clone()
+	otherClient.Set("User-Agent", "other-client/1.0")
+	for _, tc := range []struct {
+		name     string
+		headers  http.Header
+		metadata map[string]any
+	}{
+		{name: "no session header", headers: noSessionHeader},
+		{name: "other client", headers: otherClient},
+		{name: "execution metadata", headers: headers, metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "run-1"}},
+		{name: "derived metadata", headers: headers, metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:root"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := ClaudeAgentSessionUUIDForRequest(tc.headers, second, nil, false, tc.metadata)
+			ctxMetadata := WithClaudeSessionMetadata(context.Background(), nil, tc.metadata)
+			if got := ClaudeDatePinSessionID(ctxMetadata, tc.headers, upstream); got != upstream {
+				t.Fatalf("pin ID = %q, want existing session ID %q", got, upstream)
+			}
+		})
+	}
+}
+
 func TestEnsureClaudeCredentialDevicePoolRequiredMigratesHomeKVToOne(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "legacy-five-device-credential", Metadata: map[string]any{}}
 	key := "cpa:claude:credential-device-pool:" + homekv.HashKeyPart(auth.EnsureIndex())
