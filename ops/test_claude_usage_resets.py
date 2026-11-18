@@ -164,6 +164,8 @@ class ClaimTest(unittest.TestCase):
             "string": (with_fable_percent("99"), "not a finite number"),
             "bool": (with_fable_percent(True), "not a finite number"),
             "nan": (with_fable_percent(float("nan")), "not a finite number"),
+            "inf": (with_fable_percent(float("inf")), "not a finite number"),
+            "huge": (with_fable_percent(10 ** 400), "not a finite number"),
         }
         for name, (body, message) in cases.items():
             for dry_run in (False, True):

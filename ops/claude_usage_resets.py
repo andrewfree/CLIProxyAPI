@@ -205,7 +205,11 @@ def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, rece
         if percent is None:
             raise ResetError(f"Fable limit is missing from the usage response for {email}; "
                              f"cannot check the required {min_fable_percent}%")
-        if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not math.isfinite(percent):
+        try:
+            finite = not isinstance(percent, bool) and isinstance(percent, (int, float)) and math.isfinite(percent)
+        except OverflowError:
+            finite = False  # an integer too large for a float
+        if not finite:
             raise ResetError(f"Fable usage percent is not a finite number ({type(percent).__name__})")
         if percent < min_fable_percent:
             raise ResetError(f"Fable usage {percent}% is below required {min_fable_percent}%")
@@ -333,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--grant", required=True, help="grant id from `status`, e.g. launch-2610-fable")
     p.add_argument("--receipt", type=pathlib.Path)
     p.add_argument("--min-fable-percent", type=int, metavar="0..100",
-                   help="refuse a claim unless fresh Fable usage is at least this percent")
+                   help="refuse a claim unless a fresh read reports a finite Fable usage of at least this percent")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--yes", action="store_true", help="really redeem the grant")
     mode.add_argument("--dry-run", action="store_true", help="run every check but do not send the claim")
