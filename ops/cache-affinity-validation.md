@@ -1,5 +1,7 @@
 # Affinity did not demonstrate a reproducible cache benefit
 
+Superseded on November 18, 2026: both hosts now run session affinity. See the last section.
+
 The operating decision is to restore round robin on the Mac fallback and Will primary, retaining routing drift checks. This follows the criterion frozen before the comparison. It is a conservative policy choice for Will, where the comparison was not run.
 
 The experiment used the existing fleet.3 image, HTTP on both legs, Luna at low reasoning effort, two interleaved sessions per run, and about 98,000 initial input tokens from public repository source. Each session completed five function calls with linked tool results and one final exact-output check. Five pairs alternated which setting ran first. Every arm and session used a fresh early nonce and stable session, thread, and cache identifiers. First turns were excluded from the primary cache metric.
@@ -65,15 +67,15 @@ Final validation passed 84 ops tests, including 21 probe tests and an added rout
 
 ## November 18, 2026: affinity enabled from real traffic
 
-The November 2 trial above used 120 synthetic Luna requests. It did not measure Claude, Codex, or native T3 traffic, which is where most pooled requests go.
+The November 2 trial above used 120 synthetic Luna requests against the OpenAI pool. It did not measure Claude traffic, real Codex client traffic, or native T3 traffic, which is where most pooled requests go.
 
-A read-only parse of Mac request logs from November 11 to 18 measured that traffic. It covered 47,887 `/v1/messages` and 8,765 `/v1/responses` logs. The parser extracted only timestamps, hashed session and agent IDs, models, per-attempt account labels and statuses, and usage counts. Consecutive turns of one stream within 300 seconds were compared by serving account:
+A read-only parse of Mac request logs measured that traffic. It covered 47,887 `/v1/messages` logs from November 11 to 18 and 8,765 `/v1/responses` logs from November 12 to 18. The parser extracted only timestamps, hashed session and agent IDs, models, per-attempt account labels and statuses, and usage counts. Consecutive turns of one stream within 300 seconds were compared by serving account:
 
 | Stream | Turn pairs | Account switched | Cache hit, same account | Cache hit, switched |
 | --- | --- | --- | --- | --- |
 | Claude pool | 35,343 | 2,361 | 98.7% | 88.1% |
 | Codex pool | 7,627 | 2,713 | 98.6% | 96.0% |
 
-Claude switches reached 20% of turns on November 12 and 38% on November 13. A switched Claude turn wrote a median of 5,464 cache tokens and a 90th percentile of 39,984, against 1,604 and 6,327 on the same account. That added about 11% and 24% to those days' input cost at API-price equivalents. Switching fell to zero on later days only because a single account remained eligible. Codex switches reached 66% of turns on November 14 and 44% on November 15. The parser could not tell apart the two unprefixed Codex credentials, so the Codex rate is a lower bound. Will retains only one day of logs and could not be measured. How subscription limits weigh cache writes against reads is not published, so the cost figures are price equivalents, not measured quota.
+Claude switches reached 20% of turns on November 12 and 38% on November 13. A switched Claude turn wrote a median of 5,464 cache tokens and a 90th percentile of 39,984, against 1,604 and 6,327 on the same account. That added about 11% and 24% to those days' input cost at API-price equivalents. Switching fell to 2% on November 15, adding 8% that day, and to zero on the other later days, only because a single account remained eligible. Codex switches reached 66% of turns on November 14 and 44% on November 15. The parser could not tell apart the two unprefixed Codex credentials, so the Codex rate is a lower bound. Will retains only one day of logs and could not be measured. How subscription limits weigh cache writes against reads is not published, so the cost figures are price equivalents, not measured quota.
 
-Session affinity wraps the quota-aware selector. It binds each stream by `X-Claude-Code-Session-Id` plus agent ID, or by Codex `Session-Id`, so new streams are still balanced by quota. Claude Fable and Claude Opus reviewed the evidence and the selector code independently. They agreed on `session-affinity: true` with the existing TTL, subagent and rebind settings, plus the Mac's adoption of Will's `transient-error-cooldown-seconds: -1` and `max-retry-interval: 75`. A post-change measurement on a day with two or more eligible accounts has not been run.
+Session affinity wraps the quota-aware selector. It binds each stream by `X-Claude-Code-Session-Id` plus agent ID, or by Codex `Session-Id`, so new streams are still balanced by quota. Claude Fable and Claude Opus reviewed the evidence and the selector code independently. They agreed on `session-affinity: true` with the existing one-hour TTL and `session-affinity-subagents: false`, plus the Mac's adoption of Will's `transient-error-cooldown-seconds: -1` and `max-retry-interval: 75`. They split on rebind: Fable recommended `any` and Opus `quota`. The reconciled decision kept `any`, because with the transient cooldown disabled both modes cost one cold cache write after a transient error, and `any` stays stable if that cooldown is ever set non-negative. A post-change measurement on a day with two or more eligible accounts has not been run.
