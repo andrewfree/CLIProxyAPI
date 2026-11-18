@@ -96,9 +96,12 @@ With the variable set, the launcher:
   error: CLIProxy's last attempt could not connect to its upstream. An earlier
   attempt in the same retry round can still have reached the provider if
   egress failed in the middle of it, so in that moment a message can run
-  twice. New requests then stay on the fallback for 120 seconds. Requests
-  that hit the same outage together share that hold; a repeat after it ends
-  doubles it, up to 600 seconds. A 2xx or 3xx from the primary resets it.
+  twice. Claude Code would resend the message after that 5xx anyway; the
+  replay only sends the retry to the host that can serve it. New requests
+  then stay on the fallback for 120 seconds. Requests that hit the same
+  outage together share that hold; a repeat after it ends doubles the next
+  hold, up to 600 seconds. A 2xx or 3xx from the primary returns the next
+  hold to 120 seconds without ending one that is running.
 - Passes 401, 403, 429, 529 and other 5xx responses through unchanged. Both
   hosts hold the same accounts, so the fallback would answer the same way.
 - Probes the host once when a connection closes with no response bytes.
@@ -111,8 +114,8 @@ With the variable set, the launcher:
 - Probes each host with open requests every 20 seconds. Three failed probes of
   the primary in a row take it out of service for new requests. An open
   request on either host is ended only after three failed probes of its host
-  during which it received no bytes, counted from its first full 20 seconds,
-  so a stream that is still delivering is never cut.
+  during which it received no bytes, counting only probes it was open for a
+  whole interval before, so a stream that is still delivering is never cut.
 - Returns the primary to service after two passing probes 15 seconds apart,
   and no sooner than 30 seconds after it left.
 - Fails over at most once per request. A request that starts on the fallback

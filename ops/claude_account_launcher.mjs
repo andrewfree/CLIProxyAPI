@@ -44,7 +44,8 @@ const dialError = /\bdial (?:tcp|udp)[46]?\b|\bdial upstream:/i;
 
 // A 5xx whose error says CLIProxy could not dial its upstream means its last attempt never connected,
 // so the request is replayed on the other host. An earlier retry round may still have reached the
-// provider when egress fails mid-request; that window is accepted (ops/README.md).
+// provider when egress fails mid-request. Claude Code would resend the request after this 5xx anyway,
+// so the replay adds no double run of its own; it only sends that retry to the host that can serve it.
 export function isEgressFailure(statusCode, body) {
   if (statusCode < 500) return false;
   let error;
@@ -124,7 +125,7 @@ function transitionLog(file) {
 // Chooses the host for new requests. The primary leaves service on a failed connect or health check
 // and returns after enough passing probes; an egress failure holds new requests on the fallback instead,
 // because the primary's own health check stays green while its upstream is unreachable.
-function createHostSelector({ clock, probe, log, settings }) {
+function createHostSelector({ clock, probe, log, settings, onRecovered }) {
   let down = null;
   let holdUntil = 0;
   let holdMs = settings.egressHoldMs;
@@ -143,6 +144,7 @@ function createHostSelector({ clock, probe, log, settings }) {
       if (state.successes >= settings.recoverySuccesses && clock.now() - state.since >= settings.recoveryMinimumMs) {
         clock.clearInterval(state.timer);
         down = null;
+        onRecovered();
         log({ event: "primary_up" });
       }
     }, settings.recoveryIntervalMs);
@@ -177,10 +179,14 @@ function createLivenessWatch({ clock, probe, settings, onHostFailing }) {
   const hostFailures = new Map();
   let timer = null;
   let ticking = false;
+  // Requests that joined after this moment have not been watched for a whole interval yet.
+  let windowStart = 0;
 
   async function tick() {
     if (ticking) return;
     ticking = true;
+    const counted = windowStart;
+    windowStart = clock.now();
     try {
       const hosts = [...new Set([...watched].map((entry) => entry.host))];
       const healthy = new Map(await Promise.all(hosts.map(async (host) => [host, await probe(host)])));
@@ -191,7 +197,7 @@ function createLivenessWatch({ clock, probe, settings, onHostFailing }) {
         if (failures >= settings.livenessFailures) onHostFailing(host);
       }
       for (const entry of [...watched]) {
-        if (!healthy.has(entry.host) || clock.now() - entry.joined < settings.livenessIntervalMs) continue;
+        if (!healthy.has(entry.host) || entry.joined > counted) continue;
         const bytes = entry.socket.bytesRead;
         entry.silent = healthy.get(entry.host) || bytes !== entry.bytes ? 0 : entry.silent + 1;
         entry.bytes = bytes;
@@ -211,11 +217,17 @@ function createLivenessWatch({ clock, probe, settings, onHostFailing }) {
   return {
     add(entry) {
       watched.add(entry);
-      timer ??= clock.setInterval(tick, settings.livenessIntervalMs);
+      if (timer === null) {
+        windowStart = clock.now();
+        timer = clock.setInterval(tick, settings.livenessIntervalMs);
+      }
       return () => {
         watched.delete(entry);
         if (!watched.size) stop();
       };
+    },
+    forget(host) {
+      hostFailures.delete(host);
     },
     stop() {
       watched.clear();
@@ -430,7 +442,7 @@ function createFailoverRoute({ target, fallback, deliver, options }) {
   const log = options.log ?? transitionLog(defaultFailoverLog);
   const origins = { primary: target, fallback };
   const probe = options.probe ?? ((host) => probeHealth(origins[host], settings.probeTimeoutMs));
-  const selector = createHostSelector({ clock, probe, log, settings });
+  const selector = createHostSelector({ clock, probe, log, settings, onRecovered: () => watch.forget("primary") });
   const watch = createLivenessWatch({
     clock, probe, settings, onHostFailing: (host) => { if (host === "primary") selector.markDown("liveness"); },
   });
