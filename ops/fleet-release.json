@@ -1,8 +1,8 @@
 {
-  "version": "v8.0.66-fleet.3",
+  "version": "v8.0.66-fleet.4",
   "upstream": "v8.0.66",
-  "source_commit": "4b93cbb545d0f37fe2fdf619f91dd58e0e2f9955",
-  "image_tag": "cliproxy-fleet:v8.0.66-fleet.3",
+  "source_commit": "4a1d49c3c839d97411a6a29b5daa18e16212c3bf",
+  "image_tag": "cliproxy-fleet:v8.0.66-fleet.4",
   "primary": {
     "host": "will.local",
     "address": "100.98.74.67",
@@ -29,8 +29,8 @@
     }
   },
   "images": {
-    "arm64": "sha256:43c85866015ac08365741c004a033a56e42ccc5b89d999bcc6d83425b2aad5af",
-    "amd64": "sha256:bd8ebc2b1ee329d88ac4ada235aaaa2744856740933e404966ec8a9eca18f473"
+    "arm64": "sha256:f57649a96d5b1e8404309a5d5a25da050ea000c68f00f937f29b153a838e774f",
+    "amd64": "sha256:9e9da16e283e20da4a534d1397d4b6433a5708f4f04b6faf2d03b1367d357af6"
   },
   "config_fingerprint": {
     "shared": "c32120a3b8238ecaffc42f29c95a024977e03c248d31ff24cf15c5c347bf1958",

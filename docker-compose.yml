@@ -1,6 +1,6 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-sha256:43c85866015ac08365741c004a033a56e42ccc5b89d999bcc6d83425b2aad5af}
+    image: ${CLI_PROXY_IMAGE:-sha256:f57649a96d5b1e8404309a5d5a25da050ea000c68f00f937f29b153a838e774f}
     pull_policy: never
     build:
       context: .

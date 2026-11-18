@@ -2,7 +2,7 @@ name: cliproxy
 
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-sha256:bd8ebc2b1ee329d88ac4ada235aaaa2744856740933e404966ec8a9eca18f473}
+    image: ${CLI_PROXY_IMAGE:-sha256:9e9da16e283e20da4a534d1397d4b6433a5708f4f04b6faf2d03b1367d357af6}
     pull_policy: never
     container_name: cli-proxy-api
     env_file:
