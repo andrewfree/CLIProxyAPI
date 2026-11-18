@@ -22,5 +22,18 @@ Checks after the change:
 
 ## Will (amd64)
 
-Pending. The change is one key, `routing.session-affinity: true`, because Will already runs
-`transient-error-cooldown-seconds: -1` and `max-retry-interval: 75`.
+The change is one key, `routing.session-affinity: true`, because Will already runs
+`transient-error-cooldown-seconds: -1` and `max-retry-interval: 75`. Will went second, after a
+five-model re-review (Claude Fable 5.2, Claude Opus 5.5, GPT-6.2 Astra, GPT-6.2 Sol, Kimi K3.1 Pro)
+and a Mac gate: 286 hits, 10 new bindings and no reselection since cutover, plus a Codex canary at
+01:43 that bound once and hit 11 times with 98 to 99% upstream cached input.
+
+| Time (PST) | Change | Result |
+| --- | --- | --- |
+| 01:59:31 | Seven ops files (manifest, fleet helper and verifier, Will owner policy and verifier, two docs) backed up and replaced with this PR's versions | SHA-256 of all seven match the PR commit. The new verifiers flagged only the pending affinity value. |
+| 01:59:46 | `routing.session-affinity: true` in one in-place write | Loaded value true. Inode 32397311 and mode 600 kept. Host and container config SHA-256 `32c6084b1b45...` match. No restart. |
+
+Checks after the change: both Will verifiers reported no findings, account counts were unchanged,
+Cursor's model definitions still listed only `glm-5.2`, and the first affinity binding appeared.
+Rollback on Will alone: set the key back to `false` with the same in-place write and restore the
+seven ops files from `ops/runtime/cache-affinity-apply-20261118/ops-backup-20261118T015931/`.
