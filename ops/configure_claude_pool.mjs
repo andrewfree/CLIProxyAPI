@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-function httpOrigin(value, name) {
+export function httpOrigin(value, name) {
   const origin = new URL(value);
   if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/") {
     throw new Error(`The ${name} must be an HTTP origin without credentials or a path.`);
