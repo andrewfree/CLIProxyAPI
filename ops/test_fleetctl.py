@@ -34,7 +34,8 @@ class API:
         self.public_models = public_models
         self.plugins = plugins
         self.requests = []
-        self.version = "v8.0.66-fleet.3"
+        # A fixture host runs the pinned release unless a test changes it.
+        self.version = fleet.read_json(fleet.OPS / "fleet-release.json")["version"]
         self.hidden = {
             fleet.V8 + "/config/server/port": 8317,
             fleet.V8 + "/config/oauth/auth-dir": "~/.cli-proxy-api",
