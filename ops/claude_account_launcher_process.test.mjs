@@ -4,6 +4,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import http from "node:http";
+import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +23,13 @@ if (mode === "ignore") {
 console.log("READY pid=" + process.pid + " url=" + process.env.ANTHROPIC_BASE_URL);
 if (mode === "exit") process.exit(Number(arg));
 if (mode === "die") process.kill(process.pid, "SIGTERM");
+if (mode === "count") {
+  const res = await fetch(process.env.ANTHROPIC_BASE_URL + "/v1/messages/count_tokens", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "claude-opus-5-5", messages: [] }),
+  });
+  console.log("RESULT host=" + res.headers.get("x-cliproxy-host") + " status=" + res.status + " body=" + (await res.text()));
+  process.exit(0);
+}
 `;
 
 function isAlive(pid) {
@@ -183,4 +192,48 @@ test("a shared-pool route that also names an account fails before launching Clau
   assert.deepEqual(result, { code: 1, signal: null });
   assert.equal(r.ready(), null);
   assert.match(r.stderr(), /shared-pool route must not set CLIPROXY_ACCOUNT_PREFIX/);
+});
+
+test("a fallback on a named account route fails before launching Claude", async (t) => {
+  const r = await launchWith(t, { CLIPROXY_FALLBACK_URL: "http://127.0.0.1:9" }, "exit", "0");
+  assert.deepEqual(await withDeadline(r.exited, 15000, "launcher exit"), { code: 1, signal: null });
+  assert.equal(r.ready(), null);
+  assert.match(r.stderr(), /only supported on the shared-pool route/);
+});
+
+test("an invalid connect timeout fails before launching Claude", async (t) => {
+  const r = await launchWith(t, {
+    CLIPROXY_CLAUDE_ROUTE: "shared-pool", CLIPROXY_ACCOUNT_PREFIX: null,
+    CLIPROXY_FALLBACK_URL: "http://127.0.0.1:9", CLIPROXY_CONNECT_TIMEOUT_MS: "soon",
+  }, "exit", "0");
+  assert.deepEqual(await withDeadline(r.exited, 15000, "launcher exit"), { code: 1, signal: null });
+  assert.match(r.stderr(), /CLIPROXY_CONNECT_TIMEOUT_MS/);
+});
+
+test("without a fallback, the connect timeout variable is ignored", async (t) => {
+  const r = await launchWith(t, { CLIPROXY_CONNECT_TIMEOUT_MS: "soon" }, "exit", "0");
+  assert.deepEqual(await withDeadline(r.exited, 15000, "launcher exit"), { code: 0, signal: null });
+  assert.ok(r.ready());
+});
+
+test("with a fallback, an unhealthy primary sends Claude's first request to the fallback", async (t) => {
+  const fallback = http.createServer((_req, res) => res.end('{"input_tokens":1}'));
+  fallback.listen(0, "127.0.0.1");
+  await once(fallback, "listening");
+  t.after(() => { fallback.closeAllConnections(); fallback.close(); });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-failover-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const logFile = path.join(dir, "failover.jsonl");
+  // The default primary resets every connection, so its health probe fails.
+  const r = await launchWith(t, {
+    CLIPROXY_CLAUDE_ROUTE: "shared-pool", CLIPROXY_ACCOUNT_PREFIX: null,
+    CLIPROXY_FALLBACK_URL: `http://127.0.0.1:${fallback.address().port}`, CLIPROXY_FAILOVER_LOG: logFile,
+  }, "count");
+  assert.deepEqual(await withDeadline(r.exited, 15000, "launcher exit"), { code: 0, signal: null });
+  assert.match(r.stdout(), /RESULT host=fallback status=200 body=\{"input_tokens":1\}/);
+  await waitFor(() => fs.existsSync(logFile) && fs.readFileSync(logFile, "utf8").includes("\n"), "transition log");
+  const [entry] = fs.readFileSync(logFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(entry.event, "primary_down");
+  assert.equal(entry.reason, "startup_probe");
+  assert.equal((fs.statSync(logFile).mode & 0o777).toString(8), "600");
 });
