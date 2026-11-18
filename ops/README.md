@@ -166,7 +166,7 @@ image from the Compose file.
 
 Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watchdog actions.
 
-`com.rever.cliproxy-log-archive` runs at login and every 300 seconds. It handles only closed `.log` and `.log.gz` files older than one hour; the active `main.log` and recent request logs are never candidates. Each candidate is copied to TheCloud, SHA-256 checked, recorded in the NAS manifest, and fingerprinted again before the local copy is unlinked. A missing or unwritable NAS mount means zero pruning. Lumberjack's closed `main-<timestamp>.log` rotations are eligible, so the active `main.log` remains local while completed rotations are preserved in the cloud archive.
+`com.rever.cliproxy-log-archive` runs at login and every 300 seconds. It handles only closed `.log` and `.log.gz` files older than one hour; the active `main.log` and recent request logs are never candidates. Each candidate is copied to the archive drive (Innie since November 18, 2026; see below), SHA-256 checked, recorded in the archive manifest, and fingerprinted again before the local copy is unlinked. A missing or unwritable archive mount means zero pruning. Lumberjack's closed `main-<timestamp>.log` rotations are eligible, so the active `main.log` remains local while completed rotations are preserved in the archive.
 
 ## Install and inspect
 
@@ -323,10 +323,12 @@ claim request copied from Claude Code, and the 2026-11-11 Fable reset record.
 The durable archive is:
 
 ```text
-/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/
+/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/
 ```
 
-Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`; `SHA256SUMS` is append-only evidence for archived content. The local copy is pruned only after content verification. If TheCloud is unavailable, local files accumulate and `ops/runtime/archive.log` records the failure. `main.log` itself is never pruned while active and rolls at 10 MB; its closed rotations then follow the same archive path.
+Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free; the T9 drive was skipped because it had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, change the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR, then reinstall the plist into `~/Library/LaunchAgents/` and reload the agent.
+
+Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`; `SHA256SUMS` is append-only evidence for archived content. The local copy is pruned only after content verification. If the archive drive is unavailable, local files accumulate and `ops/runtime/archive.log` records the failure. `main.log` itself is never pruned while active and rolls at 10 MB; its closed rotations then follow the same archive path.
 
 To archive without pruning, use:
 
