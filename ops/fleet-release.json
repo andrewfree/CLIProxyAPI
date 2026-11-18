@@ -33,9 +33,9 @@
     "amd64": "sha256:bd8ebc2b1ee329d88ac4ada235aaaa2744856740933e404966ec8a9eca18f473"
   },
   "config_fingerprint": {
-    "shared": "c32120a3b8238ecaffc42f29c95a024977e03c248d31ff24cf15c5c347bf1958",
+    "shared": "9428593b40d2a9b4a5f7fe2c8b61d7188b5fb15ddef0fd7665d86c4780259083",
     "observed": {
-      "m5": "44bca0891de10baf51f96662c91278a07a68c972e5be6edf02d07e7200fe5751"
+      "m5": "0fd3d32598da0062758aa89c9693f84e526892b30f7dded3d4c90ed733ce95e5"
     }
   },
   "runtime_policy": {

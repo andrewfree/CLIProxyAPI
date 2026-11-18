@@ -106,36 +106,5 @@
     "date": "2026-11-18",
     "review_by": "2026-12-02",
     "count": 1
-  },
-  {
-    "surface": "layout/legacy",
-    "hosts": [
-      "will"
-    ],
-    "reason": "Will uses flat legacy YAML until the layout migration. Loaded JSON is already canonical on both hosts.",
-    "decision_ref": "Fleet design 2026-11-17 unit 7",
-    "date": "2026-11-18",
-    "review_by": "2026-12-02"
-  },
-  {
-    "surface": "bundle/working-tree",
-    "hosts": [
-      "m5",
-      "will"
-    ],
-    "reason": "The Mac still runs scripts from its primary checkout and Will has a hand-copied ops subset. Shipped bundle receipts will follow.",
-    "decision_ref": "Fleet design 2026-11-17 units 2b and 2c",
-    "date": "2026-11-18",
-    "review_by": "2026-12-02"
-  },
-  {
-    "surface": "bundle/installed-token-helper",
-    "hosts": [
-      "m5"
-    ],
-    "reason": "The installed Mac token helper did not match the tracked copy or reachable history in unit 0.",
-    "decision_ref": "Fleet design 2026-11-17 unit 0 prechecks",
-    "date": "2026-11-18",
-    "review_by": "2026-12-02"
   }
 ]

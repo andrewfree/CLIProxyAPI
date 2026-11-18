@@ -1,7 +1,9 @@
+from contextlib import redirect_stderr, redirect_stdout
 import copy
 from datetime import date, datetime, timezone
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -20,6 +22,7 @@ TODAY = date(2026, 11, 18)
 CANARY = "do-not-print-canary@example.invalid"
 ORGANIZATION = "00000000-0000-4000-8000-111111111111"
 CLIENT_KEYS = ["client-fixture-A", "client-fixture-B"]
+ACCOUNT_LABELS = ("fixture-codex-label", "fixture-kimi-label")
 HEALTHY = {"disabled": False, "status": "active", "unavailable": False}
 
 
@@ -31,6 +34,13 @@ class API:
         self.public_models = public_models
         self.plugins = plugins
         self.requests = []
+        self.version = "v8.0.66-fleet.3"
+        self.hidden = {
+            fleet.V8 + "/config/server/port": 8317,
+            fleet.V8 + "/config/oauth/auth-dir": "~/.cli-proxy-api",
+        }
+        self.cursor_models = model_rows("cursor", "cursor-only")
+        self.plugins_enabled = True
 
     def get(self, url, *, client_key=None, optional_status=None):
         self.requests.append((url, client_key))
@@ -38,22 +48,19 @@ class API:
         if path == "/healthz":
             return {"status": "ok"}, None
         if path == fleet.LOADED:
-            return self.config, "v8.0.66-fleet.3"
+            return self.config, self.version
         if path.endswith("/credentials"):
             return {"files": self.files}, None
         if path.endswith("/credentials/models"):
             auth_id = parse_qs(urlsplit(url).query)["name"][0]
             return {"models": self.models[auth_id]}, None
         if path.startswith(fleet.V8 + "/config/"):
-            return {
-                fleet.V8 + "/config/server/port": 8317,
-                fleet.V8 + "/config/oauth/auth-dir": "~/.cli-proxy-api",
-            }.get(path), None
+            return self.hidden.get(path), None
         if path.endswith("/plugins"):
-            return {"plugins_enabled": True, "plugins": self.plugins}, None
+            return {"plugins_enabled": self.plugins_enabled, "plugins": self.plugins}, None
         if path.endswith("/model-definitions/cursor"):
-            return {"models": model_rows("cursor", "cursor-only")}, None
-        if path == "/v1/models" and client_key in CLIENT_KEYS:
+            return {"models": self.cursor_models}, None
+        if path == "/v1/models" and client_key in self.public_models:
             return {"data": self.public_models[client_key]}, None
         raise AssertionError("unexpected fixture API request")
 
@@ -90,6 +97,8 @@ class FleetCTLTest(unittest.TestCase):
             "claude-header-defaults": {"timezone": "America/Los_Angeles"},
             "plugins": {"configs": {"auth-cursor": {"enabled": True}}},
             "openai-compatibility": None,
+            "claude-api-key": [{"api-key": CANARY, "base-url": "https://provider.invalid",
+                               "models": [{"name": "claude-static"}]}],
             "unexpected": {"clientSecret": [CANARY, {"org": ORGANIZATION}]},
         }
         m5, will = copy.deepcopy(base), copy.deepcopy(base)
@@ -109,15 +118,16 @@ class FleetCTLTest(unittest.TestCase):
         m5_models = codex_models + model_rows("openai", "camoff-astra/gpt-fixture")
         nvidia_models = model_rows("nvidia", *sorted(fleet.NVIDIA_MODELS))
         kimi_models = model_rows("kimi", "kimi-extra")
-        mac_api = API(m5, [credential("codex", CANARY, CANARY, priority=2)],
+        mac_api = API(m5, [credential("codex", CANARY, ACCOUNT_LABELS[0], priority=2)],
                       {CANARY: m5_models},
                       {key: m5_models + nvidia_models for key in CLIENT_KEYS},
                       [cursor_plugin])
-        will_api = API(will, [credential("codex", "will-codex", CANARY, priority=2),
-                             credential("kimi-ai", "will-kimi", ORGANIZATION)],
+        will_api = API(will, [credential("codex", "will-codex", ACCOUNT_LABELS[0], priority=2),
+                             credential("kimi-ai", "will-kimi", ACCOUNT_LABELS[1],
+                                        organization_id=ORGANIZATION)],
                        {"will-codex": codex_models, "will-kimi": kimi_models},
                        {key: codex_models + kimi_models for key in CLIENT_KEYS},
-                       [cursor_plugin, plugin("cliproxybar-quota", "0.1.0")])
+            [copy.deepcopy(cursor_plugin), plugin("cliproxybar-quota", "0.1.0")])
         for host in self.hosts.values():
             host["instance_root"] = directory.name
             library = self.release["cursor_plugin"]["libraries"][host["arch"]]
@@ -134,25 +144,46 @@ class FleetCTLTest(unittest.TestCase):
         return fleet.report("parity", {"m5": self.probe("m5", mac), "will": self.probe("will", will)},
                             self.exceptions, today)
 
-    def test_fingerprint_drops_secret_subtrees_and_host_paths(self):
+    def assert_drift(self, mac, will, surface, *, today=TODAY):
+        report, code = self.report(mac, will, today)
+        self.assertEqual(code, 1, report)
+        self.assertIn(surface, {row["surface"] for row in report["drift"]})
+
+    def run_main(self, *args):
+        with redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr:
+            code = fleet.main(args)
+        self.assertEqual(stderr.getvalue(), "")
+        return json.loads(stdout.getvalue()), code
+
+    def test_fingerprint_drops_secret_leaves_and_host_paths(self):
         raw = {
             "discovery": {"enabled": True},
             "logs-max-total-size-mb": 299,
-            "claude-api-key": [{"api-key": CANARY, "model": ORGANIZATION}],
+            "api-keys": CLIENT_KEYS,
+            "claude-api-key": [{"api-key": CANARY, "model": "fixture",
+                               "headers": {"X-Custom": ORGANIZATION}}],
+            "openai-compatibility": [{"name": "fixture",
+                                      "api-key-entries": [{"api-key": CANARY}]}],
             "routing": {"strategy": "quota-aware"},
             "settings": [{"api_key": {"any": CANARY}, "token-list": [ORGANIZATION],
                           "clientSecret": CANARY, "Password": CANARY, "proxy": "https://u:p@fixture",
-                          "allowed": True}],
-            "claude-header-defaults": {"timezone": CANARY},
+                          "headers": {"X-Custom": CANARY, "User-Agent": ORGANIZATION},
+                          "use-max-completion-tokens": True, "max_tokens": 256}],
+            "claude-header-defaults": {"timezone": "Etc/UTC"},
         }
         hidden = []
         masked = fleet.redact(raw, self.paths["secret_paths"], hidden)
-        self.assertEqual(masked["settings"], [{"proxy": None, "allowed": True}])
-        self.assertNotIn("claude-api-key", masked)
+        self.assertEqual(masked["settings"], [{"proxy": None, "headers": {},
+                                             "use-max-completion-tokens": True, "max_tokens": 256}])
+        self.assertEqual(masked["claude-api-key"], [{"model": "fixture", "headers": {}}])
+        self.assertEqual(masked["openai-compatibility"], [{"name": "fixture"}])
+        self.assertNotIn("api-keys", masked)
+        for value in (CANARY, ORGANIZATION, *CLIENT_KEYS, "u:p"):
+            self.assertNotIn(value, json.dumps(masked))
         config, private, public = fleet.config_snapshot(raw, self.paths, NONCE)
         changed = copy.deepcopy(raw)
         changed["logs-max-total-size-mb"] = 0
-        changed["claude-api-key"] = [{"secret": "rotated"}]
+        changed["claude-api-key"][0]["api-key"] = "rotated"
         changed["settings"][0]["Password"] = "rotated"
         config2, private2, public2 = fleet.config_snapshot(changed, self.paths, NONCE)
         self.assertEqual(config, config2)
@@ -164,6 +195,26 @@ class FleetCTLTest(unittest.TestCase):
         self.assertNotIn(CANARY, json.dumps(public))
         self.assertNotIn(ORGANIZATION, json.dumps(public))
         self.assertNotIn("claude-header-defaults.timezone", public["values"])
+
+    def test_custom_header_rotation_only_changes_private_tag(self):
+        raw = {"claude-api-key": [{"headers": {"X-Custom": CANARY}}]}
+        config, private, public = fleet.config_snapshot(raw, self.paths, NONCE)
+        raw["claude-api-key"][0]["headers"]["X-Custom"] = "rotated-fixture"
+        config2, private2, public2 = fleet.config_snapshot(raw, self.paths, NONCE)
+        self.assertEqual((config, public), (config2, public2))
+        self.assertNotEqual(private["shared"], private2["shared"])
+
+    def test_static_provider_base_url_and_model_change_shared_fingerprint(self):
+        for family in fleet.STATIC_KEY_FAMILIES:
+            for field, changed in (("base-url", "https://other.invalid"),
+                                   ("models", [{"name": "new-model"}])):
+                with self.subTest(family=family, field=field):
+                    config = {family: [{"api-key": CANARY, "base-url": "https://provider.invalid",
+                                        "models": [{"name": "fixture"}]}]}
+                    original, _, _ = fleet.config_snapshot(config, self.paths, NONCE)
+                    config[family][0][field] = changed
+                    result, _, _ = fleet.config_snapshot(config, self.paths, NONCE)
+                    self.assertNotEqual(original["shared"], result["shared"])
 
     def test_registered_prefix_modes_and_ambiguous_models(self):
         self.assertEqual(fleet.registered_prefix({"m", "t3-route/m"}, False), "t3-route")
@@ -190,12 +241,41 @@ class FleetCTLTest(unittest.TestCase):
         self.assertIn("P8/camoff-astra", {row["surface"] for row in report["exceptions"]})
         self.assertEqual(report["hosts"]["m5"]["camoff_astra_credentials"], 1)
         emitted = json.dumps(report)
-        for value in (CANARY, ORGANIZATION, *CLIENT_KEYS,
-                      fleet.tag(NONCE, "account", "codex", CANARY)):
+        for value in (CANARY, ORGANIZATION, *CLIENT_KEYS, *ACCOUNT_LABELS,
+                      fleet.tag(NONCE, "account", "codex", ACCOUNT_LABELS[0])):
             self.assertNotIn(value, emitted)
         for api in mac, will:
             self.assertEqual({key for url, key in api.requests if url == "/v1/models"},
                              set(CLIENT_KEYS))
+
+    def test_worker_payload_omits_raw_secrets_and_labels(self):
+        mac, will = self.fixture()
+        for name, api in (("m5", mac), ("will", will)):
+            with self.subTest(host=name):
+                snapshot = self.probe(name, api)
+                self.assertEqual(snapshot["status"], "ok")
+                emitted = json.dumps(snapshot)
+                for value in (CANARY, ORGANIZATION, *CLIENT_KEYS, *ACCOUNT_LABELS):
+                    self.assertNotIn(value, emitted)
+
+    def test_probe_exceptions_do_not_expose_input(self):
+        for error_type in (KeyError, ValueError, RuntimeError, fleet.ProbeError):
+            with self.subTest(error_type=error_type.__name__):
+                with patch.object(fleet.LocalAPI, "get",
+                                  side_effect=[({"status": "ok"}, None), error_type(CANARY)]):
+                    result = fleet.safe_collect(self.hosts["m5"], self.paths, self.release,
+                                                NONCE, "fingerprint")
+                self.assertEqual(result["status"], "error")
+                self.assertNotIn(CANARY, json.dumps(result))
+                with patch.object(fleet.LocalAPI, "get",
+                                  side_effect=[({"status": "ok"}, None), error_type(CANARY)]):
+                    report, code = self.run_main("fingerprint", "--host", "m5")
+                self.assertEqual((report["status"], code), ("error", 2))
+                self.assertNotIn(CANARY, json.dumps(report))
+                with patch.object(fleet, "probe", side_effect=error_type(CANARY)):
+                    report, code = self.run_main("fingerprint", "--host", "m5")
+                self.assertEqual((report["status"], code), ("error", 2))
+                self.assertNotIn(CANARY, json.dumps(report))
 
     def test_new_loaded_setting_and_changed_catalog_owner_fail(self):
         mac, will = self.fixture()
@@ -214,6 +294,11 @@ class FleetCTLTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("P6/shared", {row["surface"] for row in report["drift"]})
 
+    def test_camoff_credential_prefix_requires_an_exception(self):
+        mac, will = self.fixture()
+        self.exceptions = [row for row in self.exceptions if row["surface"] != "P6/camoff-astra"]
+        self.assert_drift(mac, will, "P6/camoff-astra")
+
     def test_prefix_catalog_exception_requires_registration_and_owner(self):
         mac, will = self.fixture()
         mac.public_models[CLIENT_KEYS[0]] = (mac.public_models[CLIENT_KEYS[0]]
@@ -222,14 +307,155 @@ class FleetCTLTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("P8/shared", {row["surface"] for row in report["drift"]})
 
-    def test_error_drift_but_not_cooling(self):
+    def test_active_quota_and_rate_limit_cooldowns_do_not_cause_drift(self):
         mac, will = self.fixture()
-        will.files[0].update(status="error", unavailable=True, next_retry_after="2099-01-01T00:00:00Z")
-        self.assertEqual(self.report(mac, will)[1], 0)
-        will.files[0]["requires_sign_in"] = True
+        retry = "2099-01-01T00:00:00Z"
+        will.files[0].update(status="error", unavailable=True, next_retry_after=retry,
+                             status_message="quota exhausted")
         report, code = self.report(mac, will)
-        self.assertEqual(code, 1)
-        self.assertIn("P7/credential-error", {row["surface"] for row in report["drift"]})
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["hosts"]["will"]["credential_health"]["cooling"], 1)
+        will.files[0].update(status_message="provider-specific response",
+                             cooldowns=[{"reason": "transient_rate_limit", "retry_at": retry}])
+        report, code = self.report(mac, will)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["hosts"]["will"]["credential_health"]["cooling"], 1)
+
+    def test_auth_and_payment_errors_cause_drift_even_with_quota_cooldowns(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        will.files[0].update(status="error", unavailable=True, next_retry_after=retry,
+                             cooldowns=[{"reason": "quota", "retry_at": retry}])
+        for message in ("unauthorized", "payment_required", "invalid_grant", "token expired"):
+            with self.subTest(message=message):
+                will.files[0]["status_message"] = message
+                self.assert_drift(mac, will, "P7/credential-error")
+        will.files[0].update(status_message="quota exhausted", requires_sign_in=True)
+        self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_other_retry_timers_are_errors_even_with_quota_observations(self):
+        mac, will = self.fixture()
+        will.files[0].update(status="error", unavailable=True, next_retry_after="2099-01-01T00:00:00Z",
+                             status_message="transient upstream error",
+                             quota={"signals": {"used-percent": "90"}})
+        self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_provider_key_rotation_causes_private_config_drift(self):
+        mac, will = self.fixture()
+        will.config["claude-api-key"][0]["api-key"] = "rotated-fixture"
+        self.assert_drift(mac, will, "P5/shared")
+
+    def test_different_client_key_set_causes_drift(self):
+        mac, will = self.fixture()
+        will.config["api-keys"].remove(CLIENT_KEYS[1])
+        self.assert_drift(mac, will, "P5/client-keys")
+
+    def test_hidden_management_setting_causes_drift(self):
+        mac, will = self.fixture()
+        will.hidden[fleet.V8 + "/config/management/allow-remote"] = True
+        self.assert_drift(mac, will, "P2h/management.allow-remote")
+
+    def test_hidden_host_setting_against_expectation_causes_drift(self):
+        mac, will = self.fixture()
+        will.hidden[fleet.V8 + "/config/server/port"] = 12345
+        self.assert_drift(mac, will, "P2h/server.port")
+
+    def test_wrong_server_version_causes_drift(self):
+        mac, will = self.fixture()
+        will.version = "fixture-wrong-version"
+        self.assert_drift(mac, will, "P1/version")
+
+    def test_changed_full_config_pin_causes_host_drift(self):
+        mac, will = self.fixture()
+        mac.config["debug"] = False
+        self.assert_drift(mac, will, "P2/host-pin")
+
+    def test_extra_plugin_causes_drift(self):
+        mac, will = self.fixture()
+        will.plugins.append(plugin("fixture-extra-plugin", "1.0.0"))
+        self.assert_drift(mac, will, "P10/shared")
+
+    def test_wrong_cursor_library_pin_causes_drift(self):
+        mac, will = self.fixture()
+        self.release["cursor_plugin"]["libraries"]["amd64"]["sha256"] = "0" * 64
+        self.assert_drift(mac, will, "P10/auth-cursor-pin")
+
+    def test_wrong_cursor_plugin_version_causes_pin_drift(self):
+        mac, will = self.fixture()
+        will.plugins[0]["metadata"]["version"] = "fixture-wrong-version"
+        self.assert_drift(mac, will, "P10/auth-cursor-pin")
+
+    def test_unregistered_or_disabled_cursor_plugin_causes_pin_drift(self):
+        for field in ("registered", "effective_enabled"):
+            with self.subTest(field=field):
+                mac, will = self.fixture()
+                will.plugins[0][field] = False
+                self.assert_drift(mac, will, "P10/auth-cursor-pin")
+
+    def test_global_plugin_disablement_causes_cursor_pin_drift(self):
+        mac, will = self.fixture()
+        will.plugins_enabled = False
+        self.assert_drift(mac, will, "P10/auth-cursor-pin")
+
+    def test_duplicate_named_prefix_causes_drift(self):
+        mac, will = self.fixture()
+        model = model_rows("kimi", "kimi-extra", "t3-fixture/kimi-extra")
+        will.models["will-kimi"] = model
+        will.files.append(credential("kimi-ai", "duplicate", "duplicate-fixture-label"))
+        will.models["duplicate"] = model
+        self.assert_drift(mac, will, "P6/duplicate-named-prefix")
+
+    def test_missing_credential_label_causes_drift(self):
+        mac, will = self.fixture()
+        will.files[0]["label"] = ""
+        self.assert_drift(mac, will, "P6/missing-label")
+
+    def test_unknown_credential_prefix_causes_drift(self):
+        mac, will = self.fixture()
+        will.models["will-codex"] = []
+        self.assert_drift(mac, will, "P6/unknown-prefix")
+
+    def test_different_exception_count_does_not_excuse_drift(self):
+        mac, will = self.fixture()
+        next(row for row in self.exceptions if row["surface"] == "P2/debug")["count"] = 2
+        self.assert_drift(mac, will, "P2/debug")
+
+    def test_future_exception_does_not_excuse_drift(self):
+        mac, will = self.fixture()
+        next(row for row in self.exceptions if row["surface"] == "P2/debug")["date"] = "2026-11-19"
+        self.assert_drift(mac, will, "P2/debug")
+
+    def test_exception_without_a_difference_is_reported_as_unused(self):
+        mac, will = self.fixture()
+        self.exceptions.append(dict(self.exceptions[0], surface="P10/shared", hosts=["will"]))
+        report, code = self.report(mac, will)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["unused_exceptions"], [{"surface": "P10/shared", "hosts": ["will"]}])
+
+    def test_expired_exception_does_not_excuse_matching_drift(self):
+        mac, will = self.fixture()
+        self.assert_drift(mac, will, "P2/debug", today=date(2026, 12, 2))
+
+    def test_expired_exception_without_current_drift_still_fails(self):
+        mac, will = self.fixture()
+        self.exceptions.append(dict(self.exceptions[0], surface="P10/shared", hosts=["will"],
+                                    date="2026-11-01", review_by="2026-11-17"))
+        report, code = self.report(mac, will)
+        self.assertEqual(code, 1, report)
+        self.assertEqual(report["drift"], [])
+        self.assertEqual(report["expired_exceptions"],
+                         [{"surface": "P10/shared", "hosts": ["will"]}])
+
+    def test_glm_52_cursor_overlap_causes_drift(self):
+        mac, will = self.fixture()
+        will.models["will-codex"] += model_rows("openai", "glm-5.2")
+        will.cursor_models += model_rows("cursor", "glm-5.2")
+        self.assert_drift(mac, will, "P9/glm-5.2")
+
+    def test_static_direct_model_overlap_causes_drift(self):
+        mac, will = self.fixture()
+        will.cursor_models += model_rows("cursor", "claude-static")
+        self.assert_drift(mac, will, "P9/Cursor-overlap")
 
     def test_extra_kimi_credential_does_not_mask_unrelated_cursor_overlap(self):
         mac, will = self.fixture()
@@ -255,7 +481,7 @@ class FleetCTLTest(unittest.TestCase):
             self.assertEqual(fleet.probe("will", self.hosts, self.paths, self.release,
                                          NONCE, "health"), {"status": "ok"})
         args, kwargs = run.call_args
-        self.assertEqual(args[0][-6:], ["will.local", "python3", "-I", "-B", "-", "--worker"])
+        self.assertEqual(args[0][-7:], ["--", "will.local", "python3", "-I", "-B", "-", "--worker"])
         self.assertIn(repr(NONCE), kwargs["input"])
         self.assertNotIn(repr(NONCE), args[0])
         self.assertTrue(kwargs["capture_output"])
@@ -283,6 +509,39 @@ class FleetCTLTest(unittest.TestCase):
         self.assertTrue(fleet.validate_contract(*args))
         policy["max-retry-interval"] = 0
         self.assertFalse(fleet.validate_contract(*args))
+
+    def test_invalid_ssh_destination_is_rejected_before_any_probe(self):
+        policy = fleet.read_json(fleet.OPS / "instances/will/config-policy.json")["required_config"]
+        bundle = (fleet.OPS / "fleet/bundle.txt").read_text().splitlines()
+        targets = {"option": "-oProxyCommand=" + CANARY, "metacharacter": "will;" + CANARY,
+                   "empty": "", "null": None, "boolean": True}
+        for label, target in targets.items():
+            with self.subTest(target=label):
+                self.hosts["will"]["ssh"] = target
+                self.assertFalse(fleet.validate_contract(
+                    self.hosts, self.paths, self.release, self.exceptions, policy, bundle
+                ))
+                for command in ("health", "fingerprint", "parity"):
+                    with (patch.object(fleet.subprocess, "run") as run,
+                          patch.object(fleet.LocalAPI, "get") as get):
+                        result = fleet.probe("will", self.hosts, self.paths, self.release,
+                                             NONCE, command)
+                    run.assert_not_called()
+                    get.assert_not_called()
+                    self.assertEqual(result["status"], "error")
+                    self.assertNotIn(CANARY, json.dumps(result))
+
+    def test_check_rejects_invalid_exception_surfaces(self):
+        read_json = fleet.read_json
+        for surface in ("P2/shared-pin", "P2/host-pin", "P3/max-retry-interval",
+                        "P6/duplicate-named-prefix", "P6/missing-label", "P6/unknown-prefix",
+                        "P10/auth-cursor-pin", "P100/shared"):
+            with self.subTest(surface=surface):
+                exceptions = self.exceptions + [dict(self.exceptions[0], surface=surface)]
+                with patch.object(fleet, "read_json", side_effect=lambda path: (
+                    exceptions if path.name == "exceptions.json" else read_json(path)
+                )):
+                    self.assertEqual(self.run_main("check"), ({"status": "invalid"}, 1))
 
     def test_runtime_pins_cannot_be_excepted(self):
         mac, will = self.fixture()

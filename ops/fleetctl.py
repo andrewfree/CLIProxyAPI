@@ -37,18 +37,26 @@ STRICT_SURFACES = {
     "P2/shared-pin", "P2/host-pin", "P6/duplicate-named-prefix",
     "P6/missing-label", "P6/unknown-prefix", "P10/auth-cursor-pin",
 }
+PARITY_PREFIXES = {"P1", "P2", "P2h", "P3", "P5", "P6", "P7", "P8", "P9", "P10"}
 SECRET_KEY = re.compile(
     r"(^|-)(api-?keys?|secrets?|tokens?|passwords?|authorization|"
     r"private-key|cookie)(-|$)", re.IGNORECASE,
 )
+TOKEN_SETTING = re.compile(r"(?:use-)?(?:max|min)(?:-(?:completion|input|output))?-tokens")
 STATIC_KEY_FAMILIES = (
     "openai-compatibility", "claude-api-key", "codex-api-key", "gemini-api-key",
     "interactions-api-key", "vertex-api-key", "xai-api-key", "meta-api-key",
 )
+HARD_CREDENTIAL_ERROR = re.compile(r"\b(?:unauthorized|payment required|invalid grant|token (?:has )?expired)\b")
+COOLDOWN_REASONS = {"quota", "credential_quota", "transient_rate_limit"}
+COOLDOWN_MESSAGES = {
+    "quota", "credential quota", "quota exhausted", "rate limit",
+    "rate limit exceeded", "transient rate limit", "too many requests",
+}
 
 
 class ProbeError(Exception):
-    """An error whose message is safe for a public report."""
+    """A rejected API response or unusable probe input."""
 
 
 def canonical(value):
@@ -73,16 +81,21 @@ def at_path(value, path, default=None):
 
 
 def redact(value, secret_paths, hidden, path=()):
-    """Drop complete secret subtrees, retaining them only for in-process tagging."""
+    """Keep functional config while retaining secrets only for in-process tagging."""
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
             item_path = (*path, key)
             folded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", key)
             folded = re.sub(r"[^a-zA-Z0-9]+", "-", folded).lower()
-            if (SECRET_KEY.search(folded) or folded in ("credential", "credentials")
-                    or ".".join(item_path) in secret_paths):
+            secret_name = ((SECRET_KEY.search(folded) and not TOKEN_SETTING.fullmatch(folded))
+                           or folded in ("credential", "credentials"))
+            provider_family = not path and key in STATIC_KEY_FAMILIES
+            if ".".join(item_path) in secret_paths or (secret_name and not provider_family):
                 hidden.append((item_path, item))
+            elif folded == "headers" and isinstance(item, dict):
+                hidden.extend(((*item_path, name), val) for name, val in item.items())
+                result[key] = {}
             else:
                 result[key] = redact(item, secret_paths, hidden, item_path)
         return result
@@ -204,11 +217,18 @@ def registered_prefix(ids, forced):
 def credential_health(item, now):
     if item["disabled"] or item["status"] == "disabled":
         return "disabled"
-    if item.get("requires_sign_in"):
+    message = re.sub(r"[_-]+", " ", (item.get("status_message") or "").strip().lower())
+    if item.get("requires_sign_in") or HARD_CREDENTIAL_ERROR.search(message):
         return "error"
     retry = item.get("next_retry_after")
     if item["unavailable"] and retry:
-        if datetime.fromisoformat(retry.replace("Z", "+00:00")) > now:
+        deadline = datetime.fromisoformat(retry.replace("Z", "+00:00"))
+        # Passive quota observations do not establish which failure set this timer.
+        if deadline > now and (message in COOLDOWN_MESSAGES or any(
+            row["reason"] in COOLDOWN_REASONS
+            and datetime.fromisoformat(row["retry_at"].replace("Z", "+00:00")) == deadline
+            for row in item.get("cooldowns") or []
+        )):
             return "cooling"
     if item["unavailable"] or item["status"] == "error":
         return "error"
@@ -402,16 +422,24 @@ def collect(host, paths, release, nonce, command, api=None):
 def safe_collect(host, paths, release, nonce, command):
     try:
         return collect(host, paths, release, nonce, command)
-    except ProbeError as error:
-        return {"status": "error", "error": str(error)}
-    except (OSError, ValueError, LookupError, TypeError, AttributeError):
+    except Exception:
         # Parse errors may include URLs, file names, credentials or response bodies.
         return {"status": "error", "error": "Could not read fleet probe inputs"}
 
 
+def valid_ssh_host(name, destination):
+    if name == "m5":
+        return destination is None
+    return (name == "will" and isinstance(destination, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", destination) is not None)
+
+
 def probe(name, hosts, paths, release, nonce, command):
     host = hosts[name]
-    if not host["ssh"]:
+    destination = host["ssh"]
+    if not valid_ssh_host(name, destination):
+        return {"status": "error", "error": "Invalid SSH host"}
+    if destination is None:
         return safe_collect(host, paths, release, nonce, command)
 
     # Run source from this checkout over SSH stdin. Nothing is installed on Will.
@@ -423,7 +451,7 @@ def probe(name, hosts, paths, release, nonce, command):
             ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
              "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
              "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes",
-             host["ssh"], "python3", "-I", "-B", "-", "--worker"],
+             "--", destination, "python3", "-I", "-B", "-", "--worker"],
             input=program, capture_output=True, text=True, timeout=90, check=False,
         )
         if result.returncode == 255:
@@ -521,6 +549,7 @@ def compare(m5, will):
 
 def evaluate(differences, exceptions, today):
     by_scope = {(row["surface"], tuple(sorted(row["hosts"]))): row for row in exceptions}
+    observed_scopes = {(surface, hosts) for surface, hosts, _ in differences}
     problems = []
     accepted = []
     for surface, hosts, count in differences:
@@ -534,7 +563,9 @@ def evaluate(differences, exceptions, today):
         problems.append(result)
     expired = [{"surface": row["surface"], "hosts": row["hosts"]} for row in exceptions
                if date.fromisoformat(row["review_by"]) <= today]
-    return problems, accepted, expired
+    unused = [{"surface": surface, "hosts": row["hosts"]}
+              for (surface, hosts), row in by_scope.items() if (surface, hosts) not in observed_scopes]
+    return problems, accepted, expired, unused
 
 
 def strict_surface(surface):
@@ -551,9 +582,7 @@ def validate_contract(hosts, paths, release, exceptions, required, bundle):
     for name, host in hosts.items():
         if host["name"] != name or type(host["port"]) is not int or not 0 < host["port"] < 65536:
             return False
-        if name == "m5" and host["ssh"] is not None:
-            return False
-        if name == "will" and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host["ssh"] or ""):
+        if not valid_ssh_host(name, host["ssh"]):
             return False
     if set(paths["host_paths"]) != {"discovery", "logs-max-total-size-mb"}:
         return False
@@ -585,7 +614,9 @@ def validate_contract(hosts, paths, release, exceptions, required, bundle):
     seen = set()
     for row in exceptions:
         key = row["surface"], tuple(sorted(row["hosts"]))
-        if (strict_surface(key[0]) or not row["reason"].strip()
+        prefix, _, detail = key[0].partition("/")
+        if (prefix not in PARITY_PREFIXES or not detail or strict_surface(key[0])
+                or not row["reason"].strip()
                 or not row["decision_ref"].strip() or not key[1]
                 or not set(key[1]) <= set(hosts) or key in seen
                 or len(set(key[1])) != len(key[1])
@@ -616,11 +647,14 @@ def report(command, snapshots, exceptions, today):
                        for surface, count in sorted(snapshot["issues"].items())]
     else:
         differences = compare(snapshots["m5"], snapshots["will"])
-    drift, accepted, expired = evaluate(differences, exceptions, today)
+    drift, accepted, expired, unused = evaluate(differences, exceptions, today)
     failed = bool(drift or expired)
     status = "drift" if failed else "equal" if command == "parity" else "ok"
-    return {"status": status, "hosts": public, "drift": drift,
-            "exceptions": accepted, "expired_exceptions": expired}, int(failed)
+    output = {"status": status, "hosts": public, "drift": drift,
+              "exceptions": accepted, "expired_exceptions": expired}
+    if command == "parity":
+        output["unused_exceptions"] = unused
+    return output, int(failed)
 
 
 def main(argv=None):
@@ -650,9 +684,14 @@ def main(argv=None):
             snapshots = {name: probe(name, hosts, paths, release, nonce, args.command)
                          for name in names}
             output, code = report(args.command, snapshots, exceptions, today)
-    except (OSError, ValueError, LookupError, TypeError, AttributeError):
-        output, code = {"status": "error", "error": "Could not read fleet contract or probe result"}, 2
-    print(json.dumps(output, indent=2, sort_keys=True))
+        serialized = json.dumps(output, indent=2, sort_keys=True)
+    except Exception:
+        serialized = json.dumps(
+            {"status": "error", "error": "Could not read fleet contract or probe result"},
+            indent=2, sort_keys=True,
+        )
+        code = 2
+    print(serialized)
     return code
 
 

@@ -27,7 +27,8 @@ registrations. The tool checks the server version and the pinned Cursor
 library. It reads Will over SSH with a loopback worker and prints differences
 without account identities or tags. Exit 0 means the selected checks passed.
 Exit 1 indicates drift or an invalid offline contract. Exit 2 indicates the
-probe could not complete. An expired exception fails live parity.
+probe could not complete. An expired exception fails live parity. The parity
+report lists exception scopes with no observed difference in `unused_exceptions`.
 
 The [release manifest](fleet-release.json) pins the shared config projection
 and the initial full M5 fingerprint. The shared projection sets aside debug
@@ -40,6 +41,14 @@ instance verifiers for Docker image and Compose checks. The bundle manifest
 lists files for the later shipping step. Shipping, bundle activation receipts,
 in-container egress checks, and scheduled health notifications follow in
 separate units.
+
+Operational differences recorded on November 18, 2026, for review by December 2, 2026:
+
+- Will uses flat legacy YAML until the layout migration (fleet design November 17, unit 7).
+- The Mac runs scripts from its primary checkout and Will has a hand-copied ops subset
+  pending bundle receipts (units 2b and 2c).
+- The installed Mac token helper differed from the tracked copy and reachable history
+  during prechecks (unit 0).
 
 Until bundle cutover, updating the watchdog, log archiver, Claude launcher,
 their plists, or Compose configuration in the Mac's primary checkout is a
