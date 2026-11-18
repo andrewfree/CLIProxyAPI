@@ -96,8 +96,9 @@ With the variable set, the launcher:
   error: CLIProxy's last attempt could not connect to its upstream. An earlier
   attempt in the same retry round can still have reached the provider if
   egress failed in the middle of it, so in that moment a message can run
-  twice. Claude Code would resend the message after that 5xx anyway; the
-  replay only sends the retry to the host that can serve it. New requests
+  twice. Claude Code would usually resend the message after that 5xx
+  anyway, and the replay sends that retry to the host that can serve it; it
+  adds a run only when Claude Code had no retries left. New requests
   then stay on the fallback for 120 seconds. Requests that hit the same
   outage together share that hold; a repeat after it ends doubles the next
   hold, up to 600 seconds. A 2xx or 3xx from the primary returns the next

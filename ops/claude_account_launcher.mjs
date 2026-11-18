@@ -44,8 +44,9 @@ const dialError = /\bdial (?:tcp|udp)[46]?\b|\bdial upstream:/i;
 
 // A 5xx whose error says CLIProxy could not dial its upstream means its last attempt never connected,
 // so the request is replayed on the other host. An earlier retry round may still have reached the
-// provider when egress fails mid-request. Claude Code would resend the request after this 5xx anyway,
-// so the replay adds no double run of its own; it only sends that retry to the host that can serve it.
+// provider when egress fails mid-request. Claude Code would usually resend the request after this 5xx
+// anyway, and the replay sends that retry to the host that can serve it; only when Claude Code had no
+// retries left does the replay add a run.
 export function isEgressFailure(statusCode, body) {
   if (statusCode < 500) return false;
   let error;
@@ -104,8 +105,9 @@ export function probeHealth(origin, timeoutMs = failoverDefaults.probeTimeoutMs)
   });
 }
 
+// Monotonic, so a wall-clock step cannot shift a hold, a recovery or a liveness window.
 const realClock = {
-  now: Date.now,
+  now: () => performance.now(),
   setTimeout: (callback, ms) => { const timer = setTimeout(callback, ms); timer.unref?.(); return timer; },
   clearTimeout: (timer) => clearTimeout(timer),
   setInterval: (callback, ms) => { const timer = setInterval(callback, ms); timer.unref?.(); return timer; },
@@ -132,16 +134,18 @@ function createHostSelector({ clock, probe, log, settings, onRecovered }) {
 
   function markDown(reason) {
     if (down) return;
-    const state = { since: clock.now(), successes: 0, probing: false };
+    const state = { ticks: 0, successes: 0, probing: false };
     down = state;
     state.timer = clock.setInterval(async () => {
+      // Elapsed time is counted in ticks, so a timer that fires slightly early cannot delay recovery.
+      state.ticks++;
       if (state.probing) return;
       state.probing = true;
       const healthy = await probe("primary");
       state.probing = false;
       if (down !== state) return;
       state.successes = healthy ? state.successes + 1 : 0;
-      if (state.successes >= settings.recoverySuccesses && clock.now() - state.since >= settings.recoveryMinimumMs) {
+      if (state.successes >= settings.recoverySuccesses && state.ticks * settings.recoveryIntervalMs >= settings.recoveryMinimumMs) {
         clock.clearInterval(state.timer);
         down = null;
         onRecovered();
@@ -185,11 +189,14 @@ function createLivenessWatch({ clock, probe, settings, onHostFailing }) {
   async function tick() {
     if (ticking) return;
     ticking = true;
+    const generation = timer;
     const counted = windowStart;
     windowStart = clock.now();
     try {
       const hosts = [...new Set([...watched].map((entry) => entry.host))];
       const healthy = new Map(await Promise.all(hosts.map(async (host) => [host, await probe(host)])));
+      // The watch stopped (and maybe restarted) while this tick waited; its results are stale.
+      if (timer !== generation) return;
       for (const host of hostFailures.keys()) if (!healthy.has(host)) hostFailures.delete(host);
       for (const host of hosts) {
         const failures = healthy.get(host) ? 0 : (hostFailures.get(host) ?? 0) + 1;
@@ -226,8 +233,10 @@ function createLivenessWatch({ clock, probe, settings, onHostFailing }) {
         if (!watched.size) stop();
       };
     },
+    // Called when the host passed its recovery probes, which breaks every failure run on it.
     forget(host) {
       hostFailures.delete(host);
+      for (const entry of watched) if (entry.host === host) entry.silent = 0;
     },
     stop() {
       watched.clear();

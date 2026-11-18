@@ -515,6 +515,95 @@ test("a recovery clears probe failures counted while a primary stream stayed ope
   assert.deepEqual(events(transitions), ["primary_down", "primary_up"], "one failed probe after recovery is not three");
 });
 
+test("a recovery also clears the silence counted for open requests", async (t) => {
+  let streams = 0;
+  let stream;
+  let arrived;
+  const received = new Promise((resolve) => { arrived = resolve; });
+  const { base, clock, healthy, transitions } = await harness(t, {
+    primary: (req, res) => {
+      if (req.url.startsWith("/v1/messages/count_tokens")) return void arrived();
+      if (++streams === 2) return void req.socket.destroy();
+      stream = res;
+      res.writeHead(200);
+      res.write("start");
+    },
+  });
+  const open = await message(base);
+  const reader = open.body.getReader();
+  await reader.read();
+  const keepDelivering = async (ms) => { stream.write("x"); await reader.read(); await clock.advance(ms); };
+  await keepDelivering(5_000);
+  let settled = false;
+  const silent = message(base, "/v1/messages/count_tokens");
+  silent.then(() => { settled = true; }, () => { settled = true; });
+  // Advance the fake clock only after the real connection exists, or its connect guard would fire.
+  await received;
+  healthy.primary = false;
+  // Silence counted at 40 and 60 s; a reset takes the primary down at 47 s; it recovers at 77 s.
+  await keepDelivering(42_000);
+  const reset = await message(base);
+  assert.equal(reset.status, 502);
+  await reset.text();
+  await keepDelivering(13_000);
+  healthy.primary = true;
+  await keepDelivering(17_000);
+  assert.deepEqual(events(transitions), ["primary_down", "primary_up"]);
+  healthy.primary = false;
+  await keepDelivering(3_000);
+  await flush();
+  assert.equal(settled, false, "one failed probe after recovery does not end the silent request");
+  assert.deepEqual(events(transitions), ["primary_down", "primary_up"]);
+});
+
+test("a probe that returns after the watch stopped does not count against the next requests", async (t) => {
+  let release = null;
+  let holdNext = false;
+  let stream;
+  const healthy = { primary: true, fallback: true };
+  const { base, clock, transitions } = await harness(t, {
+    primary: (_req, res) => { stream = res; res.writeHead(200); res.write("start"); },
+    healthy,
+    probe: async (host) => {
+      if (!holdNext) return healthy[host];
+      holdNext = false;
+      return new Promise((resolve) => { release = resolve; });
+    },
+  });
+  const first = await message(base);
+  const firstReader = first.body.getReader();
+  await firstReader.read();
+  holdNext = true;
+  await clock.advance(failoverDefaults.livenessIntervalMs);
+  stream.end();
+  for (let chunk = await firstReader.read(); !chunk.done; chunk = await firstReader.read());
+  await flush();
+  release(false);
+  await flush();
+  healthy.primary = false;
+  const second = await message(base);
+  const secondReader = second.body.getReader();
+  await secondReader.read();
+  for (let i = 0; i < 2; i++) {
+    stream.write("x");
+    await secondReader.read();
+    await clock.advance(failoverDefaults.livenessIntervalMs);
+  }
+  assert.deepEqual(transitions, [], "two failed probes are not three");
+});
+
+test("recovery is not delayed when the timer fires slightly early", async (t) => {
+  let probes = 0;
+  const { base, clock, transitions } = await harness(t, {
+    primary: (_req, res) => res.end("primary"),
+    clock: fakeClock({ earlyMs: 1 }),
+    probe: async () => ++probes > 1,
+  });
+  await clock.advance(failoverDefaults.recoveryMinimumMs);
+  assert.deepEqual(events(transitions), ["primary_down", "primary_up"]);
+  assert.equal(await (await message(base)).text(), "primary");
+});
+
 test("a silent request on a healthy host is never cut", async (t) => {
   let upstream;
   let arrived;
