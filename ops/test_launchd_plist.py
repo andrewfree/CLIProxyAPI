@@ -26,7 +26,7 @@ class LaunchdPlistTest(unittest.TestCase):
             "never",
         )
 
-    def test_archive_job_runs_frequently_and_targets_thecloud(self) -> None:
+    def test_archive_job_runs_frequently_and_targets_innie(self) -> None:
         root = Path(__file__).resolve().parent.parent
         path = root / "ops" / "com.rever.cliproxy-log-archive.plist"
 
@@ -44,11 +44,11 @@ class LaunchdPlistTest(unittest.TestCase):
         environment = plist["EnvironmentVariables"]
         self.assertEqual(
             environment["CLIPROXY_LOG_ARCHIVE_MOUNT"],
-            "/Users/rever/Volumes/TheCloud",
+            "/Volumes/Innie",
         )
         self.assertEqual(
             environment["CLIPROXY_LOG_ARCHIVE_ROOT"],
-            "/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live",
+            "/Volumes/Innie/backups/llm-logs/cliproxy/m5/live",
         )
         self.assertGreaterEqual(
             int(environment["CLIPROXY_LOG_MIN_AGE_SECONDS"]), 3_600
