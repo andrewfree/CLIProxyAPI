@@ -363,6 +363,58 @@ class FleetCTLTest(unittest.TestCase):
         will.public_models[CLIENT_KEYS[0]] += will.models["will-kimi"]
         self.assert_drift(mac, will, "P8/kimi-ai")
 
+    def test_model_not_supported_cooldowns_are_neutral_for_parity(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        unsupported = {"scope": "model", "model_key": "gpt-6-chat-thinking",
+                       "reason": "model_not_supported", "retry_at": retry}
+        item = will.files[0]
+        item.update(status="error", unavailable=True, next_retry_after=retry, status_message="",
+                    cooldowns=[unsupported])
+
+        report, code = self.report(mac, will)
+        self.assertEqual(code, 0, report["drift"])
+        self.assertEqual(report["hosts"]["will"]["credential_health"], {"ok": 2})
+
+        item.update(status_message="model not supported",
+                    cooldowns=[unsupported, dict(unsupported, model_key="other-model")])
+        report, code = self.report(mac, will)
+        self.assertEqual(code, 0, report["drift"])
+        self.assertEqual(report["hosts"]["will"]["credential_health"], {"ok": 2})
+
+    def test_other_failures_still_cause_drift_with_a_model_not_supported_cooldown(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        unsupported = {"scope": "model", "model_key": "gpt-6-chat-thinking",
+                       "reason": "model_not_supported", "retry_at": retry}
+        item = will.files[0]
+        item.update(status="error", unavailable=True, next_retry_after=retry, status_message="")
+        for reason in ("unauthorized", "payment_required", "invalid_grant",
+                       "transient_error", "not_found", "cloudflare_challenge"):
+            with self.subTest(reason=reason):
+                item["cooldowns"] = [unsupported, {"scope": "model", "model_key": "gpt-fixture",
+                                                  "reason": reason, "retry_at": retry}]
+                self.assert_drift(mac, will, "P7/credential-error")
+
+        item.update(cooldowns=[unsupported], status_message="invalid_grant")
+        self.assert_drift(mac, will, "P7/credential-error")
+        item.update(status_message="", requires_sign_in=True)
+        self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_quota_at_matching_deadline_still_cools_with_a_model_not_supported_cooldown(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        will.files[0].update(status="error", unavailable=True, next_retry_after=retry,
+                             status_message="", cooldowns=[
+                                 {"scope": "model", "model_key": "gpt-6-chat-thinking",
+                                  "reason": "model_not_supported", "retry_at": retry},
+                                 {"scope": "model", "model_key": "gpt-fixture",
+                                  "reason": "quota", "retry_at": retry},
+                             ])
+        report, code = self.report(mac, will)
+        self.assertEqual(code, 0, report["drift"])
+        self.assertEqual(report["hosts"]["will"]["credential_health"]["cooling"], 1)
+
     def test_active_quota_and_rate_limit_cooldowns_do_not_cause_drift(self):
         mac, will = self.fixture()
         retry = "2099-01-01T00:00:00Z"

@@ -247,6 +247,9 @@ def credential_health(item, now):
     cooldowns = item.get("cooldowns") or []
     if any(row["reason"] in HARD_CREDENTIAL_REASONS for row in cooldowns):
         return "error"
+    # Restored model restrictions can set the aggregate error status.
+    if cooldowns and all(row["reason"] == "model_not_supported" for row in cooldowns):
+        return "ok"
     retry = item.get("next_retry_after")
     if item["unavailable"] and retry:
         deadline = datetime.fromisoformat(retry.replace("Z", "+00:00"))
