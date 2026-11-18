@@ -72,7 +72,10 @@ On the Mac, configure `claude_cliproxy` for Will and
 `claude_cliproxy_mac` for the local proxy. On Will, use its own loopback
 proxy. Pass `--fallback <origin>` to give a pool profile a second host. The
 tool rewrites the profile's whole environment, so pass `--fallback` again on
-every rerun or the fallback is removed. No route can produce a reply while
+every rerun or the fallback is removed. A rerun clears a pool `launchArgs` value that equals
+the direct profile's (an inherited `--chrome`); if the direct profile's
+arguments changed after a pool copied them, clear the pool's value once by
+hand in T3 settings. No route can produce a reply while
 every eligible account is at its upstream limit.
 
 To roll back, use `server.updateSettings` to remove only the added profile
@@ -130,7 +133,8 @@ With the variable set, the launcher:
   502.
 
 Every response from a CLIProxy host carries `X-CLIProxy-Host: primary` or
-`fallback`; the launcher's own 400, 404 and 415 rejections do not. A launcher
+`fallback`. The launcher's own 502s after a failed attempt carry it too,
+naming the host last tried; its 400, 404 and 415 rejections do not. A launcher
 without `CLIPROXY_FALLBACK_URL` sends no such header. Host
 transitions are appended to `ops/runtime/fleet/failover.jsonl` (ignored by git;
 `CLIPROXY_FAILOVER_LOG` overrides the path) as one JSON line each, with no
@@ -163,14 +167,15 @@ To check failover end to end without touching T3, run the drill. It starts
 the launcher once per primary with a stub in place of Claude Code, sends one
 `count_tokens` request, and prints one JSON line per primary with the status,
 the answering host and the transitions. The key comes from
-`~/.local/bin/cliproxy-codex-token`; `CLIPROXY_DRILL_KEY` overrides that
-command, and `--key-command <path>` overrides both. The key is never printed.
+`~/.local/bin/cliproxy-codex-token`. When `CLIPROXY_DRILL_KEY` is set, its
+value is used as the key instead, and `--key-command <path>` overrides both.
+The key is never printed.
 
 A closed port, an unresolvable name and a blackholed address should all
 answer from the fallback. A closed port and an unresolvable name answered in
 under 0.5 seconds on November 18. An address that silently drops SYNs
-answers from the fallback after about 3.4 seconds, the 3-second health-probe
-bound. Will's tailnet name should answer from the primary.
+answers from the fallback after about 3.4 seconds, because the launcher's
+3-second startup health probe must fail first. Will's tailnet name should answer from the primary.
 
 ```sh
 node ops/claude_failover_drill.mjs --primary http://127.0.0.1:1 \

@@ -410,7 +410,7 @@ a message that is already running spends capped weekly quota twice.
 
 | Situation | Action | Reason |
 | --- | --- | --- |
-| Refused, name does not resolve, or no connection within 3 s | Replay any request on the fallback, and take the primary out of service for new requests until it recovers | Nothing reached the primary, so a replay is always safe. The 3 s guard covers only the lookup and connect. After a connection exists, no timer ends a request; only the liveness watch can, and only when the host also fails its health probes. The root `AGENTS.md` timeout rule governs the Go server, not this Node launcher ([ops/AGENTS.md](AGENTS.md) says the root file covers the Go server); the launcher keeps the rule's intent by bounding only the time before a connection exists. |
+| Refused, name does not resolve, or no connection within 3 s | Replay any request on the fallback, and take the primary out of service for new requests until it recovers | Nothing reached the primary, so a replay is always safe. The 3 s guard covers only the lookup and connect. After a connection exists, no timer ends a request; only the liveness watch can, and only when the host also fails its health probes. The root `AGENTS.md` timeout rule governs the Go server, not this Node launcher ([ops/AGENTS.md](AGENTS.md) says the root file covers the Go server); the launcher keeps the rule's intent for client requests: after a connection exists, only failed health probes can end one. The 3 s health-probe bound covers the whole probe exchange, after connect too, but a probe is never a client request. |
 | 5xx whose body carries a dial error | Replay on the fallback, then hold new requests on the fallback | CLIProxy's last attempt could not connect to its upstream. Will's `/healthz` stays green when only its egress is down, so a probe cannot detect or clear this state. |
 | Connection closed with zero response bytes | Probe once; a failed probe takes the primary out of service. `count_tokens` and the model list replay. A message gets a retryable 502. | The two read-only calls are safe to repeat. A message may already be generating, so the launcher does not replay it. Claude Code's retry takes the fallback if the probe failed. |
 | Stream breaks after it started | Destroy the client response, no replay | Part of the answer was delivered and paid for; a replay would generate it again. |
@@ -444,8 +444,9 @@ reached. A request that has already moved gets a 502, so a double outage cannot 
 ping-pong.
 
 **Observability.** Every response from a CLIProxy host through a launcher that has a fallback
-carries `X-CLIProxy-Host: primary` or `fallback`. The launcher's own 400, 404 and 415 rejections
-do not, and other profiles' launchers send no such header. Each host transition is one JSON line in
+carries `X-CLIProxy-Host: primary` or `fallback`. The launcher's own 502s after a failed attempt
+carry it too, naming the host last tried. The launcher's own 400, 404 and 415 rejections do not,
+and other profiles' launchers send no such header. Each host transition is one JSON line in
 `ops/runtime/fleet/failover.jsonl`, with no bodies, URLs or keys.
 
 #### What the reviews changed
@@ -649,7 +650,7 @@ Nothing tracked by git holds one.
   has an extra `kimi-ai` credential (dated exceptions, section 2.1). The design's optional wrapper
   (unit 10) is not built.
 - **The Mac's `codex_cliproxy` uses Will's raw address.** It still reaches Will at
-  `http://100.98.74.67:8317/v1` ([KIMI_ROUTING.md](KIMI_ROUTING.md)), not at the tailnet name, so
+  Will's raw tailnet address ([KIMI_ROUTING.md](KIMI_ROUTING.md)), not at the tailnet name, so
   the section 2.6 reason for the name applies to it too: with Tailscale stopped on another network,
   it would send requests, with its client key, in clear to whatever holds that address. Moving it
   to the name is a separate live change for Andrew.
@@ -741,8 +742,9 @@ text).
 - No timer may end a request after a connection exists; only the liveness watch may, when the
   host fails its probes and the request receives nothing.
 - Keep failover configured on `claude_cliproxy` across profile reruns
-  ([FLEET.md](FLEET.md#running-fleet)). To change only its two URLs, use `set_pool_fallback.mjs`,
-  which checks the profile's key against the hosts before it saves (section 2.6, The drill).
+  ([FLEET.md](FLEET.md#running-fleet)). To change only its two URLs, use `set_pool_fallback.mjs`;
+  unless `--no-key-check` is given, it checks the key you pipe to it against the hosts before it
+  opens a T3 session (section 2.6, The drill). It cannot check the stored key, which T3 redacts.
 
 **Enabling failover for another profile.**
 
