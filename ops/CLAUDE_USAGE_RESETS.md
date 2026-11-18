@@ -49,8 +49,12 @@ when the limit triggers, chain a claim that Andrew approved:
 
 ```sh
 python3 ops/claude_usage_resets.py watch --account <email> --threshold 99 --notify \
-  && python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --yes
+  && python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> \
+       --min-fable-percent 99 --yes
 ```
+
+`--min-fable-percent 99` makes the claim check the threshold again on a fresh
+read, so a stale or wrong trigger cannot spend the grant.
 
 ## Redeem a grant
 
@@ -61,14 +65,17 @@ python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --
 
 For a conditional redemption, add `--min-fable-percent 99` to the claim.
 The claim checks the account profile and reads usage again before spending
-the grant. It refuses if the Fable limit is missing or below the threshold,
-even if an earlier watch already triggered. This check also applies to dry runs.
+the grant. It refuses if the Fable limit is missing, is not a number, or is
+below the threshold, even if an earlier watch already triggered. This check
+also applies to dry runs.
 
 `claim` refuses to run without `--yes` or `--dry-run`. Before sending, it does the following:
 
 1. It reads `/api/oauth/profile` and checks that the account email matches. The organization UUID comes from this profile.
-2. It reads usage with backoff on 429 and 5xx. It refuses if the account is
-   ineligible, in cooldown, or the grant is missing, used, or unusable.
+2. It reads usage with backoff on 429 and 5xx. With `--min-fable-percent N`,
+   it refuses unless this fresh read reports a Fable limit of at least N
+   percent. It also refuses if the account is ineligible, in cooldown, or the
+   grant is missing, used, or unusable.
 3. It sends the request Claude Code 2.1.322 sends:
    `POST /api/organizations/{org}/reset_rate_limits` with
    `{"program":"cedar_ember","grant_id":"<id>","request_id":"<id>"}`.
@@ -83,8 +90,9 @@ even if an earlier watch already triggered. This check also applies to dry runs.
 The response contains `result` (`reset`, `not_limited`, `cooldown`,
 `already_used`, `ineligible`, and others), `resets_left`, `cleared`, and
 `cooldown_until`. A cooldown of about three minutes follows a successful claim.
-Receipts go to `ops/runtime/claude-resets/` unless `--receipt` is set. They
-contain no tokens, emails, or organization UUIDs.
+Receipts go to `ops/runtime/claude-resets/` unless `--receipt` is set. Each
+receipt holds the account email. It holds no tokens or organization UUIDs: the
+claim URL is recorded with `<org>` in place of the UUID.
 
 ## Record: 2026-11-11 Fable reset on the Gmail Max account
 

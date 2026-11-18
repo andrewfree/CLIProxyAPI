@@ -1,8 +1,11 @@
+import contextlib
+import io
 import json
 import pathlib
 import tempfile
 import unittest
 from typing import Any
+from unittest import mock
 
 from ops import claude_usage_resets as resets
 
@@ -147,16 +150,30 @@ class ClaimTest(unittest.TestCase):
         self.assertEqual(resets.request_id_for(self.state, EMAIL, "launch-2610-fable"), first)
         self.assertNotEqual(resets.request_id_for(self.state, EMAIL, "full-reset-2611"), first)
 
-    def test_threshold_guard_refuses_low_or_missing_fable_without_posting(self):
+    def test_threshold_guard_refuses_low_missing_or_non_numeric_fable_without_posting(self):
+        def with_fable_percent(value):
+            body = usage_body()
+            body["limits"][1]["percent"] = value
+            return body
+
         missing = usage_body()
         missing["limits"] = missing["limits"][:1]
-        for body in (usage_body(fable=98), missing):
-            proxy = FakeProxy([(200, body)])
-            with self.subTest(body=body), self.assertRaisesRegex(resets.ResetError, "below required 99%"):
-                resets.claim(proxy, EMAIL, "launch-2610-fable", self.state, self.receipt,
-                             False, sleep=lambda _: None, min_fable_percent=99)
-            self.assertEqual(proxy.posts(), [])
-            self.assertFalse((self.state / "request-ids.json").exists())
+        cases = {
+            "low": (usage_body(fable=98), "below required 99%"),
+            "missing": (missing, "Fable limit is missing"),
+            "string": (with_fable_percent("99"), "not a finite number"),
+            "bool": (with_fable_percent(True), "not a finite number"),
+            "nan": (with_fable_percent(float("nan")), "not a finite number"),
+        }
+        for name, (body, message) in cases.items():
+            for dry_run in (False, True):
+                proxy = FakeProxy([(200, body)])
+                with self.subTest(name, dry_run=dry_run), self.assertRaisesRegex(resets.ResetError, message):
+                    resets.claim(proxy, EMAIL, "launch-2610-fable", self.state, self.receipt,
+                                 dry_run, sleep=lambda _: None, min_fable_percent=99)
+                self.assertEqual(proxy.posts(), [])
+                self.assertFalse((self.state / "request-ids.json").exists())
+                self.assertFalse(self.receipt.exists())
 
     def test_threshold_guard_accepts_99_and_100_and_records_precondition(self):
         for percent in (99, 100):
@@ -181,6 +198,34 @@ class CliGuardTest(unittest.TestCase):
     def test_claim_requires_yes_or_dry_run(self):
         args = type("Args", (), {"yes": False, "dry_run": False})()
         self.assertEqual(resets.cmd_claim(FakeProxy([]), args), 2)
+
+    def run_claim_cli(self, proxy, extra):
+        """Run `main` with a fake proxy and a temporary state dir; never reads .env."""
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(resets, "load_management_key", return_value="unused"), \
+                mock.patch.object(resets, "Proxy", return_value=proxy), \
+                mock.patch.object(resets, "STATE_DIR", pathlib.Path(tmp)), \
+                mock.patch.object(resets, "claim", wraps=resets.claim) as spy, \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = resets.main(["claim", "--account", EMAIL, "--grant", "launch-2610-fable",
+                                "--receipt", str(pathlib.Path(tmp) / "receipt.json"), *extra])
+        return code, spy, err.getvalue()
+
+    def test_cli_min_fable_percent_reaches_claim_and_refuses(self):
+        proxy = FakeProxy([(200, usage_body(fable=98))])
+        code, spy, err = self.run_claim_cli(proxy, ["--yes", "--min-fable-percent", "99"])
+        self.assertEqual(code, 1)
+        self.assertEqual(spy.call_args.kwargs["min_fable_percent"], 99)
+        self.assertIn("below required 99%", err)
+        self.assertEqual(proxy.posts(), [])
+
+    def test_cli_without_min_fable_percent_passes_none(self):
+        proxy = FakeProxy([(200, usage_body(fable=98))])
+        code, spy, _ = self.run_claim_cli(proxy, ["--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIsNone(spy.call_args.kwargs["min_fable_percent"])
+        self.assertEqual(proxy.posts(), [])
 
 
 if __name__ == "__main__":

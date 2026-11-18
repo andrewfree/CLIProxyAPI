@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -201,7 +202,12 @@ def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, rece
     receipt["before"] = before = fetch_usage(proxy, email, sleep=sleep)
     if min_fable_percent is not None:
         percent = limit_percent(before, "Fable")
-        if percent is None or percent < min_fable_percent:
+        if percent is None:
+            raise ResetError(f"Fable limit is missing from the usage response for {email}; "
+                             f"cannot check the required {min_fable_percent}%")
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not math.isfinite(percent):
+            raise ResetError(f"Fable usage percent is not a finite number ({type(percent).__name__})")
+        if percent < min_fable_percent:
             raise ResetError(f"Fable usage {percent}% is below required {min_fable_percent}%")
         receipt["min_fable_percent"] = min_fable_percent
     check_claimable(before, grant_id)
