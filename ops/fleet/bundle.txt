@@ -1,6 +1,7 @@
 ops/archive_logs.py
 ops/claude_account_launcher.mjs
 ops/cliproxy-codex-token
+ops/codex_fallback_launcher.mjs
 ops/cliproxy_watchdog.py
 ops/fleetctl.py
 ops/fleet-release.json
