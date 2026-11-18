@@ -17,6 +17,8 @@ const supportedOperations = new Set([
 
 const childShutdownGraceMs = 5000;
 const maxCooldownBodyBytes = 64 * 1024;
+// Claude Code's own retries absorb cooldowns up to about 160 s; only longer ones should end the turn.
+const noRetryCooldownSeconds = 180;
 
 function forwardedHeaders(headers) {
   const excluded = new Set(hopHeaders);
@@ -50,7 +52,7 @@ function isLongCooldown(body) {
   }
   const error = payload?.error;
   if (error?.code === "model_cooldown") {
-    return Number.isFinite(error.reset_seconds) && error.reset_seconds > 60;
+    return Number.isFinite(error.reset_seconds) && error.reset_seconds > noRetryCooldownSeconds;
   }
   if (payload?.type !== "error" || error?.type !== "rate_limit_error" || typeof error.message !== "string") {
     return false;
@@ -60,7 +62,7 @@ function isLongCooldown(body) {
   if (!reset) return false;
   const [, hours = "0", minutes = "0", seconds] = reset;
   const totalSeconds = Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds);
-  return Number.isFinite(totalSeconds) && totalSeconds > 60;
+  return Number.isFinite(totalSeconds) && totalSeconds > noRetryCooldownSeconds;
 }
 
 function forwardUpstreamResponse(upstream, response, outgoing) {

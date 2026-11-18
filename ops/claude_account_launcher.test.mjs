@@ -72,7 +72,11 @@ const claudeCooldown = (duration) => JSON.stringify({
 });
 
 for (const { label, status = 429, body, retryAfter, shouldRetry = null } of [
-  { label: "long selector cooldown", body: selectorCooldown(61), shouldRetry: "false" },
+  { label: "long selector cooldown", body: selectorCooldown(181), shouldRetry: "false" },
+  { label: "selector cooldown Claude Code can ride out", body: selectorCooldown(180) },
+  { label: "Claude cooldown just over the limit", body: claudeCooldown("3m1s"), shouldRetry: "false" },
+  { label: "Claude cooldown Claude Code can ride out", body: claudeCooldown("2m59s") },
+  { label: "empty JSON 429", body: "" },
   { label: "long Claude cooldown", body: claudeCooldown("2h17m30s"), shouldRetry: "false" },
   { label: "long cooldown at the 64 KiB limit", body: selectorCooldown(3600).padEnd(64 * 1024), shouldRetry: "false" },
   { label: "short selector cooldown", body: selectorCooldown(30) },
@@ -100,6 +104,41 @@ for (const { label, status = 429, body, retryAfter, shouldRetry = null } of [
     assert.equal(await res.text(), body);
   });
 }
+
+test("destroys the client response when the upstream resets mid 429 body", { timeout: 3000 }, async (t) => {
+  const base = await fixture(t, (_req, res) => {
+    res.writeHead(429, { "content-type": "application/json" });
+    res.write('{"error":{"code":"model_cooldown",');
+    setImmediate(() => res.socket.destroy());
+  });
+  const res = await fetch(base + "/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"model":"claude-sonnet-5"}',
+  }).catch((error) => error);
+  if (res instanceof Error) return;
+  await assert.rejects(res.text());
+});
+
+test("releases the upstream when the client aborts while a 429 is buffered", { timeout: 3000 }, async (t) => {
+  let upstreamClosed;
+  const closed = new Promise((resolve) => { upstreamClosed = resolve; });
+  const base = await fixture(t, (_req, res) => {
+    res.writeHead(429, { "content-type": "application/json" });
+    res.write('{"error":{"code":"model_cooldown",');
+    res.on("close", upstreamClosed);
+  });
+  const controller = new AbortController();
+  const pending = fetch(base + "/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"model":"claude-sonnet-5"}',
+    signal: controller.signal,
+  }).catch(() => {});
+  setTimeout(() => controller.abort(), 100);
+  await pending;
+  await closed;
+});
 
 test("forwards an oversized chunked 429 before the upstream finishes", { timeout: 3000 }, async (t) => {
   const prefix = selectorCooldown(3600).padEnd(64 * 1024 + 1);

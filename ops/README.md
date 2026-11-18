@@ -35,7 +35,9 @@ trying a different account. The listener closes when Claude exits.
 
 The launcher sends `x-should-retry: false` so Claude Code can stop retrying
 when CLIProxy returns HTTP 429 without `Retry-After` and a JSON body of at
-most 64 KiB reports a cooldown reset more than 60 seconds away.
+most 64 KiB reports a cooldown reset more than 180 seconds away. Shorter
+cooldowns keep Claude Code's normal retries, which absorb waits of up to about
+three minutes; CLIProxy itself waits up to 75 seconds before it answers.
 
 The launcher accepts only `POST /v1/messages`, `POST /v1/messages/count_tokens`,
 and `GET /v1/models`. Message requests require an `application/json` body.
