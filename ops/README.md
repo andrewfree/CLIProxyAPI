@@ -130,18 +130,25 @@ With the variable set, the launcher:
   502.
 
 Every response from a CLIProxy host carries `X-CLIProxy-Host: primary` or
-`fallback`; the launcher's own 400, 404 and 415 rejections do not. Host
+`fallback`; the launcher's own 400, 404 and 415 rejections do not. A launcher
+without `CLIPROXY_FALLBACK_URL` sends no such header. Host
 transitions are appended to `ops/runtime/fleet/failover.jsonl` (ignored by git;
 `CLIPROXY_FAILOVER_LOG` overrides the path) as one JSON line each, with no
 request bodies, URLs or keys.
 
 Turn failover on or off for one pool profile with `set_pool_fallback.mjs`.
-It changes only `CLIPROXY_BASE_URL` and `CLIPROXY_FALLBACK_URL`, stores the
-key passed on stdin again as a sensitive variable, keeps private before and
-after settings (mode `0600`) in the backup directory, and checks that the
-profile's `config` block and every other profile are unchanged. New sessions
-use the change; running sessions keep their launch environment until they
-end.
+It changes only `CLIPROXY_BASE_URL` and `CLIPROXY_FALLBACK_URL`. T3 returns
+the profile's key redacted, so the tool stores the key passed on stdin again
+as a sensitive variable. That key must be the client key the profile already
+uses. Before it opens a T3 session, the tool sends `GET /v1/models` with the
+key to the primary and, when `--fallback` is given, to the fallback, and
+stops unless each returns HTTP 200. Pass `--no-key-check` to skip that check,
+for example while one host is down. The tool keeps private before and after
+settings (mode `0600`) in the backup directory and checks that the profile's
+`config` block and every other profile are unchanged. Its report lists only
+an allowlisted set of variables, with tailnet names masked; the key is never
+printed. New sessions use the change; running sessions keep their launch
+environment until they end.
 
 ```sh
 node ops/set_pool_fallback.mjs --base-dir ~/.t3 --profile-id claude_cliproxy \
@@ -156,14 +163,29 @@ To check failover end to end without touching T3, run the drill. It starts
 the launcher once per primary with a stub in place of Claude Code, sends one
 `count_tokens` request, and prints one JSON line per primary with the status,
 the answering host and the transitions. The key comes from
-`~/.local/bin/cliproxy-codex-token` and is never printed. A closed port, an
-unresolvable name and a blackholed address should all answer from the
-fallback; Will's tailnet name should answer from the primary.
+`~/.local/bin/cliproxy-codex-token`; `CLIPROXY_DRILL_KEY` overrides that
+command, and `--key-command <path>` overrides both. The key is never printed.
+
+A closed port, an unresolvable name and a blackholed address should all
+answer from the fallback. A closed port and an unresolvable name answered in
+under 0.5 seconds on November 18. An address that silently drops SYNs
+answers from the fallback after about 3.4 seconds, the 3-second health-probe
+bound. Will's tailnet name should answer from the primary.
 
 ```sh
 node ops/claude_failover_drill.mjs --primary http://127.0.0.1:1 \
-  --primary http://will.invalid:8317 --primary <primary-origin>
+  --primary http://will.invalid:8317 \
+  --primary http://<address-that-drops-SYNs>:8317 \
+  --primary <primary-origin>
 ```
+
+Exit 0 means only that every run returned 200. It does not say which side
+answered, so check each line's `host` (`primary` or `fallback`) against the
+expectation above. Exit 1 means at least one run did not return 200 or the
+drill could not run, for example because the key command failed. Exit 2
+means a usage error, such as no `--primary`. On `SIGINT`, `SIGTERM` or
+`SIGHUP` the drill stops the running launcher and its stub, removes its
+temporary directory, and exits with 128 plus the signal number.
 
 On `SIGTERM`, `SIGINT`, or `SIGHUP`, the launcher closes its listener and
 connections, then forwards the signal to its child. If the child has not exited

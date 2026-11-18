@@ -32,14 +32,14 @@ secrets and logs.
                                         pool mode, failover ON        |   Linux amd64, always on
                                                                       |   container on loopback,
                                                                       |   Tailscale Serve TCP 8317   Anthropic
-                                                                      |   reached by tailnet name    (3 Claude accounts
+                                                                      |   by name: claude_cliproxy   (3 Claude accounts
                                                                       |   will.<tailnet>.ts.net       per host)
-                                                                      |                              OpenAI Codex
+                                                                      |   by address: Codex and M1   OpenAI Codex
                                                                       +-> Mac   (fallback)           Kimi
    claude_cliproxy_mac (shared pool) -> launcher, pool mode ------------> Mac                        Z.ai Coding Plan
    3 named Claude profiles -----------> launcher, account prefix -------> Mac                        Cursor plugin
                                                                           Docker Desktop, arm64      NVIDIA (Mac only)
-   codex_cliproxy --------------------- (no launcher, one base_url) ----> Will
+   codex_cliproxy --------------------- (no launcher, one base_url) ----> Will  (tailnet address)
    codex_cliproxy_mac, codex_kimi_mac - (no launcher, one base_url) ----> Mac   127.0.0.1:8317
 
  Will, T3
@@ -335,15 +335,17 @@ the top of `ops/claude_account_launcher.mjs`). The boundary started at 60 second
 to 180 so that cooldowns Claude Code's own retries can absorb still get retried (commit
 `684a7f69`).
 
-**What failover does not do.** A 429 is account quota. Both hosts hold the same accounts, so the
-other host would answer the same way, and failover never relieves a 429
-([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
+**What failover does not do.** A 429 means the account's quota or the provider's capacity is
+exhausted. Both hosts use the same accounts and the same providers, so the other host would answer
+the same way, and failover never relieves a 429 ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
 
 ### 2.6 Client failover
 
-Live since about 12:53 Pacific on November 18 (fleet design unit 3, PRs #13 and #14;
-[FLEET.md](FLEET.md#operations-on-november-18-2026)). The exact behaviour is listed in
-[README.md](README.md#host-failover-for-the-shared-pool); this section gives the reasons.
+Failover has been live since shortly after 12:53 Pacific on November 18, when `claude_cliproxy`
+got its fallback (fleet design unit 3, PR #14;
+[FLEET.md](FLEET.md#operations-on-november-18-2026)). PR #13, the SYN-retry bound, is merged but
+takes effect only when each container is next recreated (section 2.7). The exact behaviour is
+listed in [README.md](README.md#host-failover-for-the-shared-pool); this section gives the reasons.
 
 #### Why the launcher, and why one profile (option E)
 
@@ -381,11 +383,12 @@ no exception on Claude rows ([FLEET.md](FLEET.md#operations-on-november-18-2026)
 #### Why the primary is Will's tailnet name
 
 The profile reaches Will at `http://will.<tailnet>.ts.net:8317`, not at the raw tailnet address.
-Public resolvers answer NXDOMAIN for that name. With Tailscale stopped the lookup fails at once
-and the launcher fails over. With the raw address, a foreign network that reuses the 100.x range
-could receive the traffic in clear
-([FLEET.md](FLEET.md#running-fleet), design question 3). Tailscale was not stopped to test this;
-the check was a resolver comparison.
+Public resolvers answer NXDOMAIN for that name. With Tailscale stopped the lookup should therefore
+fail at once, and the launcher would fail over. This was not tested: Tailscale was not stopped,
+and the check was a resolver comparison. With the raw address, a foreign network that reuses the
+100.x range could receive the traffic in clear
+([FLEET.md](FLEET.md#running-fleet), design question 3). Only `claude_cliproxy` uses the name; the
+Mac's `codex_cliproxy` and M1 still use the raw address (section 4).
 
 The name does not help on a network whose resolver answers every name, as some captive portals do:
 a session already running would send requests, with the client key, in clear to that address, and
@@ -394,10 +397,11 @@ it delivers any HTTP answer from the primary as is. This case was not tested.
 
 #### Why health means `/healthz` returning 200 with `status: ok`
 
-A TCP accept proves nothing. Tailscale Serve can accept and close when its backend is down, and a
-captive portal accepts everything ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 6 item 3). So the
-probe requires `GET /healthz` to return 200 with `{"status":"ok"}` within 3 seconds. It is always
-a probe, never a client request, so it spends no quota.
+A TCP accept proves nothing. Tailscale Serve may accept and then close when its backend is down,
+which the design lists as an untested assumption ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 13),
+and a captive portal accepts everything ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 6 item 3).
+So the probe requires `GET /healthz` to return 200 with `{"status":"ok"}` within 3 seconds. It is
+always a probe, never a client request, so it spends no quota.
 
 #### Why each failure case is handled the way it is
 
@@ -406,7 +410,7 @@ a message that is already running spends capped weekly quota twice.
 
 | Situation | Action | Reason |
 | --- | --- | --- |
-| Refused, name does not resolve, or no connection within 3 s | Replay any request on the fallback, and take the primary out of service for new requests until it recovers | Nothing reached the primary, so a replay is always safe. The 3 s guard covers only the lookup and connect. After a connection exists, no timer ends a request, in line with the root `AGENTS.md` timeout rule; only the liveness watch can, and only when the host also fails its health probes. |
+| Refused, name does not resolve, or no connection within 3 s | Replay any request on the fallback, and take the primary out of service for new requests until it recovers | Nothing reached the primary, so a replay is always safe. The 3 s guard covers only the lookup and connect. After a connection exists, no timer ends a request; only the liveness watch can, and only when the host also fails its health probes. The root `AGENTS.md` timeout rule governs the Go server, not this Node launcher ([ops/AGENTS.md](AGENTS.md) says the root file covers the Go server); the launcher keeps the rule's intent by bounding only the time before a connection exists. |
 | 5xx whose body carries a dial error | Replay on the fallback, then hold new requests on the fallback | CLIProxy's last attempt could not connect to its upstream. Will's `/healthz` stays green when only its egress is down, so a probe cannot detect or clear this state. |
 | Connection closed with zero response bytes | Probe once; a failed probe takes the primary out of service. `count_tokens` and the model list replay. A message gets a retryable 502. | The two read-only calls are safe to repeat. A message may already be generating, so the launcher does not replay it. Claude Code's retry takes the fallback if the probe failed. |
 | Stream breaks after it started | Destroy the client response, no replay | Part of the answer was delivered and paid for; a replay would generate it again. |
@@ -439,10 +443,10 @@ while the primary is held or out of service tries the primary once if the fallba
 reached. A request that has already moved gets a 502, so a double outage cannot make a request
 ping-pong.
 
-**Observability.** Every response through a launcher that has a fallback carries
-`X-CLIProxy-Host: primary` or `fallback` (other profiles' launchers send no such header), and each
-host transition is one JSON line in `ops/runtime/fleet/failover.jsonl`, with no bodies, URLs or
-keys.
+**Observability.** Every response from a CLIProxy host through a launcher that has a fallback
+carries `X-CLIProxy-Host: primary` or `fallback`. The launcher's own 400, 404 and 415 rejections
+do not, and other profiles' launchers send no such header. Each host transition is one JSON line in
+`ops/runtime/fleet/failover.jsonl`, with no bodies, URLs or keys.
 
 #### What the reviews changed
 
@@ -489,8 +493,15 @@ for two blackholed addresses in 3.4 seconds, which is the probe bound. It answer
 primary for Will by name. Tailscale and Will were not touched
 ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
 
-`node ops/claude_failover_drill.mjs` repeats it ([README.md](README.md#host-failover-for-the-shared-pool));
-`node ops/set_pool_fallback.mjs` turns failover on or off for the profile.
+`node ops/claude_failover_drill.mjs --primary <origin> [--primary <origin>]...` repeats it. It
+needs at least one `--primary` and exits 2 without one. Exit 0 means only that every run returned
+200; the `host` field of each line says which side answered
+([README.md](README.md#host-failover-for-the-shared-pool)).
+
+`node ops/set_pool_fallback.mjs` turns failover on or off for the profile. The key piped to it
+must be the client key the profile already uses. Before it opens a T3 session, it sends
+`GET /v1/models` with that key to the primary and, when one is given, the fallback, and it stops
+unless each returns HTTP 200; `--no-key-check` skips that check.
 
 The drill covered only pre-connect failures on a replayable call. The dial-error 5xx and egress
 hold, the zero-byte reset and the liveness watch were not exercised live; they rest on the node
@@ -499,9 +510,11 @@ tests in `ops/claude_account_failover.test.mjs`.
 ### 2.7 The SYN-retry bound
 
 **What went wrong.** Failover on "Will up, egress down" starts only when Will returns its
-dial-error 5xx. Nothing bounded how long that took. The Claude dial path has no connect timeout,
-and the root `AGENTS.md` allows timeouts only during credential acquisition, so a Go dial timeout
-was not proposed ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 6 item 10). A refused connection or
+dial-error 5xx. Nothing bounded how long that took. The Claude dial path has no connect timeout.
+The root `AGENTS.md` governs the Go server and allows timeouts there only during credential
+acquisition, so a Go dial timeout would need Andrew's ruling and was not proposed
+([FLEET_DESIGN.md](FLEET_DESIGN.md) section 6 item 10). The fix below, like the launcher's
+connect guard, bounds only the time before a connection exists. A refused connection or
 an unresolvable name fails in milliseconds, but a silently dropped SYN made one dial wait about
 133 to 135 seconds (Mac 132.7 s, Will 135.1 s; [FLEET.md](FLEET.md#operations-on-november-18-2026),
 prechecks 0(b)).
@@ -510,10 +523,12 @@ prechecks 0(b)).
 fail in about 7 seconds. It is a kernel setting scoped to the container's network namespace, it
 acts only before a connection exists, and it needs no Go change. It applies to every TCP connect
 the container makes, including OAuth refreshes and every provider, so on a lossy network a connect
-that needed a third SYN retransmission now fails and is retried by CLIProxy. At 3 a dial takes
-about 20 seconds ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechecks 0(b)), which at
-up to 12 dials per request (next paragraph) would be about four minutes. The repository records
-measurements at 2 and 3 only, and no reason for not going lower.
+that needed a third SYN retransmission now fails. For a request, CLIProxy retries a failed dial on
+the next credential or round, without a cooldown ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
+The repository does not record how other connects, such as OAuth refreshes, retry. At 3 a dial
+takes about 20 seconds ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechecks 0(b)),
+which at up to 12 dials per request (next paragraph) would be about four minutes. The repository
+records measurements at 2 and 3 only, and no reason for not going lower.
 
 **What it does not fix.** Dial errors are retried without cooldown, so one request can dial once
 per account per round. With three accounts and `request-retry: 3` the worst case at 2 is still
@@ -582,7 +597,8 @@ their own transcripts.
 
 - Two new client keys were added at the top of both hosts' key lists and every client moved to
   them. The two old keys stay accepted until a scheduled task removes them on 2026-11-19 at 10:30
-  UTC.
+  UTC. The repository records no reason for this overlap. Its effect is that sessions already
+  running keep working, because a running session keeps the key it launched with.
 - The Z.ai Coding Plan key was replaced on both hosts and the old one deleted.
 - The NVIDIA key (Mac only) was rotated and the old one deleted. The new key expires on
   2027-11-18.
@@ -592,7 +608,9 @@ FLEET.md records no rotation of OAuth credentials, the management key or other p
 **The lesson.** Give a reviewer a pre-masked config dump, never the raw `config.yaml`, `.env` or
 `auths/` (session record). The tooling follows the same rule: `fleetctl` removes secret paths,
 prints only allowlisted values and compares keys by per-run tags (section 2.1), the watchdog's
-auth report prints metadata only, and the failover log holds no bodies, URLs or keys.
+auth report prints account emails and token metadata such as expiry and refresh results but no
+token values ([README.md](README.md#oauth-health-and-reauthentication)), and the failover log
+holds no bodies, URLs or keys.
 
 **Where secrets may live.** In each host's `config.yaml`, `.env` and `auths/`; in T3's secret
 store for profile keys; in client key files (Will's `client.key`, the Codex token helper's key,
@@ -612,7 +630,7 @@ Nothing tracked by git holds one.
 | The hosts drifted without anyone deciding it | `fleetctl check`, `parity`, `fingerprint`, `health`; dated exceptions | `ops/fleetctl.py`, `ops/fleet/` | PRs #7 and #10; [FLEET.md](FLEET.md#fleet-contract) |
 | Parity raised a false credential warning | A credential whose only cooldowns are `model_not_supported` counts as healthy while it still serves an unrestricted model | `ops/fleetctl.py` | PR #10; [evidence/fleet4-activation-20261118/](evidence/fleet4-activation-20261118/README.md) |
 | With Will unreachable, the pooled Claude profile failed | Launcher failover from Will to the Mac for `claude_cliproxy` | `ops/claude_account_launcher.mjs`; T3 profile environment | PR #14; [README.md](README.md#host-failover-for-the-shared-pool) |
-| With Tailscale stopped, traffic could go to whatever holds 100.x | The primary is Will's tailnet name | T3 profile `CLIPROXY_BASE_URL` | [FLEET.md](FLEET.md#running-fleet) |
+| With Tailscale stopped, traffic could go to whatever holds 100.x | `claude_cliproxy`'s primary is Will's tailnet name; the Mac's `codex_cliproxy` and M1 still use the address (section 4) | T3 profile `CLIPROXY_BASE_URL` | [FLEET.md](FLEET.md#running-fleet) |
 | A dropped SYN made one Claude dial wait about 133 to 135 s | `net.ipv4.tcp_syn_retries: 2` (after the next recreate) | Both Compose files; Will's policy and verifier | PR #13; [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
 | A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
@@ -630,6 +648,11 @@ Nothing tracked by git holds one.
   exact one today: the Mac also serves the `camoff-astra` prefix and the NVIDIA models, and Will
   has an extra `kimi-ai` credential (dated exceptions, section 2.1). The design's optional wrapper
   (unit 10) is not built.
+- **The Mac's `codex_cliproxy` uses Will's raw address.** It still reaches Will at
+  `http://100.98.74.67:8317/v1` ([KIMI_ROUTING.md](KIMI_ROUTING.md)), not at the tailnet name, so
+  the section 2.6 reason for the name applies to it too: with Tailscale stopped on another network,
+  it would send requests, with its client key, in clear to whatever holds that address. Moving it
+  to the name is a separate live change for Andrew.
 - **Named Claude profiles.** They are fixed to one host by design (section 2.6). A cooldown on a
   named account is returned to the chat.
 - **M1.** It reaches Will only. The Mac is loopback-only, so it cannot be M1's fallback; M1's
@@ -657,13 +680,15 @@ Nothing tracked by git holds one.
   (section 1).
 - **A resolver that answers every name** defeats the tailnet-name protection; not tested
   (section 2.6).
-- **Failover never relieves a 429.** Quota belongs to the account.
+- **Failover never relieves a 429.** Quota belongs to the account and capacity to the provider,
+  and both hosts use the same accounts and providers.
 - **Each host learns a cap separately.** Cooldown state is not shared, so a capped account costs
   about one wasted call per host per window ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
 - **Nine dated exceptions**, due for review by December 2, 2026 (section 2.1).
 - **Will uses the flat legacy YAML layout** until the layout migration (design unit 7). The loaded
   view makes the two layouts comparable in the meantime.
-- **Old client keys overlap** until 2026-11-19 10:30 UTC.
+- **Old client keys overlap** until 2026-11-19 10:30 UTC, so sessions launched with an old key
+  keep working until then (section 2.9).
 - **No measurement of affinity with two or more eligible accounts** after the change.
 - **Deploys drop open streams**, because the idle gate does not work as designed (section 2.7).
 
@@ -716,7 +741,8 @@ text).
 - No timer may end a request after a connection exists; only the liveness watch may, when the
   host fails its probes and the request receives nothing.
 - Keep failover configured on `claude_cliproxy` across profile reruns
-  ([FLEET.md](FLEET.md#running-fleet)).
+  ([FLEET.md](FLEET.md#running-fleet)). To change only its two URLs, use `set_pool_fallback.mjs`,
+  which checks the profile's key against the hosts before it saves (section 2.6, The drill).
 
 **Enabling failover for another profile.**
 
