@@ -40,6 +40,18 @@ test("reapplying configuration is idempotent and preserves a custom direct label
   assert.deepEqual(second, first);
 });
 
+test("the pool keeps its own launch arguments, so Claude in Chrome stays on the direct profile", () => {
+  const chrome = { ...existing, claudeAgent: { ...existing.claudeAgent, config: { ...existing.claudeAgent.config, launchArgs: "--chrome" } } };
+  const created = poolProviders(chrome, options);
+  assert.equal(created.claude_cliproxy.config.launchArgs, "");
+  assert.equal(created.claude_cliproxy.config.homePath, "/existing/home");
+  assert.equal(created.claude_cliproxy.config.binaryPath, options.launcher);
+  assert.equal(created.claudeAgent.config.launchArgs, "--chrome");
+  assert.equal(poolProviders(created, options).claude_cliproxy.config.launchArgs, "");
+  created.claude_cliproxy.config.launchArgs = "--verbose";
+  assert.equal(poolProviders(created, options).claude_cliproxy.config.launchArgs, "--verbose");
+});
+
 test("refuses to overwrite another provider or accept an ambiguous endpoint", () => {
   for (const id of ["claudeAgent", "named", "codex"]) assert.throws(() => poolProviders(existing, { ...options, id }), /Refusing to replace/);
   for (const upstream of ["http://user:secret@localhost", "http://localhost/v1", "http://localhost?key=secret", "file:///host"]) {

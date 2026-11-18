@@ -34,7 +34,8 @@ export function poolProviders(providers, { id, label, upstream, fallback, launch
     claudeAgent: { ...direct, displayName: direct.displayName || "Claude - Direct login" },
     [id]: {
       driver: "claudeAgent", displayName: label, enabled: true,
-      config: { ...direct.config, binaryPath: launcher },
+      // Launch arguments such as --chrome belong to the direct profile; the pool keeps its own.
+      config: { ...direct.config, binaryPath: launcher, launchArgs: previous?.config?.launchArgs ?? "" },
       environment: [
         { name: "CLIPROXY_CLAUDE_ROUTE", value: "shared-pool", sensitive: false },
         { name: "CLIPROXY_ACCOUNT_PREFIX", value: "", sensitive: false },
