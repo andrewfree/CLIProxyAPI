@@ -20,7 +20,8 @@ const flush = async () => {
   for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
 };
 
-// `earlyMs` fires intervals slightly early, as real timers can relative to Date.now().
+// `earlyMs` fires intervals slightly early, as real timers can relative to the launcher's clock
+// (performance.now()), because the timer clock rounds to whole milliseconds.
 function fakeClock({ earlyMs = 0 } = {}) {
   let now = 0;
   let nextId = 0;
