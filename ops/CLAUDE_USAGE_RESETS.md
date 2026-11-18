@@ -59,6 +59,11 @@ python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --
 python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --yes
 ```
 
+For a conditional redemption, add `--min-fable-percent 99` to the claim.
+The claim checks the account profile and reads usage again before spending
+the grant. It refuses if the Fable limit is missing or below the threshold,
+even if an earlier watch already triggered. This check also applies to dry runs.
+
 `claim` refuses to run without `--yes` or `--dry-run`. Before sending, it does the following:
 
 1. It reads `/api/oauth/profile` and checks that the account email matches. The organization UUID comes from this profile.

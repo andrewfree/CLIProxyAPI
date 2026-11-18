@@ -147,6 +147,35 @@ class ClaimTest(unittest.TestCase):
         self.assertEqual(resets.request_id_for(self.state, EMAIL, "launch-2610-fable"), first)
         self.assertNotEqual(resets.request_id_for(self.state, EMAIL, "full-reset-2611"), first)
 
+    def test_threshold_guard_refuses_low_or_missing_fable_without_posting(self):
+        missing = usage_body()
+        missing["limits"] = missing["limits"][:1]
+        for body in (usage_body(fable=98), missing):
+            proxy = FakeProxy([(200, body)])
+            with self.subTest(body=body), self.assertRaisesRegex(resets.ResetError, "below required 99%"):
+                resets.claim(proxy, EMAIL, "launch-2610-fable", self.state, self.receipt,
+                             False, sleep=lambda _: None, min_fable_percent=99)
+            self.assertEqual(proxy.posts(), [])
+            self.assertFalse((self.state / "request-ids.json").exists())
+
+    def test_threshold_guard_accepts_99_and_100_and_records_precondition(self):
+        for percent in (99, 100):
+            proxy = FakeProxy([(200, usage_body(fable=percent)), (200, usage_body(fable=2))])
+            with self.subTest(percent=percent):
+                receipt = resets.claim(proxy, EMAIL, "launch-2610-fable", self.state, self.receipt,
+                                       False, sleep=lambda _: None, min_fable_percent=99)
+                self.assertEqual(len(proxy.posts()), 1)
+                self.assertEqual(receipt["min_fable_percent"], 99)
+                self.assertEqual(receipt["before"]["scoped"]["Fable"]["percent"], percent)
+
+    def test_threshold_guard_rejects_invalid_threshold_before_network(self):
+        proxy = FakeProxy([])
+        for percent in (-1, 101):
+            with self.subTest(percent=percent), self.assertRaisesRegex(resets.ResetError, "between 0 and 100"):
+                resets.claim(proxy, EMAIL, "launch-2610-fable", self.state, self.receipt,
+                             False, min_fable_percent=percent)
+        self.assertEqual(proxy.calls, [])
+
 
 class CliGuardTest(unittest.TestCase):
     def test_claim_requires_yes_or_dry_run(self):
