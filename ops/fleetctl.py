@@ -238,17 +238,46 @@ def registered_prefix(ids, forced):
     return ""
 
 
-def credential_health(item, now):
+def model_lookup_key(model, prefix):
+    model = model.strip()
+    if prefix:
+        model = model.removeprefix(prefix + "/").strip()
+    # Match the selector's case-insensitive lookup without the thinking suffix.
+    if model.endswith(")") and "(" in model:
+        model = model.rsplit("(", 1)[0].strip() or model
+    return model.lower()
+
+
+def model_restrictions_leave_route(cooldowns, ids, prefix):
+    if not cooldowns or prefix is None:
+        return False
+    restricted = set()
+    for row in cooldowns:
+        if row.get("scope") != "model" or row["reason"] != "model_not_supported":
+            return False
+        model = model_lookup_key(row.get("model_key") or "", prefix)
+        if not model:
+            return False
+        restricted.add(model)
+    served = {model_lookup_key(model, prefix) for model in ids}
+    return bool(served - restricted - {""})
+
+
+def credential_health(item, now, *, partial_model_restrictions=False):
     if item["disabled"] or item["status"] == "disabled":
         return "disabled"
     message = re.sub(r"[_-]+", " ", (item.get("status_message") or "").strip().lower())
-    if item.get("requires_sign_in") or HARD_CREDENTIAL_ERROR.search(message):
+    if (item.get("requires_sign_in") or item.get("next_action") == "sign_in"
+            or item.get("refresh_error") or HARD_CREDENTIAL_ERROR.search(message)):
+        return "error"
+    expires = item.get("access_token_expires_at")
+    if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) <= now:
         return "error"
     cooldowns = item.get("cooldowns") or []
     if any(row["reason"] in HARD_CREDENTIAL_REASONS for row in cooldowns):
         return "error"
     # Restored model restrictions can set the aggregate error status.
-    if cooldowns and all(row["reason"] == "model_not_supported" for row in cooldowns):
+    if partial_model_restrictions:
         return "ok"
     retry = item.get("next_retry_after")
     if item["unavailable"] and retry:
@@ -276,19 +305,21 @@ def credential_snapshot(api, config, nonce, now):
     for item in response["files"]:
         provider = item["provider"]
         disabled = item["disabled"] or item["status"] == "disabled"
-        health = credential_health(item, now)
-        counts[health] += 1
         label = item["label"]
         if not label:
             issues["P6/missing-label"] += 1
         account = tag(nonce, "account", provider, label)
         prefix = None
+        partial_model_restrictions = False
         if not disabled:
             # ID is accepted by the handler and avoids ambiguity from duplicate filenames.
             query = urlencode({"name": item["id"]})
             models, _ = api.get(V8 + "/credentials/models?" + query)
             ids = {model["id"] for model in models["models"]}
             prefix = registered_prefix(ids, config["force-model-prefix"])
+            partial_model_restrictions = model_restrictions_leave_route(
+                item.get("cooldowns") or [], ids, prefix
+            )
             if prefix is None:
                 issues["P6/unknown-prefix"] += 1
             if provider != "cursor":
@@ -300,6 +331,8 @@ def credential_snapshot(api, config, nonce, now):
                     catalog_scopes[model["id"], model.get("owned_by")] = "kimi-ai"
                 elif provider == "codex" and prefix == "camoff-astra" and model["id"].startswith("camoff-astra/"):
                     catalog_scopes[model["id"], model.get("owned_by")] = "camoff-astra"
+        health = credential_health(item, now, partial_model_restrictions=partial_model_restrictions)
+        counts[health] += 1
         scope = "kimi-ai" if provider == "kimi-ai" else "shared"
         is_camoff = provider == "codex" and prefix == "camoff-astra"
         prefix_kind = "camoff-astra" if is_camoff else "unprefixed" if prefix == "" else "other"

@@ -382,6 +382,86 @@ class FleetCTLTest(unittest.TestCase):
         self.assertEqual(code, 0, report["drift"])
         self.assertEqual(report["hosts"]["will"]["credential_health"], {"ok": 2})
 
+    def test_credential_wide_failures_override_a_model_not_supported_cooldown(self):
+        mac, will = self.fixture()
+        now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+        retry = "2099-01-01T00:00:00Z"
+        item = dict(will.files[0], status="error", unavailable=True, next_retry_after=retry,
+                    status_message="provider-specific response", requires_sign_in=False,
+                    access_token_expires_at=retry, cooldowns=[
+                        {"scope": "model", "model_key": "retired-model",
+                         "reason": "model_not_supported", "retry_at": retry},
+                    ])
+        failures = (
+            {"access_token_expires_at": "2026-11-17T23:59:59Z"},
+            {"access_token_expires_at": "2026-11-18T00:00:00Z"},
+            {"refresh_error": {"code": "refresh_outcome_unknown", "message": "retry later"}},
+            {"next_action": "sign_in"},
+        )
+        with patch.object(fleet, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            for failure in failures:
+                with self.subTest(failure=failure):
+                    will.files[0] = dict(item, **failure)
+                    self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_model_not_supported_exemption_requires_model_scope_and_key(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        item = will.files[0]
+        item.update(status="error", unavailable=True, next_retry_after=retry)
+        for fields in ({"scope": "credential"},
+                       {"scope": "credential", "model_key": "retired-model"},
+                       {"model_key": "retired-model"},
+                       {"scope": "model"},
+                       {"scope": "model", "model_key": "  "}):
+            with self.subTest(fields=fields):
+                item["cooldowns"] = [dict(fields, reason="model_not_supported", retry_at=retry)]
+                self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_model_not_supported_exemption_requires_a_served_model_without_a_restriction(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        item = will.files[0]
+        item.update(status="error", unavailable=True, next_retry_after=retry,
+                    access_token_expires_at=retry, refresh_error={}, next_action="retry")
+        unsupported = {"scope": "model", "reason": "model_not_supported", "retry_at": retry}
+        item["cooldowns"] = [dict(unsupported, model_key="gpt-fixture")]
+        for ids in (("gpt-fixture", "gpt-second", "gpt-third"), ("provider/gpt-fixture",)):
+            with self.subTest(ids=ids):
+                will.models[item["id"]] = model_rows("openai", *ids)
+                report, code = self.report(mac, will)
+                self.assertEqual((code, report["drift"]), (0, []))
+                self.assertEqual(report["hosts"]["will"]["credential_health"], {"ok": 2})
+
+        # The optional prefix adds route IDs, but it adds no underlying models.
+        models = model_rows("openai", "gpt-fixture", "gpt-second",
+                            "camoff-astra/gpt-fixture", "camoff-astra/gpt-second")
+        mac.models[mac.files[0]["id"]] = will.models[item["id"]] = models
+        item["cooldowns"] = [dict(unsupported, model_key=" GPT-FIXTURE(high) "),
+                             dict(unsupported, model_key="camoff-astra/gpt-second")]
+        with self.subTest(catalog_size=len(models)):
+            self.assert_drift(mac, will, "P7/credential-error")
+
+        for models in ([], model_rows("openai", ""),
+                       model_rows("openai", "gpt-fixture", "a/gpt-fixture", "b/gpt-fixture")):
+            with self.subTest(catalog_size=len(models)):
+                will.models[item["id"]] = models
+                self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_partial_model_not_supported_cooldowns_do_not_hide_a_transient_error(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        item = will.files[0]
+        will.models[item["id"]] = model_rows("openai", "gpt-fixture", "gpt-second", "gpt-third")
+        item.update(status="error", unavailable=True, next_retry_after=retry, cooldowns=[
+            {"scope": "model", "model_key": "gpt-fixture",
+             "reason": "model_not_supported", "retry_at": retry},
+            {"scope": "model", "model_key": "gpt-second",
+             "reason": "transient_error", "retry_at": retry},
+        ])
+        self.assert_drift(mac, will, "P7/credential-error")
+
     def test_other_failures_still_cause_drift_with_a_model_not_supported_cooldown(self):
         mac, will = self.fixture()
         retry = "2099-01-01T00:00:00Z"
