@@ -239,7 +239,7 @@ async function settledProcesses(text) {
   return processesMentioning(text);
 }
 
-for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+for (const name of ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"]) {
   test(`${name} stops the launcher and its stub, removes the temporary directory and exits 128 + ${os.constants.signals[name]}`, async (t) => {
     const hanging = await hangingProxy(t);
     const tmp = tempDir(t, "drill-tmp-");
@@ -317,4 +317,17 @@ test("a deadline beyond the timer limit is clamped instead of firing at once", a
   assert.equal(code, 0, stderr);
   assert.deepEqual(lines.map((line) => [line.status, line.host]), [[200, "primary"]]);
   assert.doesNotMatch(stderr, /TimeoutOverflowWarning/);
+});
+
+test("aborting a key command stops what it started and rejects with the abort reason", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "drill-keycmd-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const command = path.join(dir, "slow-key");
+  // The descendant keeps stdout open; only a process-group kill ends the wait early.
+  fs.writeFileSync(command, "#!/bin/sh\nsleep 30 &\nwait\necho never\n", { mode: 0o700 });
+  const controller = new AbortController();
+  const started = Date.now();
+  setTimeout(() => controller.abort(new Error("stopped for the test")), 300);
+  await assert.rejects(resolveKey({ keyCommand: command, env: process.env, signal: controller.signal }), /stopped for the test/);
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
 });

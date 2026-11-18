@@ -56,13 +56,21 @@ export function splitPrimaries(values) {
 async function runKeyCommand(command, label, env, signal) {
   const chunks = [];
   let code = null;
+  let onAbort = null;
   try {
-    const child = spawn(command, [], { stdio: ["ignore", "pipe", "inherit"], env, signal });
+    // Its own process group, so an abort also stops anything the command started.
+    const child = spawn(command, [], { stdio: ["ignore", "pipe", "inherit"], env, detached: true });
+    onAbort = () => { try { process.kill(-child.pid, "SIGKILL"); } catch {} };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk) => chunks.push(chunk));
     [code] = await once(child, "close");
   } catch {
-    // A command that cannot start, or is stopped by a signal, is reported below like one that fails.
+    // A command that cannot start is reported below like one that fails.
+  } finally {
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
+  if (signal?.aborted) throw signal.reason;
   if (code !== 0) throw new Error(`${label} failed.`);
   const key = Buffer.concat(chunks).toString("utf8").trim();
   if (!key) throw new Error(`${label} printed no key.`);
@@ -199,7 +207,7 @@ export async function runDrill({
 
 // setTimeout holds at most 2^31 - 1 ms; a longer delay fires at once.
 export const maxDeadlineSeconds = 2_147_483;
-const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
+const stopSignals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
 
 const usage = `Usage: claude_failover_drill.mjs --primary <origin>[,<origin>...] [--primary <origin>]...
   [--fallback <origin>] [--launcher <path>] [--model <id>] [--key-command <path>] [--deadline-seconds <n>]

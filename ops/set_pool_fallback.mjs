@@ -73,7 +73,7 @@ export function poolFallbackEnvironment(environment, options) {
   if (!count("CLIPROXY_CLAUDE_ROUTE", "shared-pool")) throw new PrintableError("Refusing a profile that is not a shared Claude pool.");
   if (!count("ANTHROPIC_API_KEY")) throw new PrintableError("Refusing a pool profile without ANTHROPIC_API_KEY.");
   if (!count("CLIPROXY_BASE_URL")) throw new PrintableError("Refusing a pool profile without CLIPROXY_BASE_URL.");
-  for (const name of ["CLIPROXY_BASE_URL", "CLIPROXY_FALLBACK_URL"]) {
+  for (const name of ["CLIPROXY_CLAUDE_ROUTE", "ANTHROPIC_API_KEY", "CLIPROXY_BASE_URL", "CLIPROXY_FALLBACK_URL"]) {
     if (count(name) > 1) throw new PrintableError(`Refusing a pool profile with more than one ${name}.`);
   }
   return environment.filter((v) => v.name !== "CLIPROXY_FALLBACK_URL").flatMap((v) => {
@@ -86,6 +86,19 @@ export function poolFallbackEnvironment(environment, options) {
 
 // Compares the provider instances T3 saved with the edit that was sent. The report holds no secret
 // values and no tailnet name; `ok` is false when any check failed.
+const credentialName = /KEY|TOKEN|SECRET|PASSWORD/i;
+
+// A copy of T3 settings with every non-empty credential-like variable value replaced.
+export function withoutSecrets(settings) {
+  const copy = structuredClone(settings);
+  for (const instance of Object.values(copy?.providerInstances ?? {})) {
+    for (const variable of instance?.environment ?? []) {
+      if (credentialName.test(variable.name) && typeof variable.value === "string" && variable.value) variable.value = "<redacted>";
+    }
+  }
+  return copy;
+}
+
 export function savedReport({ id, before, after, environment }) {
   const profile = before[id];
   const saved = after[id];
@@ -101,7 +114,7 @@ export function savedReport({ id, before, after, environment }) {
       .map((v) => [v.name, maskHosts(v.value)])),
     apiKey: { sensitive: !!key?.sensitive, redacted: !!key?.valueRedacted, valueVisible: !!key?.value },
     environmentApplied: same(visible(saved?.environment), visible(environment)),
-    profileUnchanged: saved?.displayName === profile.displayName && saved?.enabled === profile.enabled &&
+    profileUnchanged: saved?.driver === profile.driver && saved?.displayName === profile.displayName && saved?.enabled === profile.enabled &&
       same(otherSecrets(saved?.environment), otherSecrets(profile.environment)),
     configUnchanged: same(saved?.config, profile.config),
     otherProfilesUnchanged: same(others(after), others(before)) && others(before).every((name) => same(after[name], before[name])),
@@ -154,7 +167,8 @@ async function main() {
     if (profile?.driver !== "claudeAgent") throw new PrintableError(`Refusing ${id}: it is not a claudeAgent profile.`);
     const environment = poolFallbackEnvironment(profile.environment ?? [], request);
     const stamp = new Date().toISOString().replace(/[:.]/g, "");
-    const backup = (name, value) => fs.writeFileSync(path.join(values["backup-dir"], `settings-${name}-${stamp}.json`), JSON.stringify(value, null, 2), { flag: "wx", mode: 0o600 });
+    // Backups never hold a credential value, even one T3 failed to flag or redact.
+    const backup = (name, value) => fs.writeFileSync(path.join(values["backup-dir"], `settings-${name}-${stamp}.json`), JSON.stringify(withoutSecrets(value), null, 2), { flag: "wx", mode: 0o600 });
     backup("before", settings);
     await client.rpc("server.updateSettings", { patch: { providerInstances: { ...before, [id]: { ...profile, environment } } } });
     const { settings: after } = await client.rpc("server.getConfig");

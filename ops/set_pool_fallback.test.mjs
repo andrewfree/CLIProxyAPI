@@ -8,7 +8,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
-import { fallbackRequest, poolFallbackEnvironment, savedReport } from "./set_pool_fallback.mjs";
+import { fallbackRequest, poolFallbackEnvironment, savedReport, withoutSecrets } from "./set_pool_fallback.mjs";
 import { poolProviders } from "./configure_claude_pool.mjs";
 
 const tool = fileURLToPath(new URL("./set_pool_fallback.mjs", import.meta.url));
@@ -315,6 +315,34 @@ test("the CLI never prints a key T3 saved without its sensitive flag, or a tailn
   assert.deepEqual(report.environment, { CLIPROXY_CLAUDE_ROUTE: "shared-pool", CLIPROXY_BASE_URL: "http://will.<tailnet>.ts.net:8317" });
   assert.equal(report.apiKey.sensitive, false);
   assert.doesNotMatch(stdout + stderr, /fixture-key|tailabc123/);
+  const backups = fs.readdirSync(backupDir);
+  assert.equal(backups.length, 2);
+  for (const name of backups) assert.doesNotMatch(fs.readFileSync(path.join(backupDir, name), "utf8"), /fixture-key/, name);
+});
+
+test("duplicate key or route entries and a changed driver are refused or flagged", () => {
+  const base = [
+    { name: "CLIPROXY_CLAUDE_ROUTE", value: "shared-pool", sensitive: false },
+    { name: "CLIPROXY_BASE_URL", value: "http://127.0.0.1:8317", sensitive: false },
+    { name: "ANTHROPIC_API_KEY", value: "", sensitive: true, valueRedacted: true },
+  ];
+  const request = { primary: "http://127.0.0.1:8317", fallback: null, apiKey: "fixture-key" };
+  assert.throws(() => poolFallbackEnvironment([...base, { name: "ANTHROPIC_API_KEY", value: "x", sensitive: true }], request), /more than one ANTHROPIC_API_KEY/);
+  assert.throws(() => poolFallbackEnvironment([...base, { name: "CLIPROXY_CLAUDE_ROUTE", value: "account", sensitive: false }], request), /more than one CLIPROXY_CLAUDE_ROUTE/);
+  const profile = { driver: "claudeAgent", displayName: "pool", enabled: true, config: {}, environment: base };
+  const environment = poolFallbackEnvironment(base, request);
+  const after = { claude_cliproxy: { ...profile, driver: "codex", environment } };
+  assert.equal(savedReport({ id: "claude_cliproxy", before: { claude_cliproxy: profile }, after, environment }).report.profileUnchanged, false);
+});
+
+test("withoutSecrets replaces credential values and keeps everything else", () => {
+  const settings = { providerInstances: { p: { environment: [
+    { name: "ANTHROPIC_API_KEY", value: "fixture-key" }, { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "" },
+    { name: "CLIPROXY_BASE_URL", value: "http://127.0.0.1:8317" },
+  ] } } };
+  const safe = withoutSecrets(settings);
+  assert.deepEqual(safe.providerInstances.p.environment.map((v) => v.value), ["<redacted>", "", "http://127.0.0.1:8317"]);
+  assert.equal(settings.providerInstances.p.environment[0].value, "fixture-key", "the input is not changed");
 });
 
 test("a failed session revoke keeps the verification result", async (t) => {
