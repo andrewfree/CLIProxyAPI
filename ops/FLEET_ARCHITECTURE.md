@@ -59,10 +59,16 @@ Sources: profile list and hosts in [FLEET.md](FLEET.md#running-fleet); per-clien
 Three ideas explain most of the picture:
 
 1. **Two equal hosts, no shared state.** A request that may go to either host should get the same
-   provider, account and model decision on both ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 1).
-   Only token freshness and cooldown observations differ.
+   provider, account and model decision on both ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 1):
+   the same account for a named route, the same set of eligible accounts for the pool. Each host's
+   selector still places a pooled session by itself, and token freshness and cooldown observations
+   differ.
 2. **Decisions that affect the prompt cache are pinned to the conversation.** The account, the
    injected date and the host all stay fixed while a conversation runs, unless something fails.
+   Bindings and date pins are held in each host's memory, so a failover hands the conversation to
+   a host that has neither: with two or more eligible accounts, its first turn there can land on
+   another account and pay a cold cache write. That cost is why the launcher does not move a
+   conversation back and forth on a flapping link (section 2.6, Recovery).
 3. **Failover lives in the client's launcher, for one profile.** There is no new service and no
    daemon in the request path.
 
@@ -101,11 +107,13 @@ local IDs a restart, a watchdog repair or a reboot cannot silently select a new 
 host's `.env`, which only an activation writes ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 2).
 
 **Why the Mac goes first on every release.** The Mac is the fallback, so a bad release costs only
-fallback capacity. Fleet.2 showed this: it passed health checks, failed inference on the Mac, and
-was rolled back before Will was touched ([FLEET.md](FLEET.md#running-fleet),
-[FLEET_DESIGN.md](FLEET_DESIGN.md) section 9). The same incident is why activation needs a live
-inference gate and not only `/healthz`
+fallback capacity. `v8.0.66-fleet.2` (November 14) showed this: it passed health checks, failed
+inference on the Mac, and was rolled back before Will was touched
+([FLEET.md](FLEET.md#running-fleet), [FLEET_DESIGN.md](FLEET_DESIGN.md) section 9). The same
+incident is why activation needs a live inference gate and not only `/healthz`
 ([evidence/fleet4-activation-20261118/README.md](evidence/fleet4-activation-20261118/README.md)).
+Since failover went live there is a second reason: while Will is recreated, `claude_cliproxy`
+fails over to a Mac that has already passed ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 9).
 A host that already passed is never rolled back automatically, because while the other host is
 failing it is the only healthy one.
 
@@ -142,7 +150,9 @@ error on Will. It was a Codex account with a `model_not_supported` cooldown for 
 made the account summary read unavailable although the selector still served the account for every
 other model
 ([evidence/fleet4-activation-20261118/README.md](evidence/fleet4-activation-20261118/README.md)).
-PR #10 made those cooldowns neutral, because a check that raises false warnings stops being read.
+PR #10 treats such a credential as healthy when its only cooldowns are `model_not_supported` and
+it still serves at least one unrestricted model, because a check that raises false warnings stops
+being read.
 One limit remains: the management API omits per-credential alias attributes, so parity cannot
 account for those overrides ([FLEET.md](FLEET.md#fleet-contract)).
 
@@ -161,10 +171,13 @@ It has two modes:
 - **Shared pool** (`shared-pool`). The launcher forwards unprefixed model IDs, and CLIProxy picks
   any eligible account.
 
-**Why a per-session launcher and not a config switch.** Claude Code takes one base URL and cannot
-express "this account only". The launcher adds that without a long-running service or a fixed
-port, and each session carries its own choice in its launch environment. A running session keeps
-that environment, which is why every profile change applies to new sessions only.
+**Why a per-session launcher and not a config switch.** CLIProxy pins an account by model prefix
+(`t3-gmail/claude-...`), but Claude Code and T3 work with ordinary model IDs. The launcher adds
+the prefix to each request and strips it from the model list, so the session sees ordinary names
+while CLIProxy sees a pinned route ([README.md](README.md#choosing-a-claude-account-in-t3-code)).
+It needs no long-running service or fixed port, and each session carries its own choice in its
+launch environment. A running session keeps that environment, which is why every profile change
+applies to new sessions only.
 
 **Why the launcher never picks another account.** A named route exists because a specific
 subscription must pay for the work. The rule is stated in [FLEET.md](FLEET.md#running-fleet):
@@ -174,10 +187,11 @@ action. In pool mode the launcher rejects account-qualified models, and it rejec
 combined with pool mode, so the two modes cannot blur.
 
 **Why the launcher accepts only three routes.** It accepts `POST /v1/messages`,
-`POST /v1/messages/count_tokens` and `GET /v1/models`, and rejects everything else before it
-reaches the pool ([README.md](README.md#choosing-a-claude-account-in-t3-code)). A small surface
-keeps the replay rules in section 2.5 complete: every request the launcher can see is covered by
-one of them.
+`POST /v1/messages/count_tokens` and `GET /v1/models`, the requests on which it can enforce the
+account route, and rejects everything else before it reaches the pool (commit `b76e5003`, October
+1; [README.md](README.md#choosing-a-claude-account-in-t3-code)). The same small surface later kept
+the failover replay rules in section 2.6 complete: every request the launcher can see is either a
+message or one of two read-only calls.
 
 **Why CLIProxy, not the launcher, retries across accounts.** The proxy knows quota, cooldowns and
 eligibility; the launcher knows none of that. The launcher therefore does not retry requests. It
@@ -208,9 +222,13 @@ Pacific on November 18
   quota-aware selector instead of inheriting its parent's account, so subagent load is still
   balanced by quota.
 - `session-affinity-ttl: 1h`. A binding idles out after an hour; every hit refreshes it.
-- `session-affinity-rebind-on: any`. The reviewers split between `any` and `quota`. `any` was kept
-  because with the transient cooldown disabled both modes cost one cold write after a transient
-  error, and `any` stays stable if that cooldown is ever made non-negative.
+- `session-affinity-rebind-on: any`. When a bound account becomes unavailable, `any` moves the
+  binding to the next account chosen; `quota` moves it only for a quota or auth block and
+  otherwise serves that request elsewhere without rebinding
+  (`shouldPreserveBindingWhenUnavailable` in `sdk/cliproxy/auth/selector.go`). The reviewers split
+  between `any` and `quota`. `any` was kept because with the transient cooldown disabled both
+  modes cost one cold write after a transient error, and `any` stays stable if that cooldown is
+  ever made non-negative.
 - `strategy: quota-aware`. Unchanged. Named routes, authoritative cooldowns and model eligibility
   still override affinity; affinity only chooses among accounts the route already allows.
 
@@ -224,7 +242,8 @@ synthetic result on one provider does not transfer to another provider's cache.
 **How to measure it.** `logs/main.log` truncates session IDs to eight characters, so per-stream
 switch counts cannot come from those lines. Use the decision mix: hits and new bindings against
 reselections and failovers without rebinding, per credential. Use request logs for stream-level
-continuity. The first hour on the Mac had 101 decisions: 5 new bindings, 96 hits, no reselection
+continuity. The first hour on the Mac had 101 decisions: 5 new bindings, 96 hits, no reselection.
+Only one Claude account was eligible then, so this shows continuity, not balancing
 ([evidence/cache-affinity-20261118/README.md](evidence/cache-affinity-20261118/README.md)).
 
 **What it costs.** Every change to any of the five routing fields replaces the selector and drops
@@ -250,9 +269,10 @@ record). Two faults followed:
 **The fixes.**
 
 - **Release `v8.0.66-fleet.4`** (PR #5, source `4a1d49c3`). The date pin is keyed to a hash of the
-  client's `X-Claude-Code-Session-Id` and shared by that session's subagents. A fork or subagent
-  therefore keeps the parent's date and the parent's cached prefix. This is the release's only
-  runtime change from fleet.3.
+  client's `X-Claude-Code-Session-Id` and shared by that session's subagents. A subagent or fork
+  therefore sends the parent's date, so its prefix bytes match the parent's. It reads the parent's
+  cache only on the parent's account. This is the release's only runtime change from
+  `v8.0.66-fleet.3`.
 - **`claude-header-defaults.timezone: America/Los_Angeles`** on both hosts. This is config only,
   not part of the release manifest; `fleetctl parity` compares it, and
   [fleet/paths.json](fleet/paths.json) lists it as a printable value.
@@ -261,13 +281,13 @@ record). Two faults followed:
 through each host: two pool turns, a named `t3-gmail` turn and a subagent turn. Every request
 carried the same injected date (2026-11-18, the Los Angeles date), and the second turn read 37,574
 cached tokens. Each host's first fleet.4 turn read exactly the 37,545 tokens that the Mac's
-fleet.3 baseline had written, so the cached prefix survived the release switch
+`v8.0.66-fleet.3` baseline had written, so the cached prefix survived the release switch
 ([evidence/fleet4-activation-20261118/README.md](evidence/fleet4-activation-20261118/README.md)).
 
-**Why the two pins differ on subagents.** Account affinity gives each subagent its own binding
-(section 2.3); the date pin shares one date across the session. The date must match for a fork to
-reuse the parent's prefix. The account is a separate decision, made by the quota-aware selector
-for each new binding.
+**Why the two pins differ on subagents.** The date pin is shared so that a subagent's prefix can
+match the parent's byte for byte. The account is chosen per subagent (section 2.3) so that
+subagent load is balanced by quota. The cost: on a day with two or more eligible accounts, a
+subagent placed on another account writes its own cache. That cost has not been measured.
 
 ### 2.5 Retry policy, cooldown policy and the no-retry header
 
@@ -275,8 +295,9 @@ Three layers can retry a Claude request: CLIProxy (across accounts and rounds), 
 own HTTP retries) and the user. The settings are chosen so the layers cover different waits and do
 not fight.
 
-**CLIProxy's values** (PR #4, pinned in [fleet-release.json](fleet-release.json) under
-`runtime_policy`):
+**CLIProxy's values** (all pinned in [fleet-release.json](fleet-release.json) under
+`runtime_policy`; PR #4 gave the Mac the first two and pinned the retry counts, and the quota cap
+dates from `v8.0.27-fleet.3` on October 15):
 
 | Setting | Value | Why |
 | --- | --- | --- |
@@ -298,8 +319,8 @@ more ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
 
 **Why long `Retry-After` values are hidden.** The fleet omits `Retry-After` when the wait exceeds
 one minute, while keeping HTTP 429 and the full reset time in the JSON body. This stops Codex CLI
-from sleeping for days on that header ([FLEET.md](FLEET.md#running-fleet), the fleet.2 and fleet.3
-records of October 15).
+from sleeping for days on that header ([FLEET.md](FLEET.md#running-fleet), the October 15
+`v8.0.27-fleet.2` and `v8.0.27-fleet.3` records).
 
 **Why the launcher adds `x-should-retry: false`** (PR #6). With no `Retry-After`, Claude Code kept
 retrying a local cooldown 429 for minutes although the account would not recover for much longer.
@@ -307,11 +328,12 @@ The launcher now adds `x-should-retry: false` when a 429 has no `Retry-After` an
 (at most 64 KiB) reports a cooldown reset more than 180 seconds away
 ([README.md](README.md#choosing-a-claude-account-in-t3-code)).
 
-**Why 180 seconds.** Claude Code's own retries span about 160 seconds and CLIProxy holds a request
-for up to 75 seconds, so a cooldown of up to three minutes can still be absorbed without the user
-noticing. Only a longer one should end the turn (comment at the top of
-`ops/claude_account_launcher.mjs`). The boundary is deliberately not lower: ending a turn that
-would have succeeded in two minutes is worse than waiting.
+**Why 180 seconds.** Claude Code's own retries span about 160 seconds, and CLIProxy waits up to 75
+seconds per round for a cooldown that ends within that time, so a cooldown of up to three minutes
+can still be absorbed without the user noticing. Only a longer one should end the turn (comment at
+the top of `ops/claude_account_launcher.mjs`). The boundary started at 60 seconds and was raised
+to 180 so that cooldowns Claude Code's own retries can absorb still get retried (commit
+`684a7f69`).
 
 **What failover does not do.** A 429 is account quota. Both hosts hold the same accounts, so the
 other host would answer the same way, and failover never relieves a 429
@@ -365,6 +387,11 @@ could receive the traffic in clear
 ([FLEET.md](FLEET.md#running-fleet), design question 3). Tailscale was not stopped to test this;
 the check was a resolver comparison.
 
+The name does not help on a network whose resolver answers every name, as some captive portals do:
+a session already running would send requests, with the client key, in clear to that address, and
+the launcher would fail over only after a failed connect or three failed liveness probes, because
+it delivers any HTTP answer from the primary as is. This case was not tested.
+
 #### Why health means `/healthz` returning 200 with `status: ok`
 
 A TCP accept proves nothing. Tailscale Serve can accept and close when its backend is down, and a
@@ -379,11 +406,14 @@ a message that is already running spends capped weekly quota twice.
 
 | Situation | Action | Reason |
 | --- | --- | --- |
-| Refused, name does not resolve, or no connection within 3 s | Replay any request on the fallback | Nothing reached the primary, so a replay is always safe. The 3 s guard covers only the connect; nothing times out after a connection exists, in line with the root `AGENTS.md` timeout rule. |
+| Refused, name does not resolve, or no connection within 3 s | Replay any request on the fallback, and take the primary out of service for new requests until it recovers | Nothing reached the primary, so a replay is always safe. The 3 s guard covers only the lookup and connect. After a connection exists, no timer ends a request, in line with the root `AGENTS.md` timeout rule; only the liveness watch can, and only when the host also fails its health probes. |
 | 5xx whose body carries a dial error | Replay on the fallback, then hold new requests on the fallback | CLIProxy's last attempt could not connect to its upstream. Will's `/healthz` stays green when only its egress is down, so a probe cannot detect or clear this state. |
-| Connection closed with zero response bytes | Probe once. `count_tokens` and the model list replay. A message gets a retryable 502. | The two read-only calls are safe to repeat. A message may already be generating, so the launcher does not replay it. Claude Code's retry takes the fallback if the probe failed. |
+| Connection closed with zero response bytes | Probe once; a failed probe takes the primary out of service. `count_tokens` and the model list replay. A message gets a retryable 502. | The two read-only calls are safe to repeat. A message may already be generating, so the launcher does not replay it. Claude Code's retry takes the fallback if the probe failed. |
 | Stream breaks after it started | Destroy the client response, no replay | Part of the answer was delivered and paid for; a replay would generate it again. |
-| 401, 403, 429, 529, other 5xx | Pass through unchanged | Both hosts hold the same keys and accounts, so the fallback would answer the same way. |
+| 401, 403, 429, 529, other 5xx | Pass through unchanged | A non-dial 5xx or a 529 means CLIProxy reached its upstream or failed after connecting, so the message may already have run. The fallback reaches the same providers with the same keys and accounts, so it would usually answer the same way. |
+
+A failed health probe at launcher startup also takes the primary out of service, so a session
+started while Will is down begins on the fallback.
 
 **The egress hold.** After a dial-error replay, new requests stay on the fallback for 120 seconds.
 A repeat after the hold ends doubles the next one, up to 600 seconds. A 2xx or 3xx from the
@@ -404,12 +434,15 @@ either, because its host's probes pass.
 seconds after it left. Two probes and a floor keep a flapping link from bouncing sessions between
 hosts.
 
-**One failover per request.** A request moves at most once. A request that has already moved gets
-a 502, so a double outage cannot make a request ping-pong.
+**One failover per request.** A request moves at most once. A request that starts on the fallback
+while the primary is held or out of service tries the primary once if the fallback cannot be
+reached. A request that has already moved gets a 502, so a double outage cannot make a request
+ping-pong.
 
-**Observability.** Every proxied response carries `X-CLIProxy-Host: primary` or `fallback`, and
-each host transition is one JSON line in `ops/runtime/fleet/failover.jsonl`, with no bodies, URLs
-or keys.
+**Observability.** Every response through a launcher that has a fallback carries
+`X-CLIProxy-Host: primary` or `fallback` (other profiles' launchers send no such header), and each
+host transition is one JSON line in `ops/runtime/fleet/failover.jsonl`, with no bodies, URLs or
+keys.
 
 #### What the reviews changed
 
@@ -431,10 +464,11 @@ PR #14 went through four review rounds by Claude Fable 5.2 and Claude Opus 5.5
 - **`Date.now` replaced by a monotonic clock.** A wall-clock step can no longer shift a hold, a
   recovery or a liveness window.
 
-**Why the earlier attempt was not merged.** Commit `3d88c013` matched dial errors only where a
-colon directly followed `dial tcp`. Will's real errors read
-`dial tcp <address>: connect: connection refused` and `... i/o timeout`, so that matcher would
-have missed them. The real bodies were captured in a staging run (design unit 0(b)) and are the
+**What the earlier attempt would have missed.** Commit `3d88c013` matched `dial tcp` only when a
+colon followed it directly. That catches `dial tcp: lookup ...` but not the refused, `i/o timeout`
+and dropped-SYN (`connect: connection timed out`) bodies the pinned image returned in the unit
+0(b) staging container, such as `dial tcp <address>: connect: connection refused`. Its
+`dial upstream:` alternative did catch the first-party dial path. Those captured bodies are the
 fixtures at the top of `ops/claude_account_failover.test.mjs`. The lesson: classify upstream
 errors from captured responses, not from a guess at their format.
 
@@ -443,8 +477,8 @@ errors from captured responses, not from a guess at their format.
 A dial-error 5xx proves only that CLIProxy's last retry attempt did not connect. If Will's egress
 fails in the middle of a request, an earlier attempt in the same retry round can have reached the
 provider, and the replay then runs the message a second time. This was accepted because Claude
-Code would resend the message after that 5xx anyway; the replay sends that resend to the host that
-can serve it. It adds a run only when Claude Code had no retries left
+Code would usually resend the message after that 5xx anyway; the replay sends that resend to the
+host that can serve it. It adds a run only when Claude Code had no retries left
 ([README.md](README.md#host-failover-for-the-shared-pool)).
 
 #### The drill
@@ -454,6 +488,10 @@ closed port, an unresolvable name and a rejected TEST-NET address, each in under
 for two blackholed addresses in 3.4 seconds, which is the probe bound. It answered from the
 primary for Will by name. Tailscale and Will were not touched
 ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
+
+The drill covered only pre-connect failures on a replayable call. The dial-error 5xx and egress
+hold, the zero-byte reset and the liveness watch were not exercised live; they rest on the node
+tests in `ops/claude_account_failover.test.mjs`.
 
 ### 2.7 The SYN-retry bound
 
@@ -467,7 +505,12 @@ prechecks 0(b)).
 
 **The fix.** Both Compose files set `net.ipv4.tcp_syn_retries: 2` (PR #13), which makes a dial
 fail in about 7 seconds. It is a kernel setting scoped to the container's network namespace, it
-acts only before a connection exists, and it needs no Go change.
+acts only before a connection exists, and it needs no Go change. It applies to every TCP connect
+the container makes, including OAuth refreshes and every provider, so on a lossy network a connect
+that needed a third SYN retransmission now fails and is retried by CLIProxy. At 3 a dial takes
+about 20 seconds ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechecks 0(b)), which at
+up to 12 dials per request (next paragraph) would be about four minutes. The repository records
+measurements at 2 and 3 only, and no reason for not going lower.
 
 **What it does not fix.** Dial errors are retried without cooldown, so one request can dial once
 per account per round. With three accounts and `request-retry: 3` the worst case at 2 is still
@@ -493,12 +536,14 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | `~/cliproxy` on Will | A hand-copied subset of the tree, not a git checkout. | Files are replaced by copying, with the previous versions backed up under `ops/runtime/`. Hashes are the only link to a commit. |
 | `ops/runtime/` on each host | Private state, ignored by git (`.gitignore`): backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it; copy a receipt into `ops/evidence/` only after checking it. |
 | `ops/evidence/` | Sanitized, tracked records of activations and measurements. | This is where "why do we believe this" lives. |
-| `config.yaml`, `.env`, `auths/` | Per host, never tracked, never copied between hosts. | The only place secrets live. |
+| `config.yaml`, `.env`, `auths/` | Per host, never tracked, never copied between hosts. | The server's secrets; client-side copies are listed in section 2.9. |
 | `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 18. | See below. |
 
 **Why the Mac's checkout is a risk (design unit 2b).** On the Mac the working tree is the deployed
-location, so a merge or a pull is a deploy, live within the watchdog's 120-second cycle and
-before any approval ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 9). The design's answer is to run
+location, so a pull, a branch checkout or an uncommitted edit in that tree is a deploy, before any
+approval: a launcher change reaches the next new T3 session, and a watchdog or archiver change
+runs within 120 or 300 seconds ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 2 and 9). A merge on
+GitHub changes nothing on the Mac until it is pulled. The design's answer is to run
 both hosts from a shipped bundle at a recorded commit, outside the checkout. That is unit 2b, and
 it is not done. Until it is, the interim rule in [FLEET.md](FLEET.md#fleet-contract) applies:
 changing the watchdog, the log archiver, the Claude launcher, their plists or the Compose file in
@@ -526,8 +571,9 @@ a 1,024 MB cap with no archive, which is why the log cap is a host-specific path
 
 ### 2.9 Keys and secrets
 
-**What went wrong.** During the November reviews, review agents printed CLIProxy client keys and
-provider keys into their own transcripts ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
+**What went wrong.** During the November reviews, review agents printed CLIProxy client keys
+([FLEET.md](FLEET.md#operations-on-november-18-2026)) and provider keys (session record) into
+their own transcripts.
 
 **The response, all on November 18:**
 
@@ -538,14 +584,18 @@ provider keys into their own transcripts ([FLEET.md](FLEET.md#operations-on-nove
 - The NVIDIA key (Mac only) was rotated and the old one deleted. The new key expires on
   2027-11-18.
 
+FLEET.md records no rotation of OAuth credentials, the management key or other provider keys.
+
 **The lesson.** Give a reviewer a pre-masked config dump, never the raw `config.yaml`, `.env` or
 `auths/` (session record). The tooling follows the same rule: `fleetctl` removes secret paths,
 prints only allowlisted values and compares keys by per-run tags (section 2.1), the watchdog's
 auth report prints metadata only, and the failover log holds no bodies, URLs or keys.
 
-**Where secrets may live.** Only in each host's `config.yaml`, `.env` and `auths/`, in T3's secret
-store for profile keys, and in mode-0600 files under `ops/runtime/`. Nothing tracked by git holds
-one.
+**Where secrets may live.** In each host's `config.yaml`, `.env` and `auths/`; in T3's secret
+store for profile keys; in client key files (Will's `client.key`, the Codex token helper's key,
+M1's Codex and OpenCode key files); in `~/.config/nvidia/api.env` and CodexBar on the Mac; and in
+mode-0600 files under `ops/runtime/` ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
+Nothing tracked by git holds one.
 
 ## 3. Problem, fix, location, evidence
 
@@ -555,17 +605,17 @@ one.
 | The injected date changed mid-conversation and rewrote cached history | Date pin keyed to a hash of `X-Claude-Code-Session-Id`, shared by subagents | Release `v8.0.66-fleet.4`, source `4a1d49c3` | PR #5; [evidence/fleet4-activation-20261118/](evidence/fleet4-activation-20261118/README.md) |
 | The injected date was a day ahead from 08:00 to 24:00 Pacific | `claude-header-defaults.timezone: America/Los_Angeles` | Host `config.yaml` on both hosts | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Claude Code retried local cooldown 429s for minutes | `x-should-retry: false` when the reset is more than 180 s away and there is no `Retry-After` | `ops/claude_account_launcher.mjs` | PR #6; [README.md](README.md#choosing-a-claude-account-in-t3-code) |
-| The Mac returned cooldown 429s at once; one transient error rebound every session on an account | `max-retry-interval: 75`, `transient-error-cooldown-seconds: -1` on both hosts | Host `config.yaml`; `fleet-release.json` `runtime_policy` | PR #4; [FLEET_DESIGN.md](FLEET_DESIGN.md) section 5 |
+| The Mac returned cooldown 429s at once; with affinity on, a transient cooldown would rebind every session on the benched account | `max-retry-interval: 75`, `transient-error-cooldown-seconds: -1` on both hosts | Host `config.yaml`; `fleet-release.json` `runtime_policy` | PR #4; [FLEET_DESIGN.md](FLEET_DESIGN.md) section 5 |
 | The hosts drifted without anyone deciding it | `fleetctl check`, `parity`, `fingerprint`, `health`; dated exceptions | `ops/fleetctl.py`, `ops/fleet/` | PRs #7 and #10; [FLEET.md](FLEET.md#fleet-contract) |
-| Parity raised a false credential warning | `model_not_supported` cooldowns are neutral | `ops/fleetctl.py` | PR #10; [evidence/fleet4-activation-20261118/](evidence/fleet4-activation-20261118/README.md) |
+| Parity raised a false credential warning | A credential whose only cooldowns are `model_not_supported` counts as healthy while it still serves an unrestricted model | `ops/fleetctl.py` | PR #10; [evidence/fleet4-activation-20261118/](evidence/fleet4-activation-20261118/README.md) |
 | With Will unreachable, the pooled Claude profile failed | Launcher failover from Will to the Mac for `claude_cliproxy` | `ops/claude_account_launcher.mjs`; T3 profile environment | PR #14; [README.md](README.md#host-failover-for-the-shared-pool) |
 | With Tailscale stopped, traffic could go to whatever holds 100.x | The primary is Will's tailnet name | T3 profile `CLIPROXY_BASE_URL` | [FLEET.md](FLEET.md#running-fleet) |
 | A dropped SYN made one Claude dial wait about 133 to 135 s | `net.ipv4.tcp_syn_retries: 2` (after the next recreate) | Both Compose files; Will's policy and verifier | PR #13; [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
-| A release passed health checks and failed inference (fleet.2) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
+| A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
 | Codex CLI slept for days on a long `Retry-After` | The header is omitted above one minute | Fleet release (server) | [FLEET.md](FLEET.md#running-fleet) |
 | The log archive filled and the Mac nearly ran out of disk | Archive moved to Innie | `ops/com.rever.cliproxy-log-archive.plist` | [README.md](README.md#log-retention) |
-| Review agents printed keys into transcripts | All keys rotated; reviewers get masked dumps only | Host config; working practice | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| Review agents printed keys into transcripts | Client keys, the Z.ai key and the NVIDIA key rotated; reviewers get masked dumps only | Host config; working practice | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 
 ## 4. What is still manual or accepted
 
@@ -573,24 +623,37 @@ one.
 
 - **Codex-family profiles** (`codex_cliproxy`, `codex_cliproxy_mac`, `codex_kimi_mac`). Codex CLI
   has one `base_url`, and no launcher sits in front of it. When Will is unreachable, selecting the
-  `_mac` profile is a manual action. Parity is what makes that profile an exact substitute. The
-  design's optional wrapper (unit 10) is not built.
+  `_mac` profile is a manual action. Parity keeps that profile a close substitute, but not an
+  exact one today: the Mac also serves the `camoff-astra` prefix and the NVIDIA models, and Will
+  has an extra `kimi-ai` credential (dated exceptions, section 2.1). The design's optional wrapper
+  (unit 10) is not built.
 - **Named Claude profiles.** They are fixed to one host by design (section 2.6). A cooldown on a
   named account is returned to the chat.
 - **M1.** It reaches Will only. The Mac is loopback-only, so it cannot be M1's fallback; M1's
-  fallback is its direct subscriptions.
+  fallback is its direct subscriptions. Its profile still uses Will's raw tailnet address
+  ([FLEET.md](FLEET.md#running-fleet)), so the reason for the tailnet name in section 2.6 applies
+  to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
 - **Health notification.** The design's scheduled health and parity job (unit 5) is not built, so
-  nothing tells Andrew when Will's egress is down. Run `fleetctl health` and `parity` by hand.
+  nothing tells Andrew when Will's egress is down. `fleetctl health` cannot tell either, because
+  `/healthz` stays green when only egress is down. Signs of an egress outage are `egress_hold`
+  lines in `ops/runtime/fleet/failover.jsonl` on the Mac and dial-error 5xx answers from Will.
+  For a host that is down or drifted, run `fleetctl health` and `parity` by hand.
 - **Shipping ops files.** `fleetctl ship` is deferred. The Mac runs from its checkout and Will
   from a copied tree (section 2.8).
 
 **Accepted:**
 
 - **A message can run twice** if Will's egress fails in the middle of a request (section 2.6).
-- **Egress-down delay.** About 133 to 135 seconds per dropped-SYN dial until each container is
-  recreated, and about 86 seconds worst case afterwards (section 2.7).
+- **Egress-down delay.** Until each container is recreated, a dropped-SYN dial waits about 133 to
+  135 seconds, and one request can make up to 12 such dials with three credentials and
+  `request-retry: 3`. After the recreate a dial fails in about 7 seconds, about 86 seconds per
+  request in the worst case (section 2.7).
+- **A failover can cost a cold cache write**, because bindings and date pins are per host
+  (section 1).
+- **A resolver that answers every name** defeats the tailnet-name protection; not tested
+  (section 2.6).
 - **Failover never relieves a 429.** Quota belongs to the account.
 - **Each host learns a cap separately.** Cooldown state is not shared, so a capped account costs
   about one wasted call per host per window ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
@@ -606,12 +669,8 @@ one.
 Before a change, find it in this list and keep the invariant next to it. Procedures are in
 [FLEET.md](FLEET.md).
 
-**Any fleet change.**
-
-- Change both hosts in the same change, Mac first, or add a dated entry to
-  [fleet/exceptions.json](fleet/exceptions.json).
-- Run `fleetctl check`, `health`, `fingerprint` and `parity` before and after.
-- Roll back only the host just changed. A host that already passed needs Andrew's instruction.
+**Any fleet change.** Follow the [fleet contract](FLEET.md#fleet-contract). The invariant behind
+it: the two hosts differ only where an unexpired exception says so.
 
 **A new release.**
 
@@ -651,9 +710,10 @@ text).
 - Classify upstream errors from captured responses, and match dial errors only.
 - Use the monotonic clock, share a hold between concurrent requests, and clear failure counts on
   recovery.
-- Nothing may time out after a connection exists.
-- A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback` again, or
-  failover is removed.
+- No timer may end a request after a connection exists; only the liveness watch may, when the
+  host fails its probes and the request receives nothing.
+- Keep failover configured on `claude_cliproxy` across profile reruns
+  ([FLEET.md](FLEET.md#running-fleet)).
 
 **Enabling failover for another profile.**
 
@@ -683,5 +743,5 @@ text).
 **Compose and container settings.**
 
 - They take effect at a recreate, and a recreate drops every stream on that host.
-- On the Mac the watchdog can run `docker compose up` by itself, so a merged Compose change can go
-  live without an activation.
+- On the Mac the watchdog can run `docker compose up` by itself, so a Compose change pulled into
+  the checkout can go live without an activation.
