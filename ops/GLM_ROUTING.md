@@ -19,8 +19,10 @@ The November 14, 2026 activation recorded these routes:
 
 Until November 18 the Mac lacked the `glm-5p3-flash` alias, so the Mac catalog listed that name under the Cursor plugin. Will's `glm-5.3` check used `/v1/responses`. Its other three checks used
 `/v1/chat/completions`. Each response named the expected upstream model.
-Will retains the older `glm-5.2` Cursor entry; it is outside this direct
-Coding Plan configuration and was not used for inference.
+Will then retained the older `glm-5.2` Cursor entry, outside this direct
+Coding Plan configuration and not used for inference. Since November 18
+`glm-5.2` is a direct alias for `glm-5.3` on both hosts
+([below](#glm-52-maps-to-glm-53)).
 
 The [sanitized Will receipt](evidence/glm-direct-20261114.json) records both
 client-key catalog checks and the live fleet and owner verifiers. GPT-6.1 Sol
@@ -28,6 +30,32 @@ performed activation and verification, with source reviews by Claude Fable 5.2
 and Claude Opus 5.5. The Go server build, 16 owner-verifier unit tests, and
 focused native catalog priority tests passed. These checks establish the
 recorded activation, not remaining subscription quota.
+
+## glm-5.2 maps to glm-5.3
+
+Since November 18, 2026, both hosts map client ID `glm-5.2` to upstream model
+`glm-5.3` on `zai-coding-plan`: the provider's model list has an entry with
+`name: glm-5.3` and `alias: glm-5.2`. Andrew asked for this fix.
+
+Z.ai's GLM Coding Plan now serves only GLM-5.3 and GLM-5.3-Flash. It redirects
+`glm-5.2` and `glm-5.1` requests to GLM-5.3 on its side
+([Z.ai: latest model](https://docs.z.ai/devpack/latest-model)). A direct
+`glm-5.2` alias answered correctly, but every reply named `glm-5.3`. The Cursor
+plugin's `glm-5.2` entry on Will returned 503 `auth_not_found`
+(`providers=cursor`), so it was broken. With the mapping, the request CLIProxy
+sends names the model that answers.
+
+Verify on each host:
+
+- `/v1/models` lists `glm-5.2` owned by `zai-coding-plan`. This held on both
+  hosts on November 18.
+- `fleetctl parity` reports no `P9/glm-5.2`. That check flags a Cursor
+  `glm-5.2` entry while a direct one exists. Will's stale Cursor registration
+  cleared after its container was recreated on November 18.
+- In the request log of one small `glm-5.2` request, the `model` in the
+  `=== API REQUEST ===` section is `glm-5.3`, and the response's `model` is
+  `glm-5.3`. The response named `glm-5.3` before the mapping too, so only the
+  `API REQUEST` model shows that the mapping applies.
 
 ## Client authentication and configuration layout
 
@@ -55,7 +83,9 @@ Native provider registrations take priority for the four direct aliases. Verify
 Cursor's provider-specific catalog through the authenticated read-only endpoint
 `GET /v8/management/routing/model-definitions/cursor`. After activation it listed
 only `glm-5.2` among GLM IDs, while the public catalog listed all four direct
-aliases under `zai-coding-plan`.
+aliases under `zai-coding-plan`. Since November 18 `glm-5.2` is a direct alias
+too, and parity's `P9/glm-5.2` check covers it
+([above](#glm-52-maps-to-glm-53)).
 
 The first hot-add left stale Cursor alias registrations. One extra watcher
 reload with unchanged business configuration reconciled them. Its temporary

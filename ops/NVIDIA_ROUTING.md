@@ -1,6 +1,6 @@
 # Run NVIDIA-hosted models through CLIProxy
 
-The M5 Mac proxy at `http://127.0.0.1:8317` serves selected models from NVIDIA's hosted API (`build.nvidia.com`) as an OpenAI-compatible upstream. Will does not have this provider; the NVIDIA key exists only on M5.
+Both proxies, Will and the M5 Mac at `http://127.0.0.1:8317`, serve selected models from NVIDIA's hosted API (`build.nvidia.com`) as an OpenAI-compatible upstream. Will gained the provider, the same static key and the same three aliases on November 18, 2026 ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
 
 ## Use it from T3
 
