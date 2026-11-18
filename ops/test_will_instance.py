@@ -114,6 +114,14 @@ class WillInstanceVerifierTests(unittest.TestCase):
         self.assertIn("container_port_exposure_drift", findings)
         self.assertIn("listener_exposure_drift", findings)
 
+    def test_transient_cooldown_drift_is_detected(self):
+        observation = matching_observation()
+        observation["config"]["transient-error-cooldown-seconds"] = "0"
+
+        findings = evaluate_observation(self.contract, self.policy, observation)
+
+        self.assertIn("config_policy_drift", findings)
+
     def test_retry_policy_and_mount_identity_drift_are_detected(self):
         observation = matching_observation()
         observation["config"]["max-retry-interval"] = "0"
@@ -206,7 +214,8 @@ class WillInstanceVerifierTests(unittest.TestCase):
                 ))
 
     def test_probe_accepts_legacy_and_v8_quota_settings(self):
-        settings = {"quota-cooldown-max-seconds": 3600, "save-cooldown-status": True}
+        settings = {"quota-cooldown-max-seconds": 3600, "save-cooldown-status": True,
+                    "transient-error-cooldown-seconds": -1}
         for config in (settings, {"routing": {"cooldown": settings}}):
             with self.subTest(config=config):
                 observed = self.probe_config(config)

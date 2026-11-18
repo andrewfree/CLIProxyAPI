@@ -40,6 +40,8 @@ observed = {
     'usage_statistics_enabled': config.get('usage-statistics-enabled'),
     'quota_cooldown_max_seconds': config.get('quota-cooldown-max-seconds'),
     'save_cooldown_status': config.get('save-cooldown-status'),
+    'transient_error_cooldown_seconds': config.get('transient-error-cooldown-seconds'),
+    'max_retry_interval': config.get('max-retry-interval'),
     'routing': routing_policy_values(config),
     'routing_policy_matches': routing_policy_matches(
         config, release.get('routing_policy', {}).get(arch)
@@ -61,6 +63,8 @@ expected = {
     'usage_statistics_enabled': False,
     'quota_cooldown_max_seconds': release['runtime_policy']['quota-cooldown-max-seconds'],
     'save_cooldown_status': release['runtime_policy']['save-cooldown-status'],
+    'transient_error_cooldown_seconds': release['runtime_policy']['transient-error-cooldown-seconds'],
+    'max_retry_interval': release['runtime_policy']['max-retry-interval'],
     'routing_policy_matches': True,
     'do_not_track': True,
 }
