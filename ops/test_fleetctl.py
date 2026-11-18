@@ -126,7 +126,7 @@ class FleetCTLTest(unittest.TestCase):
                              credential("kimi-ai", "will-kimi", ACCOUNT_LABELS[1],
                                         organization_id=ORGANIZATION)],
                        {"will-codex": codex_models, "will-kimi": kimi_models},
-                       {key: codex_models + kimi_models for key in CLIENT_KEYS},
+                       {key: codex_models for key in CLIENT_KEYS},
             [copy.deepcopy(cursor_plugin), plugin("cliproxybar-quota", "0.1.0")])
         for host in self.hosts.values():
             host["instance_root"] = directory.name
@@ -162,25 +162,56 @@ class FleetCTLTest(unittest.TestCase):
             "api-keys": CLIENT_KEYS,
             "claude-api-key": [{"api-key": CANARY, "model": "fixture",
                                "headers": {"X-Custom": ORGANIZATION}}],
+            "codex-api-key": CANARY,
+            "gemini-api-key": [CANARY],
+            "vertex-api-key": [{"models": []}, CANARY],
             "openai-compatibility": [{"name": "fixture",
                                       "api-key-entries": [{"api-key": CANARY}]}],
             "routing": {"strategy": "quota-aware"},
+            "tls": {"key": CANARY},
+            "plugins": {"store-auth": CANARY, "configs": {"cliproxybar-quota": {
+                "enabled": True,
+                "claude-api-key": [{"value": CANARY}],
+                "openai-compatibility": [{"value": CANARY}],
+            }}},
             "settings": [{"api_key": {"any": CANARY}, "token-list": [ORGANIZATION],
+                          "refresh-tokens": [CANARY], "access-tokens": CANARY,
+                          "credential": CANARY,
                           "clientSecret": CANARY, "Password": CANARY, "proxy": "https://u:p@fixture",
+                          "base": "https://fixture.invalid/v1?key=" + CANARY,
+                          "endpoint": "https://fixture.invalid/v1#" + CANARY,
+                          "malformed-url": "https://[" + CANARY,
                           "headers": {"X-Custom": CANARY, "User-Agent": ORGANIZATION},
-                          "use-max-completion-tokens": True, "max_tokens": 256}],
+                          "use-max-completion-tokens": True, "max_tokens": 256},
+                         {"headers": [CANARY]}, {"headers": CANARY}],
             "claude-header-defaults": {"timezone": "Etc/UTC"},
         }
         hidden = []
         masked = fleet.redact(raw, self.paths["secret_paths"], hidden)
-        self.assertEqual(masked["settings"], [{"proxy": None, "headers": {},
-                                             "use-max-completion-tokens": True, "max_tokens": 256}])
+        self.assertEqual(masked["settings"], [{"proxy": None, "base": None, "endpoint": None,
+                                             "malformed-url": None,
+                                             "headers": {}, "use-max-completion-tokens": True,
+                                             "max_tokens": 256}, {}, {}])
         self.assertEqual(masked["claude-api-key"], [{"model": "fixture", "headers": {}}])
         self.assertEqual(masked["openai-compatibility"], [{"name": "fixture"}])
         self.assertNotIn("api-keys", masked)
         for value in (CANARY, ORGANIZATION, *CLIENT_KEYS, "u:p"):
             self.assertNotIn(value, json.dumps(masked))
+        hidden_by_path = dict(hidden)
+        for path in (("codex-api-key",), ("gemini-api-key",), ("vertex-api-key",), ("tls", "key"),
+                     ("plugins", "store-auth"), ("settings", "0", "refresh-tokens"),
+                     ("settings", "0", "access-tokens"), ("settings", "0", "credential"),
+                     ("settings", "0", "base"), ("settings", "0", "endpoint"),
+                     ("settings", "0", "malformed-url"),
+                     ("settings", "1", "headers"), ("settings", "2", "headers")):
+            with self.subTest(path=path):
+                self.assertIn(path, hidden_by_path)
+                self.assertIn(CANARY, json.dumps(hidden_by_path[path]))
         config, private, public = fleet.config_snapshot(raw, self.paths, NONCE)
+        self.assertEqual(config["cliproxybar-quota"], fleet.fingerprint({"enabled": True}))
+        client_changed = dict(raw, **{"api-keys": ["new-client-fixture"]})
+        _, client_private, _ = fleet.config_snapshot(client_changed, self.paths, NONCE)
+        self.assertEqual(private["shared"], client_private["shared"])
         changed = copy.deepcopy(raw)
         changed["logs-max-total-size-mb"] = 0
         changed["claude-api-key"][0]["api-key"] = "rotated"
@@ -203,6 +234,16 @@ class FleetCTLTest(unittest.TestCase):
         config2, private2, public2 = fleet.config_snapshot(raw, self.paths, NONCE)
         self.assertEqual((config, public), (config2, public2))
         self.assertNotEqual(private["shared"], private2["shared"])
+
+    def test_malformed_openai_compatibility_is_hidden_in_all_fingerprints(self):
+        for value in (CANARY, [CANARY], {"name": CANARY}):
+            with self.subTest(shape=type(value).__name__):
+                raw = {"openai-compatibility": value}
+                digests, private, public = fleet.config_snapshot(raw, self.paths, NONCE)
+                self.assertEqual(digests["nvidia"], fleet.fingerprint([]))
+                self.assertEqual(public["config_sha256"], fleet.fingerprint({}))
+                self.assertNotIn("openai-compatibility", public["section_sha256"])
+                self.assertNotEqual(private["shared"], fleet.tag(NONCE, "provider-config", []))
 
     def test_static_provider_base_url_and_model_change_shared_fingerprint(self):
         for family in fleet.STATIC_KEY_FAMILIES:
@@ -258,14 +299,23 @@ class FleetCTLTest(unittest.TestCase):
                 for value in (CANARY, ORGANIZATION, *CLIENT_KEYS, *ACCOUNT_LABELS):
                     self.assertNotIn(value, emitted)
 
-    def test_probe_exceptions_do_not_expose_input(self):
-        for error_type in (KeyError, ValueError, RuntimeError, fleet.ProbeError):
+    def test_probe_error_shows_safe_operator_message(self):
+        message = "Management key missing or ambiguous"
+        with patch.object(fleet.LocalAPI, "get",
+                          side_effect=[({"status": "ok"}, None), fleet.ProbeError(message)]):
+            report, code = self.run_main("fingerprint", "--host", "m5")
+        self.assertEqual((report["status"], code), ("error", 2))
+        self.assertEqual(report["hosts"]["m5"]["error"], message)
+
+    def test_unexpected_exceptions_do_not_expose_input(self):
+        for error_type in (KeyError, ValueError, RuntimeError):
             with self.subTest(error_type=error_type.__name__):
                 with patch.object(fleet.LocalAPI, "get",
                                   side_effect=[({"status": "ok"}, None), error_type(CANARY)]):
                     result = fleet.safe_collect(self.hosts["m5"], self.paths, self.release,
                                                 NONCE, "fingerprint")
                 self.assertEqual(result["status"], "error")
+                self.assertEqual(result["error"], "Could not read fleet probe inputs")
                 self.assertNotIn(CANARY, json.dumps(result))
                 with patch.object(fleet.LocalAPI, "get",
                                   side_effect=[({"status": "ok"}, None), error_type(CANARY)]):
@@ -307,19 +357,28 @@ class FleetCTLTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("P8/shared", {row["surface"] for row in report["drift"]})
 
+    def test_new_kimi_catalog_entry_causes_drift(self):
+        mac, will = self.fixture()
+        will.public_models[CLIENT_KEYS[0]] += will.models["will-kimi"]
+        self.assert_drift(mac, will, "P8/kimi-ai")
+
     def test_active_quota_and_rate_limit_cooldowns_do_not_cause_drift(self):
         mac, will = self.fixture()
         retry = "2099-01-01T00:00:00Z"
         will.files[0].update(status="error", unavailable=True, next_retry_after=retry,
-                             status_message="quota exhausted")
+                             status_message=" Quota Exhausted ")
         report, code = self.report(mac, will)
         self.assertEqual(code, 0, report)
         self.assertEqual(report["hosts"]["will"]["credential_health"]["cooling"], 1)
-        will.files[0].update(status_message="provider-specific response",
-                             cooldowns=[{"reason": "transient_rate_limit", "retry_at": retry}])
-        report, code = self.report(mac, will)
-        self.assertEqual(code, 0, report)
-        self.assertEqual(report["hosts"]["will"]["credential_health"]["cooling"], 1)
+        for reason in ("quota", "credential_quota", "transient_rate_limit"):
+            with self.subTest(reason=reason):
+                will.files[0].update(status_message="provider-specific response", cooldowns=[
+                    {"reason": "transient_error", "retry_at": retry},
+                    {"reason": reason, "retry_at": retry},
+                ])
+                report, code = self.report(mac, will)
+                self.assertEqual(code, 0, report)
+                self.assertEqual(report["hosts"]["will"]["credential_health"]["cooling"], 1)
 
     def test_auth_and_payment_errors_cause_drift_even_with_quota_cooldowns(self):
         mac, will = self.fixture()
@@ -339,6 +398,62 @@ class FleetCTLTest(unittest.TestCase):
                              status_message="transient upstream error",
                              quota={"signals": {"used-percent": "90"}})
         self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_non_quota_cooldown_at_matching_deadline_causes_drift(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        will.files[0].update(unavailable=True, next_retry_after=retry,
+                             status_message="provider-specific response")
+        for reason in ("unauthorized", "payment_required", "invalid_grant",
+                       "transient_error", "not_found"):
+            with self.subTest(reason=reason):
+                will.files[0]["cooldowns"] = [{"reason": reason, "retry_at": retry}]
+                self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_quota_cooldown_at_different_deadline_causes_drift(self):
+        mac, will = self.fixture()
+        will.files[0].update(unavailable=True, next_retry_after="2099-01-01T00:00:00Z",
+                             status_message="provider-specific response",
+                             cooldowns=[{"reason": "quota", "retry_at": "2099-01-02T00:00:00Z"}])
+        self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_unavailable_or_error_status_alone_causes_drift(self):
+        for changes in ({"unavailable": True}, {"status": "error"}):
+            with self.subTest(changes=changes):
+                mac, will = self.fixture()
+                will.files[0].update(changes)
+                self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_model_auth_failure_causes_drift_despite_matching_quota_deadline(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        will.files[0].update(unavailable=True, next_retry_after=retry,
+                             status_message="provider-specific response")
+        for reason in ("unauthorized", "payment_required", "invalid_grant"):
+            with self.subTest(reason=reason):
+                will.files[0]["cooldowns"] = [
+                    {"reason": "quota", "retry_at": retry},
+                    {"reason": reason, "retry_at": "2099-01-02T00:00:00Z"},
+                ]
+                self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_only_an_active_quota_deadline_marks_a_credential_cooling(self):
+        now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+        retry = "2026-11-18T00:00:00Z"
+        item = dict(HEALTHY, unavailable=True, next_retry_after=retry,
+                    status_message="quota exhausted")
+        self.assertEqual(fleet.credential_health(item, now), "error")
+        item.update(unavailable=False, next_retry_after="2099-01-01T00:00:00Z")
+        self.assertEqual(fleet.credential_health(item, now), "ok")
+
+    def test_model_auth_failure_is_an_error_even_if_credential_is_available(self):
+        now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+        item = dict(HEALTHY, cooldowns=[{"reason": "unauthorized",
+                                       "retry_at": "2099-01-01T00:00:00Z"}])
+        self.assertEqual(fleet.credential_health(item, now), "error")
+        for disabled in ({"disabled": True}, {"status": "disabled"}):
+            with self.subTest(disabled=disabled):
+                self.assertEqual(fleet.credential_health(dict(item, **disabled), now), "disabled")
 
     def test_provider_key_rotation_causes_private_config_drift(self):
         mac, will = self.fixture()
@@ -502,6 +617,17 @@ class FleetCTLTest(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer " + CANARY)
         connection.close.assert_called_once()
 
+    def test_http_error_uses_only_fixed_messages(self):
+        with patch.object(fleet.http.client, "HTTPConnection") as factory:
+            for status, expected in ((401, "Read-only API returned HTTP 401"),
+                                     (599, "Read-only API returned an unexpected HTTP status"),
+                                     (CANARY, "Read-only API returned an unexpected HTTP status")):
+                with self.subTest(status_type=type(status).__name__):
+                    factory.return_value.getresponse.return_value = Mock(status=status)
+                    with self.assertRaises(fleet.ProbeError) as raised:
+                        fleet.LocalAPI(8317, None).get("/healthz")
+                    self.assertEqual(str(raised.exception), expected)
+
     def test_tracked_policy_check_catches_a_changed_will_pin(self):
         policy = fleet.read_json(fleet.OPS / "instances/will/config-policy.json")["required_config"]
         bundle = (fleet.OPS / "fleet/bundle.txt").read_text().splitlines()
@@ -513,18 +639,22 @@ class FleetCTLTest(unittest.TestCase):
     def test_invalid_ssh_destination_is_rejected_before_any_probe(self):
         policy = fleet.read_json(fleet.OPS / "instances/will/config-policy.json")["required_config"]
         bundle = (fleet.OPS / "fleet/bundle.txt").read_text().splitlines()
-        targets = {"option": "-oProxyCommand=" + CANARY, "metacharacter": "will;" + CANARY,
+        targets = {"option": "-oProxyCommand=" + CANARY, "verbose": "-v",
+                   "batch": "-oBatchMode", "metacharacter": "will;" + CANARY,
                    "empty": "", "null": None, "boolean": True}
-        for label, target in targets.items():
-            with self.subTest(target=label):
-                self.hosts["will"]["ssh"] = target
+        cases = [("will", label, target) for label, target in targets.items()]
+        cases.append(("m5", "remote alias", "will.local"))
+        for name, label, target in cases:
+            with self.subTest(host=name, target=label):
+                hosts = copy.deepcopy(self.hosts)
+                hosts[name]["ssh"] = target
                 self.assertFalse(fleet.validate_contract(
-                    self.hosts, self.paths, self.release, self.exceptions, policy, bundle
+                    hosts, self.paths, self.release, self.exceptions, policy, bundle
                 ))
                 for command in ("health", "fingerprint", "parity"):
                     with (patch.object(fleet.subprocess, "run") as run,
                           patch.object(fleet.LocalAPI, "get") as get):
-                        result = fleet.probe("will", self.hosts, self.paths, self.release,
+                        result = fleet.probe(name, hosts, self.paths, self.release,
                                              NONCE, command)
                     run.assert_not_called()
                     get.assert_not_called()
@@ -535,7 +665,7 @@ class FleetCTLTest(unittest.TestCase):
         read_json = fleet.read_json
         for surface in ("P2/shared-pin", "P2/host-pin", "P3/max-retry-interval",
                         "P6/duplicate-named-prefix", "P6/missing-label", "P6/unknown-prefix",
-                        "P10/auth-cursor-pin", "P100/shared"):
+                        "P10/auth-cursor-pin", "P100/shared", "P2/", "P2"):
             with self.subTest(surface=surface):
                 exceptions = self.exceptions + [dict(self.exceptions[0], surface=surface)]
                 with patch.object(fleet, "read_json", side_effect=lambda path: (

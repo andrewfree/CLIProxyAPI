@@ -87,16 +87,6 @@
     "review_by": "2026-12-02"
   },
   {
-    "surface": "P8/kimi-ai",
-    "hosts": [
-      "will"
-    ],
-    "reason": "Will's extra kimi-ai credential can add kimi-ai catalog entries pending review.",
-    "decision_ref": "Fleet design 2026-11-17 Q10",
-    "date": "2026-11-18",
-    "review_by": "2026-12-02"
-  },
-  {
     "surface": "P10/cliproxybar-quota",
     "hosts": [
       "will"

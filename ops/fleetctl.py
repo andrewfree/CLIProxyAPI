@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import date, datetime, timezone
 import hashlib
 import hmac
+from http import HTTPStatus
 import http.client
 import json
 from pathlib import Path
@@ -48,15 +49,18 @@ STATIC_KEY_FAMILIES = (
     "interactions-api-key", "vertex-api-key", "xai-api-key", "meta-api-key",
 )
 HARD_CREDENTIAL_ERROR = re.compile(r"\b(?:unauthorized|payment required|invalid grant|token (?:has )?expired)\b")
+HARD_CREDENTIAL_REASONS = {"unauthorized", "payment_required", "invalid_grant"}
 COOLDOWN_REASONS = {"quota", "credential_quota", "transient_rate_limit"}
 COOLDOWN_MESSAGES = {
     "quota", "credential quota", "quota exhausted", "rate limit",
     "rate limit exceeded", "transient rate limit", "too many requests",
 }
+HTTP_STATUS_ERRORS = {status.value: f"Read-only API returned HTTP {status.value}"
+                      for status in HTTPStatus}
 
 
 class ProbeError(Exception):
-    """A rejected API response or unusable probe input."""
+    """A rejected API response or unusable input with a public, fixed message."""
 
 
 def canonical(value):
@@ -80,6 +84,10 @@ def at_path(value, path, default=None):
     return value
 
 
+def provider_list(value):
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+
 def redact(value, secret_paths, hidden, path=()):
     """Keep functional config while retaining secrets only for in-process tagging."""
     if isinstance(value, dict):
@@ -90,12 +98,16 @@ def redact(value, secret_paths, hidden, path=()):
             folded = re.sub(r"[^a-zA-Z0-9]+", "-", folded).lower()
             secret_name = ((SECRET_KEY.search(folded) and not TOKEN_SETTING.fullmatch(folded))
                            or folded in ("credential", "credentials"))
-            provider_family = not path and key in STATIC_KEY_FAMILIES
-            if ".".join(item_path) in secret_paths or (secret_name and not provider_family):
+            if key in STATIC_KEY_FAMILIES:
+                secret_name = bool(path) or not provider_list(item)
+            if ".".join(item_path) in secret_paths or secret_name:
                 hidden.append((item_path, item))
-            elif folded == "headers" and isinstance(item, dict):
-                hidden.extend(((*item_path, name), val) for name, val in item.items())
-                result[key] = {}
+            elif folded == "headers":
+                if isinstance(item, dict):
+                    hidden.extend(((*item_path, name), val) for name, val in item.items())
+                    result[key] = {}
+                else:
+                    hidden.append((item_path, item))
             else:
                 result[key] = redact(item, secret_paths, hidden, item_path)
         return result
@@ -118,9 +130,13 @@ def split_config(config):
     """Isolate the specific differences recorded in the initial fleet baseline."""
     shared = dict(config)
     debug = shared.pop("debug", None)
-    providers = shared.get("openai-compatibility") or []
-    nvidia = [item for item in providers if item.get("name") == "nvidia"]
-    shared["openai-compatibility"] = [item for item in providers if item.get("name") != "nvidia"]
+    providers = shared.get("openai-compatibility")
+    nvidia = []
+    if providers is None:
+        shared["openai-compatibility"] = []
+    elif provider_list(providers):
+        nvidia = [item for item in providers if item.get("name") == "nvidia"]
+        shared["openai-compatibility"] = [item for item in providers if item.get("name") != "nvidia"]
     plugins = dict(shared.get("plugins") or {})
     configs = dict(plugins.get("configs") or {})
     quota_plugin = configs.pop("cliproxybar-quota", None)
@@ -134,9 +150,15 @@ def config_snapshot(config, paths, nonce):
     view = redact(config, paths["secret_paths"], [])
     digests = {}
     private = {}
+    scope_paths = {
+        "shared": (),
+        "debug": ("debug",),
+        "nvidia": ("openai-compatibility",),
+        "cliproxybar-quota": ("plugins", "configs", "cliproxybar-quota"),
+    }
     for scope, value in split_config(config).items():
         hidden = []
-        scoped = redact(value, paths["secret_paths"], hidden)
+        scoped = redact(value, paths["secret_paths"], hidden, scope_paths[scope])
         digests[scope] = fingerprint(scoped)
         # The top-level client keys are compared as a set and drive /v1/models.
         private[scope] = tag(nonce, "provider-config", sorted(
@@ -188,7 +210,9 @@ class LocalAPI:
             if response.status == optional_status:
                 return None, None
             if response.status != 200:
-                raise ProbeError(f"Read-only API returned HTTP {response.status}")
+                raise ProbeError(HTTP_STATUS_ERRORS.get(
+                    response.status, "Read-only API returned an unexpected HTTP status"
+                ))
             return json.load(response), response.getheader("X-CPA-Version")
         except (OSError, http.client.HTTPException):
             raise ProbeError("Loopback API unavailable") from None
@@ -220,6 +244,9 @@ def credential_health(item, now):
     message = re.sub(r"[_-]+", " ", (item.get("status_message") or "").strip().lower())
     if item.get("requires_sign_in") or HARD_CREDENTIAL_ERROR.search(message):
         return "error"
+    cooldowns = item.get("cooldowns") or []
+    if any(row["reason"] in HARD_CREDENTIAL_REASONS for row in cooldowns):
+        return "error"
     retry = item.get("next_retry_after")
     if item["unavailable"] and retry:
         deadline = datetime.fromisoformat(retry.replace("Z", "+00:00"))
@@ -227,7 +254,7 @@ def credential_health(item, now):
         if deadline > now and (message in COOLDOWN_MESSAGES or any(
             row["reason"] in COOLDOWN_REASONS
             and datetime.fromisoformat(row["retry_at"].replace("Z", "+00:00")) == deadline
-            for row in item.get("cooldowns") or []
+            for row in cooldowns
         )):
             return "cooling"
     if item["unavailable"] or item["status"] == "error":
@@ -422,6 +449,8 @@ def collect(host, paths, release, nonce, command, api=None):
 def safe_collect(host, paths, release, nonce, command):
     try:
         return collect(host, paths, release, nonce, command)
+    except ProbeError as error:
+        return {"status": "error", "error": str(error)}
     except Exception:
         # Parse errors may include URLs, file names, credentials or response bodies.
         return {"status": "error", "error": "Could not read fleet probe inputs"}
