@@ -179,6 +179,15 @@ class WillInstanceVerifierTests(unittest.TestCase):
         findings = evaluate_observation(self.contract, self.policy, observation)
         self.assertEqual({"container_sysctls_drift"}, set(findings))
 
+        for compose_sysctls in (
+            {"net.ipv4.tcp_syn_retries": "3"},
+            {"net.ipv4.tcp_syn_retries": "2", "net.ipv4.tcp_fin_timeout": "10"},
+        ):
+            observation = matching_observation()
+            observation["compose"]["sysctls"] = compose_sysctls
+            findings = evaluate_observation(self.contract, self.policy, observation)
+            self.assertEqual({"compose_sysctls_drift"}, set(findings))
+
     def test_remote_probe_is_secret_minimizing(self):
         self.assertNotIn("cat \"$config_file\"", REMOTE_PROBE)
         self.assertNotIn("auths/", REMOTE_PROBE)

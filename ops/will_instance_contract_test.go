@@ -143,7 +143,6 @@ func TestWillWorkloadContractMatchesCompose(t *testing.T) {
 		"      - ./logs:/CLIProxyAPI/logs\n",
 		"      - ./plugins:/CLIProxyAPI/plugins\n",
 		"    stop_grace_period: 20s\n",
-		"    sysctls:\n      net.ipv4.tcp_syn_retries: 2\n",
 		"      driver: json-file\n",
 		"        max-size: \"10m\"\n",
 		"        max-file: \"3\"\n",
