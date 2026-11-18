@@ -36,6 +36,11 @@ logging, NVIDIA, and the Will quota plugin for scoped comparison. Discovery
 and the log size cap are intentionally host-specific. Will's legacy YAML and
 M5's v8 YAML feed the same loaded config view.
 
+For `model_not_supported` cooldowns, parity resolves served model IDs through
+the credential channel's global `oauth-model-alias` table and checks whether an
+unrestricted upstream model remains. The management API omits per-credential
+alias attributes, so parity cannot account for those overrides.
+
 The read-only checks cover the management API contract. Use the existing
 instance verifiers for Docker image and Compose checks. The bundle manifest
 lists files for the later shipping step. Shipping, bundle activation receipts,

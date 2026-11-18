@@ -449,6 +449,108 @@ class FleetCTLTest(unittest.TestCase):
                 will.models[item["id"]] = models
                 self.assert_drift(mac, will, "P7/credential-error")
 
+    def test_transient_refresh_error_preserves_active_and_quota_cooling_health(self):
+        mac, will = self.fixture()
+        retry = "2099-01-01T00:00:00Z"
+        item = will.files[0]
+        item.update(access_token_expires_at=retry, requires_sign_in=False,
+                    refresh_error={"code": "refresh_failed"})
+        for state, counts in (
+            ({}, {"ok": 2}),
+            ({"status": "error", "unavailable": True, "next_retry_after": retry,
+              "cooldowns": [{"scope": "credential", "reason": "quota", "retry_at": retry}]},
+             {"ok": 1, "cooling": 1}),
+        ):
+            with self.subTest(counts=counts):
+                item.update(state)
+                report, code = self.report(mac, will)
+                self.assertEqual((code, report["drift"]), (0, []))
+                self.assertEqual(report["hosts"]["will"]["credential_health"], counts)
+
+    def test_sign_in_hint_only_withholds_the_model_restriction_exemption(self):
+        mac, will = self.fixture()
+        will.files[0].update(next_action="sign_in")
+        report, code = self.report(mac, will)
+        self.assertEqual((code, report["drift"]), (0, []))
+        # The hint alone still blocks the exemption when otherwise eligible.
+        will.files[0].update(status="error", unavailable=True, cooldowns=[
+            {"scope": "model", "model_key": "retired-model", "reason": "model_not_supported",
+             "retry_at": "2099-01-01T00:00:00Z"},
+        ])
+        self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_model_not_supported_compares_forked_and_unforked_alias_targets(self):
+        mac, will = self.fixture()
+        aliases = {"codex": [
+            {"alias": "ALIAS-A", "name": "UP-A", "fork": True},
+            {"alias": " alias-b(high) ", "name": " camoff-astra/UP-B(high) "},
+            {"alias": "alias-b(low)", "name": "up-a"},
+        ], "claude": [{"alias": "alias-b(high)", "name": "up-a"}]}
+        unprefixed = ("gpt-fixture", "up-a", "up-b", "alias-a", "alias-a(high)", "alias-b(HIGH)")
+        ids = (*unprefixed, *("camoff-astra/" + model for model in unprefixed))
+        for api in (mac, will):
+            api.config["oauth-model-alias"] = aliases
+            api.models[api.files[0]["id"]] = model_rows("openai", *ids)
+        fingerprints, _, public = fleet.config_snapshot(mac.config, self.paths, NONCE)
+        self.release["config_fingerprint"] = {
+            "shared": fingerprints["shared"], "observed": {"m5": public["config_sha256"]},
+        }
+
+        unsupported = {"scope": "model", "reason": "model_not_supported",
+                       "retry_at": "2099-01-01T00:00:00Z"}
+        item = will.files[0]
+        item.update(status="error", unavailable=True)
+        for model in ("up-b", "camoff-astra/up-b"):
+            with self.subTest(restricted=model):
+                item["cooldowns"] = [dict(unsupported, model_key=key)
+                                     for key in ("gpt-fixture", " up-a ", model)]
+                report, code = self.report(mac, will)
+                self.assertEqual((code, report["drift"]), (0, []))
+                self.assertEqual(report["hosts"]["will"]["credential_health"], {"ok": 2})
+
+        item["cooldowns"].append(dict(unsupported, model_key="up-b"))
+        self.assert_drift(mac, will, "P7/credential-error")
+
+    def test_unresolvable_channel_alias_table_withholds_the_exemption(self):
+        _, will = self.fixture()
+        item = will.files[0]
+        item.update(provider=" CoDeX ", status="error", unavailable=True, cooldowns=[
+            {"scope": "model", "model_key": "up-a", "reason": "model_not_supported",
+             "retry_at": "2099-01-01T00:00:00Z"},
+        ])
+        valid = {"alias": "gpt-fixture", "name": "up-b"}
+        duplicate = {"alias": "GPT-FIXTURE", "name": "up-a"}
+        tables = (
+            None, {"codex": None}, {"codex": {"gpt-fixture": "up-b"}}, {"codex": [42]},
+            {"codex": [valid, {"alias": "unknown-target"}]},
+            {"codex": [valid, {"name": "up-b"}]},
+            {"codex": [valid, {"alias": "other", "name": " "}]},
+            {"codex": [valid, {"alias": " ", "name": "up-b"}]},
+            {"codex": [valid, duplicate]}, {"codex": [duplicate, valid]},
+        )
+        for table in tables:
+            with self.subTest(table=table):
+                will.config["oauth-model-alias"] = table
+                self.assertEqual(self.probe("will", will)["public"]["credential_health"],
+                                 {"error": 1, "ok": 1})
+
+        will.config["oauth-model-alias"] = {"claude": None}
+        self.assertEqual(self.probe("will", will)["public"]["credential_health"], {"ok": 2})
+
+    def test_global_oauth_aliases_do_not_apply_to_api_keys_or_gemini(self):
+        _, will = self.fixture()
+        item = will.files[0]
+        item.update(status="error", unavailable=True, cooldowns=[
+            {"scope": "model", "model_key": "up-a", "reason": "model_not_supported",
+             "retry_at": "2099-01-01T00:00:00Z"},
+        ])
+        alias = {"alias": "gpt-fixture", "name": "up-a"}
+        for provider, account_type in (("codex", "api_key"), ("gemini", "oauth")):
+            with self.subTest(provider=provider):
+                item.update(provider=provider, account_type=account_type)
+                will.config["oauth-model-alias"] = {provider: [alias]}
+                self.assertEqual(self.probe("will", will)["public"]["credential_health"], {"ok": 2})
+
     def test_partial_model_not_supported_cooldowns_do_not_hide_a_transient_error(self):
         mac, will = self.fixture()
         retry = "2099-01-01T00:00:00Z"

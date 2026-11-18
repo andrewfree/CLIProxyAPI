@@ -248,18 +248,56 @@ def model_lookup_key(model, prefix):
     return model.lower()
 
 
-def model_restrictions_leave_route(cooldowns, ids, prefix):
+def oauth_alias_lookup(config, item):
+    """Return the channel's upstream lookup keys, or None for an unusable table."""
+    channel = item["provider"].strip().lower()
+    if channel == "gemini" or item.get("account_type") == "api_key":
+        return {}
+    table = config.get("oauth-model-alias", {})
+    if not isinstance(table, dict):
+        return None
+    entries = table.get(channel, [])
+    if not provider_list(entries):
+        return None
+    aliases = {}
+    for entry in entries:
+        alias, name = entry.get("alias"), entry.get("name")
+        if not isinstance(alias, str) or not isinstance(name, str):
+            return None
+        alias = alias.strip().lower()
+        upstream = model_lookup_key(name, "")
+        if not alias or not upstream or alias in aliases:
+            return None
+        aliases[alias] = upstream
+    return aliases
+
+
+def model_restrictions_leave_route(item, ids, prefix, config):
+    cooldowns = item.get("cooldowns") or []
     if not cooldowns or prefix is None:
         return False
+    aliases = oauth_alias_lookup(config, item)
+    if aliases is None:
+        return False
+    served = set()
+    route_prefix = prefix + "/" if prefix else ""
+    for model in ids:
+        route = model.strip().removeprefix(route_prefix).strip()
+        key = model_lookup_key(route, "")
+        # The selector tries the exact alias before the thinking-suffix-free alias.
+        served.add(aliases.get(route.lower(), aliases.get(key, key)))
     restricted = set()
     for row in cooldowns:
         if row.get("scope") != "model" or row["reason"] != "model_not_supported":
             return False
-        model = model_lookup_key(row.get("model_key") or "", prefix)
+        raw_model = row.get("model_key") or ""
+        model = model_lookup_key(raw_model, "")
+        # Strip the credential prefix only when the literal upstream key is absent.
+        if model not in served:
+            model = model_lookup_key(raw_model, prefix)
         if not model:
             return False
         restricted.add(model)
-    served = {model_lookup_key(model, prefix) for model in ids}
     return bool(served - restricted - {""})
 
 
@@ -267,8 +305,7 @@ def credential_health(item, now, *, partial_model_restrictions=False):
     if item["disabled"] or item["status"] == "disabled":
         return "disabled"
     message = re.sub(r"[_-]+", " ", (item.get("status_message") or "").strip().lower())
-    if (item.get("requires_sign_in") or item.get("next_action") == "sign_in"
-            or item.get("refresh_error") or HARD_CREDENTIAL_ERROR.search(message)):
+    if item.get("requires_sign_in") or HARD_CREDENTIAL_ERROR.search(message):
         return "error"
     expires = item.get("access_token_expires_at")
     if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) <= now:
@@ -277,7 +314,8 @@ def credential_health(item, now, *, partial_model_restrictions=False):
     if any(row["reason"] in HARD_CREDENTIAL_REASONS for row in cooldowns):
         return "error"
     # Restored model restrictions can set the aggregate error status.
-    if partial_model_restrictions:
+    if (partial_model_restrictions and not item.get("refresh_error")
+            and item.get("next_action") != "sign_in"):
         return "ok"
     retry = item.get("next_retry_after")
     if item["unavailable"] and retry:
@@ -317,9 +355,7 @@ def credential_snapshot(api, config, nonce, now):
             models, _ = api.get(V8 + "/credentials/models?" + query)
             ids = {model["id"] for model in models["models"]}
             prefix = registered_prefix(ids, config["force-model-prefix"])
-            partial_model_restrictions = model_restrictions_leave_route(
-                item.get("cooldowns") or [], ids, prefix
-            )
+            partial_model_restrictions = model_restrictions_leave_route(item, ids, prefix, config)
             if prefix is None:
                 issues["P6/unknown-prefix"] += 1
             if provider != "cursor":
