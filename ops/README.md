@@ -75,6 +75,11 @@ tool rewrites the profile's whole environment, so pass `--fallback` again on
 every rerun or the fallback is removed. No route can produce a reply while
 every eligible account is at its upstream limit.
 
+To roll back, use `server.updateSettings` to remove only the added profile
+IDs and restore the prior native display name from the backup. Preserve
+later edits to other settings. Restore the previous launcher from the host's
+private deployment backup after confirming no task-owned client uses it.
+
 ### Host failover for the shared pool
 
 `CLIPROXY_FALLBACK_URL` names a second CLIProxy origin for a shared-pool
@@ -130,10 +135,9 @@ transitions are appended to `ops/runtime/fleet/failover.jsonl` (ignored by git;
 `CLIPROXY_FAILOVER_LOG` overrides the path) as one JSON line each, with no
 request bodies, URLs or keys.
 
-To roll back, use `server.updateSettings` to remove only the added profile
-IDs and restore the prior native display name from the backup. Preserve
-later edits to other settings. Restore the previous launcher from the host's
-private deployment backup after confirming no task-owned client uses it.
+To turn failover off, remove `CLIPROXY_FALLBACK_URL` from the profile through
+`server.updateSettings`. New sessions then use the primary only; running
+sessions keep failover until they end.
 
 On `SIGTERM`, `SIGINT`, or `SIGHUP`, the launcher closes its listener and
 connections, then forwards the signal to its child. If the child has not exited
