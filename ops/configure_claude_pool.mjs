@@ -6,12 +6,20 @@ import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export function poolProviders(providers, { id, label, upstream, launcher, binary, apiKey }) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error("A valid profile ID is required.");
-  const origin = new URL(upstream);
+function httpOrigin(value, name) {
+  const origin = new URL(value);
   if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/") {
-    throw new Error("The upstream must be an HTTP origin without credentials or a path.");
+    throw new Error(`The ${name} must be an HTTP origin without credentials or a path.`);
   }
+  return origin.origin;
+}
+
+// The whole environment is rewritten on every run, so a fallback must be passed again each time.
+export function poolProviders(providers, { id, label, upstream, fallback, launcher, binary, apiKey }) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error("A valid profile ID is required.");
+  const origin = httpOrigin(upstream, "upstream");
+  const fallbackOrigin = fallback ? httpOrigin(fallback, "fallback") : null;
+  if (fallbackOrigin === origin) throw new Error("The fallback must be a different CLIProxy host.");
   if (!path.isAbsolute(launcher) || !path.isAbsolute(binary) || !apiKey?.trim() || !label?.trim()) {
     throw new Error("Absolute launcher and Claude paths, a label, and an API key are required.");
   }
@@ -30,7 +38,8 @@ export function poolProviders(providers, { id, label, upstream, launcher, binary
       environment: [
         { name: "CLIPROXY_CLAUDE_ROUTE", value: "shared-pool", sensitive: false },
         { name: "CLIPROXY_ACCOUNT_PREFIX", value: "", sensitive: false },
-        { name: "CLIPROXY_BASE_URL", value: origin.origin, sensitive: false },
+        { name: "CLIPROXY_BASE_URL", value: origin, sensitive: false },
+        ...(fallbackOrigin ? [{ name: "CLIPROXY_FALLBACK_URL", value: fallbackOrigin, sensitive: false }] : []),
         { name: "CLIPROXY_CLAUDE_BINARY", value: binary, sensitive: false },
         { name: "ANTHROPIC_API_KEY", value: apiKey.trim(), sensitive: true },
         { name: "ANTHROPIC_AUTH_TOKEN", value: "", sensitive: false },
@@ -101,7 +110,7 @@ export async function connectT3(baseDir, scopes = ["orchestration:read", "settin
 }
 
 async function main() {
-  const { values } = parseArgs({ options: Object.fromEntries(["base-dir", "profile-id", "label", "upstream", "claude-binary", "api-key-file", "backup-dir"].map((name) => [name, { type: "string" }])) });
+  const { values } = parseArgs({ options: Object.fromEntries(["base-dir", "profile-id", "label", "upstream", "fallback", "claude-binary", "api-key-file", "backup-dir"].map((name) => [name, { type: "string" }])) });
   for (const name of ["base-dir", "profile-id", "label", "upstream", "claude-binary", "api-key-file", "backup-dir"]) {
     if (!values[name]) throw new Error(`--${name} is required.`);
   }
@@ -112,7 +121,7 @@ async function main() {
   try {
     const { settings } = await client.rpc("server.getConfig");
     const providers = poolProviders(settings.providerInstances, {
-      id: values["profile-id"], label: values.label, upstream: values.upstream,
+      id: values["profile-id"], label: values.label, upstream: values.upstream, fallback: values.fallback,
       launcher: fileURLToPath(new URL("./claude_account_launcher.mjs", import.meta.url)), binary: values["claude-binary"], apiKey,
     });
     fs.writeFileSync(path.join(values["backup-dir"], "settings-before.json"), JSON.stringify(settings, null, 2), { flag: "wx", mode: 0o600 });
@@ -122,7 +131,7 @@ async function main() {
     const secret = saved.environment.find((variable) => variable.name === "ANTHROPIC_API_KEY");
     if (!secret?.sensitive || !secret.valueRedacted || secret.value) throw new Error("API key secret storage was not confirmed.");
     fs.writeFileSync(path.join(values["backup-dir"], "settings-after.json"), JSON.stringify(after, null, 2), { flag: "wx", mode: 0o600 });
-    console.log(JSON.stringify({ profile: values["profile-id"], label: saved.displayName, upstream: values.upstream, secretStoredAndRedacted: true, serverVersion: client.runtime.serverVersion }));
+    console.log(JSON.stringify({ profile: values["profile-id"], label: saved.displayName, upstream: values.upstream, fallback: values.fallback ?? null, secretStoredAndRedacted: true, serverVersion: client.runtime.serverVersion }));
   } finally {
     client.close();
   }

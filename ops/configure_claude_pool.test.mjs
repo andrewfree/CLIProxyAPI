@@ -46,3 +46,13 @@ test("refuses to overwrite another provider or accept an ambiguous endpoint", ()
     assert.throws(() => poolProviders(existing, { ...options, upstream }), /HTTP origin/);
   }
 });
+
+test("a fallback origin is stored next to the primary, and omitting it removes it", () => {
+  const withFallback = poolProviders(existing, { ...options, fallback: "http://127.0.0.1:18317/" });
+  const env = (result) => Object.fromEntries(result.claude_cliproxy.environment.map((variable) => [variable.name, variable.value]));
+  assert.equal(env(withFallback).CLIPROXY_FALLBACK_URL, "http://127.0.0.1:18317");
+  assert.equal(withFallback.claude_cliproxy.environment.find((v) => v.name === "CLIPROXY_FALLBACK_URL").sensitive, false);
+  assert.equal("CLIPROXY_FALLBACK_URL" in env(poolProviders(withFallback, options)), false);
+  assert.throws(() => poolProviders(existing, { ...options, fallback: "http://127.0.0.1:8317" }), /different CLIProxy host/);
+  assert.throws(() => poolProviders(existing, { ...options, fallback: "http://localhost/v1" }), /fallback must be an HTTP origin/);
+});
