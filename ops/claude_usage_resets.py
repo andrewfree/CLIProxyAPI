@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -189,13 +190,30 @@ def request_id_for(state_dir: pathlib.Path, email: str, grant_id: str) -> str:
 
 
 def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, receipt_path: pathlib.Path,
-          dry_run: bool, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+          dry_run: bool, sleep: Callable[[float], None] = time.sleep,
+          min_fable_percent: int | None = None) -> dict[str, Any]:
+    if min_fable_percent is not None and not 0 <= min_fable_percent <= 100:
+        raise ResetError("minimum Fable percent must be between 0 and 100")
     receipt: dict[str, Any] = {"started_at": now_iso(), "account": email, "grant_id": grant_id, "dry_run": dry_run}
     status, profile = proxy.upstream(email, "GET", PROFILE_URL)
     if status != 200 or (profile.get("account") or {}).get("email") != email:
         raise ResetError(f"profile check failed for {email} (HTTP {status})")
     org = profile["organization"]["uuid"]
     receipt["before"] = before = fetch_usage(proxy, email, sleep=sleep)
+    if min_fable_percent is not None:
+        percent = limit_percent(before, "Fable")
+        if percent is None:
+            raise ResetError(f"Fable limit is missing from the usage response for {email}; "
+                             f"cannot check the required {min_fable_percent}%")
+        try:
+            finite = not isinstance(percent, bool) and isinstance(percent, (int, float)) and math.isfinite(percent)
+        except OverflowError:
+            finite = False  # an integer too large for a float
+        if not finite:
+            raise ResetError(f"Fable usage percent is not a finite number ({type(percent).__name__})")
+        if percent < min_fable_percent:
+            raise ResetError(f"Fable usage {percent}% is below required {min_fable_percent}%")
+        receipt["min_fable_percent"] = min_fable_percent
     check_claimable(before, grant_id)
     request_id = request_id_for(state_dir, email, grant_id)
     receipt["request"] = {"url": CLAIM_URL.format(org="<org>"),
@@ -289,7 +307,8 @@ def cmd_claim(proxy: Proxy, args: argparse.Namespace) -> int:
         return 2
     stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     receipt_path = args.receipt or STATE_DIR / f"claim-{args.grant}-{stamp}{'-dryrun' if args.dry_run else ''}.json"
-    receipt = claim(proxy, args.account, args.grant, STATE_DIR, receipt_path, args.dry_run)
+    receipt = claim(proxy, args.account, args.grant, STATE_DIR, receipt_path, args.dry_run,
+                    min_fable_percent=args.min_fable_percent)
     print(json.dumps(receipt, indent=2))
     print(f"receipt: {receipt_path}", file=sys.stderr)
     return 0 if receipt["result"] in ("reset", "dry_run") else 1
@@ -317,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--account", required=True)
     p.add_argument("--grant", required=True, help="grant id from `status`, e.g. launch-2610-fable")
     p.add_argument("--receipt", type=pathlib.Path)
+    p.add_argument("--min-fable-percent", type=int, metavar="0..100",
+                   help="refuse a claim unless a fresh read reports a finite Fable usage of at least this percent")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--yes", action="store_true", help="really redeem the grant")
     mode.add_argument("--dry-run", action="store_true", help="run every check but do not send the claim")
