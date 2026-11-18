@@ -42,6 +42,8 @@ observed = {
     'save_cooldown_status': config.get('save-cooldown-status'),
     'transient_error_cooldown_seconds': config.get('transient-error-cooldown-seconds'),
     'max_retry_interval': config.get('max-retry-interval'),
+    'request_retry': config.get('request-retry'),
+    'max_retry_credentials': config.get('max-retry-credentials'),
     'routing': routing_policy_values(config),
     'routing_policy_matches': routing_policy_matches(
         config, release.get('routing_policy', {}).get(arch)
@@ -65,6 +67,8 @@ expected = {
     'save_cooldown_status': release['runtime_policy'].get('save-cooldown-status', 'missing from manifest'),
     'transient_error_cooldown_seconds': release['runtime_policy'].get('transient-error-cooldown-seconds', 'missing from manifest'),
     'max_retry_interval': release['runtime_policy'].get('max-retry-interval', 'missing from manifest'),
+    'request_retry': release['runtime_policy'].get('request-retry', 'missing from manifest'),
+    'max_retry_credentials': release['runtime_policy'].get('max-retry-credentials', 'missing from manifest'),
     'routing_policy_matches': True,
     'do_not_track': True,
 }
