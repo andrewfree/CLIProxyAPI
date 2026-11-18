@@ -560,23 +560,31 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 
 | Location | What it is | Consequence |
 | --- | --- | --- |
-| `/Users/rever/cliproxy` on the Mac | A git checkout, and also the deployed location. T3 runs the launcher from it through `config.binaryPath`; the LaunchAgents run the watchdog and archiver from it; Compose reads `docker-compose.yml` there. | A pull, a branch checkout or an uncommitted edit in that tree changes what runs. |
-| `~/cliproxy` on Will | A hand-copied subset of the tree, not a git checkout. | Files are replaced by copying, with the previous versions backed up under `ops/runtime/`. Hashes are the only link to a commit. |
-| `ops/runtime/` on each host | Private state, ignored by git (`.gitignore`): backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it; copy a receipt into `ops/evidence/` only after checking it. |
-| `ops/evidence/` | Sanitized, tracked records of activations and measurements, and the as-run scripts of each operation, byte-identical to what ran (for example `evidence/key-rotation-20261118/`). | This is where "why do we believe this" lives. Maintained tools that a runbook tells you to run live directly in `ops/` with tests. |
-| `config.yaml`, `.env`, `auths/` | Per host, never tracked, never copied between hosts. | The server's secrets; client-side copies are listed in section 2.9. |
+| `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. The installed jobs and T3 still use its checkout paths until cutover. | Until cutover, a pull, checkout, or uncommitted edit can change the next job run or new T3 session. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root. After cutover it supplies the two LaunchAgents and five T3 Claude launcher paths. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
+| `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
+| `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
+| `config.yaml`, `.env`, `auths/` | Per-host secrets. | Keep them on the instance that owns them. |
 | `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 18. | See below. |
 
-**Why the Mac's checkout is a risk (design unit 2b).** On the Mac the working tree is the deployed
-location, so a pull, a branch checkout or an uncommitted edit in that tree is a deploy, before any
-approval: a launcher change reaches the next new T3 session, and a watchdog or archiver change
-runs within 120 or 300 seconds ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 2 and 9). A merge on
-GitHub changes nothing on the Mac until it is pulled. The design's answer is to run
-both hosts from a shipped bundle at a recorded commit, outside the checkout. That is unit 2b, and
-it is not done. Until it is, the interim rule in [FLEET.md](FLEET.md#fleet-contract) applies:
-changing the watchdog, the log archiver, the Claude launcher, their plists or the Compose file in
-the Mac's primary checkout is a live change and needs Andrew's promote phrase. Edit those files
-only in a worktree.
+The checkout used to provide both the ops code and its working data. A checkout
+edit could reach launchd within 120 or 300 seconds, or T3 on the next session.
+Unit 2b moves the code into a shipped bundle. A ship reads exact Git blobs and
+the allowlist from the chosen commit, records hashes and modes, and switches
+the managed paths and manifest together by renaming a generation pointer.
+Separate generations let the Will bundle share an `ops/` directory with private
+state. The previous managed files have a dated backup beside the bundle root.
+
+The Mac's Compose files still live in the instance root. Before a bundled
+watchdog repair can run `compose up`, it specifies that root, the Compose
+files, and `.env`, then checks the hashes and resolved image against the
+activation receipt. A mismatch falls back to starting the existing container
+by name. An expiring pause lets an approved activation temporarily suppress
+all repairs. See the [cutover and rollback](FLEET.md#mac-ops-bundle-cutover).
+Until Andrew approves and verifies cutover, the interim live-change rule in
+[FLEET.md](FLEET.md#fleet-contract) applies. Sessions that predate the repoint
+retain their original launcher until they end.
 
 **Why config is edited in place.** `config.yaml` is bind-mounted as a single file. Replacing or
 renaming it breaks the mount's link to the inode, so every config change is one in-place write
@@ -682,8 +690,8 @@ Nothing tracked by git holds one.
   lines in `ops/runtime/fleet/failover.jsonl` on the Mac and dial-error 5xx answers from Will.
   For a host that is down or drifted, run `fleetctl health` and `parity` by hand. Unit 5 is also
   where quota statistics are planned to come from, since the quota plugin was removed from Will.
-- **Shipping ops files.** `fleetctl ship` is deferred. The Mac runs from its checkout and Will
-  from a copied tree (section 2.8).
+- **Bundle activation.** The Mac cutover and Will's first ship await live approval.
+  The cutover includes a P0 check of the installed paths and checksums (section 2.8).
 
 **Accepted:**
 

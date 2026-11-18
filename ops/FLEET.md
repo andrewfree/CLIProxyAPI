@@ -47,10 +47,10 @@ unrestricted upstream model remains. The management API omits per-credential
 alias attributes, so parity cannot account for those overrides.
 
 The read-only checks cover the management API contract. Use the existing
-instance verifiers for Docker image and Compose checks. The bundle manifest
-lists files for the later shipping step. Shipping, bundle activation receipts,
-in-container egress checks, and scheduled health notifications follow in
-separate units.
+instance verifiers for Docker image and Compose checks. The bundle can be
+shipped separately from the proxy. The Mac cutover below adds the P0 check
+for deployed files and configured launch paths. In-container egress checks
+and scheduled health notifications follow in separate units.
 
 Operational differences recorded on November 18, 2026, for review by December 2, 2026:
 
@@ -66,6 +66,119 @@ live change and requires Andrew's promote phrase. Edit those files in a
 worktree. Activate the Mac first, then Will. If verification fails, roll back
 the host just changed. A host that already passed requires Andrew's
 instruction to roll back.
+## Mac ops bundle cutover
+
+Unit 2b is prepared for Andrew's live approval. Run from a clean worktree at
+the reviewed, merged unit 2b commit. Wait for Andrew's `promote fleet <id>`
+phrase before publishing, installing, or repointing profiles. Coordinate a
+window for the two LaunchAgents and new Claude CLIProxy sessions. Existing
+sessions keep the launcher they started with. The primary checkout remains
+the instance root for Compose, the host's logs, and private runtime state.
+
+1. Preview the exact commit and record the five current T3 launcher paths.
+   Stop if either command fails or the paths differ from the expected checkout
+   launcher.
+
+   ```sh
+   commit=$(git rev-parse HEAD)
+   instance=/Users/rever/cliproxy
+   bundle="$HOME/cliproxy-live/ops"
+   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --dry-run
+   node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report
+   ```
+
+2. After approval, save the installed plists and token helper for rollback,
+   publish the bundle, and check that the current container matches the
+   Compose inputs before recording them. If the receipt command refuses,
+   investigate the mismatch before continuing. This cutover needs no
+   container recreate.
+
+   ```sh
+   backup=$(mktemp -d "$instance/ops/runtime/mac-bundle-cutover.XXXXXXXX")
+   for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
+     cp -p "$HOME/Library/LaunchAgents/$label.plist" "$backup/$label.plist"
+   done
+   cp -p "$HOME/.local/bin/cliproxy-codex-token" "$backup/cliproxy-codex-token"
+   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+   (cd "$instance" && CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 \
+     "$bundle/cliproxy_watchdog.py" --record-compose-activation --verbose)
+   ```
+
+   Keep the printed ship receipt and the value of `backup`. The activation
+   receipt is `ops/runtime/fleet/compose-activation.json` under the instance
+   root. It records the Compose file hashes, resolved image, and service
+   config hash. For later approved activations, refresh it after the new
+   container is running and verified. A missing or mismatched receipt blocks
+   `compose up`. The watchdog logs the refusal and tries `docker start` on
+   the existing named container. Running the bundled watchdog from any
+   directory other than the instance root blocks the repair outright.
+
+3. Reinstall both LaunchAgents and update the five T3 profiles. The T3
+   helper uses `server.updateSettings` to change `config.binaryPath` and
+   checks the saved profile settings. It prints only the five path strings.
+   Install the shipped token helper so its checksum can be included in P0.
+
+   ```sh
+   /bin/zsh ops/install_watchdog.sh "$bundle"
+   /usr/bin/install -m 0700 "$bundle/cliproxy-codex-token" "$HOME/.local/bin/cliproxy-codex-token"
+   node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --apply
+   ```
+
+4. Confirm both loaded jobs show the bundled scripts in their arguments,
+   then verify P0. Check the watchdog log for a normal cycle and the archiver
+   log for its usual status. Start one new `claude_cliproxy_mac` session
+   and one new named Claude session and verify that each can answer
+   `count_tokens` through its intended route. In a scratch worktree, a
+   local edit to a shipped script should leave the deployed hash unchanged.
+   Keep the interim live-change rule until sessions using the old launcher
+   have ended.
+
+   ```sh
+   for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
+     launchctl print "gui/$(id -u)/$label"
+   done
+   set -o pipefail
+   node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report |
+     python3 ops/fleetctl.py check --host m5 --bundle-commit "$commit" --launcher-paths -
+   ```
+
+For a later Compose activation, run these from the instance root immediately
+before and after the approved operation. Confirm an in-flight watchdog repair
+has finished before changing Compose inputs. The watchdog keeps observing and
+logs the pause once per cycle. The pause expires after 30 minutes using its
+modification time. Remove the file when the activation and receipt check finish.
+
+```sh
+touch ops/runtime/watchdog.pause
+# Run the approved activation and confirm the new container.
+CLIPROXY_ROOT="$PWD" /opt/homebrew/bin/python3 \
+  "$HOME/cliproxy-live/ops/cliproxy_watchdog.py" --record-compose-activation --verbose
+rm -f ops/runtime/watchdog.pause
+```
+
+**First cutover rollback.** Use the private `backup` from step 2. Restore the
+T3 paths, reinstall the saved checkout plists, and restore the token helper.
+
+```sh
+node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --rollback
+/bin/zsh ops/install_watchdog.sh "$backup"
+/usr/bin/install -m 0700 "$backup/cliproxy-codex-token" "$HOME/.local/bin/cliproxy-codex-token"
+node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report
+```
+
+Check the loaded jobs again. The saved settings take effect for new T3
+sessions. To roll back a later bundle ship, use the recorded previous commit
+with `ship --host m5 --commit <previous-shipped-sha> --apply`, then rerun P0
+against that SHA. A ship publishes the tracked allowlist and
+`bundle-manifest.json` together. Previous copies of managed files go under
+`~/cliproxy-live/prev/<timestamp>/`. An identical retry reports unchanged.
+
+The CLI can stage and publish on Will through its configured SSH destination.
+Will's first ship is unit 2c. It needs its own approval and verification.
+Coordinate a window without new Will launcher starts while the first ship
+converts legacy managed files to bundle aliases. Subsequent ships switch the
+active generation with one rename. Will's private `ops/runtime/` and other
+unmanaged files stay in place.
 
 ## Running fleet
 
