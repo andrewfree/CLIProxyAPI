@@ -237,6 +237,43 @@ proxy auth entry served the response. To undo this setup, remove the two T3
 provider entries through Settings, then clear their auth-file prefixes; existing
 unprefixed clients continue to use the shared pool.
 
+## Codex failover
+
+On the Mac, enable session-start failover for the Will-primary
+`codex_cliproxy` profile in T3 Settings after the approved rollout. Set:
+
+| Profile field | Value |
+| --- | --- |
+| `config.binaryPath` | Absolute path to `ops/codex_fallback_launcher.mjs` in the approved Mac checkout |
+| Profile environment `CLIPROXY_FALLBACK_URL` | `http://127.0.0.1:8317` |
+| Profile environment `CODEX_REAL_BINARY` | `/opt/homebrew/bin/codex` |
+
+Keep the existing launch arguments and auth command, including the
+`-c` argument followed by the single string
+`model_providers.cliproxy.base_url="http://will.<tailnet>.ts.net:8317/v1"`.
+The executable needs Node.js on T3's PATH and
+`claude_account_launcher.mjs` beside it for the shared health probe.
+
+Each launch checks Will first. A host passes if a fresh connection to
+`GET /healthz` returns HTTP 200 with JSON `{"status":"ok"}` within three
+seconds. If Will fails and the Mac passes, only the base URL changes, to
+`http://127.0.0.1:8317/v1`. If both fail, Codex starts with its original
+arguments so it can report its usual connection error. Every new process
+chooses again. A running session stays on its selected host until its Codex
+process ends, including if Will recovers or either host goes down.
+
+With the fallback variable absent, the launcher passes the arguments
+through without probing or writing a decision. With it set, each decision
+appends one JSON line to `ops/runtime/fleet/codex-failover.jsonl` under the
+launcher's checkout, or to the file selected by
+`CLIPROXY_CODEX_FAILOVER_LOG`. Records contain the selected route and reason,
+with no URLs, hostnames or credentials. If the launcher cannot identify a
+single supported base URL, or the fallback URL is invalid, it keeps the
+original arguments and records `invalid_configuration`.
+
+See the [fleet runbook](FLEET.md#enable-or-roll-back-codex-failover) for the
+rollout, closed-port drill and rollback.
+
 ## Recovery behavior
 
 `com.rever.cliproxy-watchdog` runs at login and every 120 seconds. One run performs these checks in order:

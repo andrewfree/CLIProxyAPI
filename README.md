@@ -159,6 +159,10 @@ The collector writes a timestamped directory under `logs/` containing the matchi
 
 CLIProxy's delete-based size ceiling is disabled. Closed GPT, Anthropic, and other provider logs are copied to TheCloud, SHA-256 verified, and only then pruned locally by the launchd archive job documented in `ops/README.md`. Authorization, API-key, token, and secret headers are masked, but request bodies and model responses are intentionally retained and may contain private project content. Trace bundles and NAS archives are private and must be reviewed before sharing.
 
+### Codex failover
+
+On the Mac, T3's `codex_cliproxy` profile can use the local proxy when Will fails its startup health check. Enable the launcher through [the Codex profile settings](ops/README.md#codex-failover). Each session keeps its selected host for the lifetime of its Codex process.
+
 ## Usage Statistics
 
 Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:

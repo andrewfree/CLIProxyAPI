@@ -69,7 +69,7 @@ instruction to roll back.
 
 ## Running fleet
 
-Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`. The Mac's `claude_cliproxy` and `codex_cliproxy` profiles reach Will by its tailnet name, `http://will.<tailnet>.ts.net:8317` (with `/v1` for Codex). Public resolvers answer NXDOMAIN for that name, so with Tailscale stopped the lookup should fail at once, instead of sending traffic and the client key to whatever holds Will's tailnet address on another network. The Claude launcher then fails over; Codex has no fallback, so its request fails. M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw address.
+Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`. The Mac's `claude_cliproxy` and `codex_cliproxy` profiles reach Will by its tailnet name, `http://will.<tailnet>.ts.net:8317` (with `/v1` for Codex). Public resolvers answer NXDOMAIN for that name, so with Tailscale stopped the lookup should fail at once, instead of sending traffic and the client key to whatever holds Will's tailnet address on another network. The Claude launcher then fails over. Once enabled, the Codex launcher can select the Mac at session start after that failed lookup. M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw address.
 
 `fleet-release.json` pins one application source commit, one Cursor plugin version, and the exact platform image and plugin hashes. Both images are built from the same commit. ARM64 runs on the Mac's Docker VM; AMD64 runs on Will. Compose uses immutable local image IDs with `pull_policy: never`, so a restart cannot silently select a new release. The two Compose files and owner contracts must be changed together for the next release.
 
@@ -139,7 +139,7 @@ T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the sha
 
 `ops/claude_account_launcher.mjs` supports explicit `shared-pool` mode through `CLIPROXY_CLAUDE_ROUTE`. This mode forwards unprefixed Claude model IDs to the existing credential selector. Named profiles keep their account prefixes. `ops/configure_claude_pool.mjs` provisions pool profiles through the running T3 settings API and stores keys in its secret store. The [routing receipt](evidence/claude-pool-routing-20261103.json) records tests, deployed artifact hashes, and runtime-check limits. This host-side integration does not change the fleet's server images or manifest.
 
-`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). Every other profile keeps a fixed host and never fails over: `claude_cliproxy_mac`, the three named Claude profiles, the Codex-family profiles and Will's own `claude_cliproxy`. Where a profile for the other host exists, switching to it is manual. A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. New sessions use the selected endpoint; an already running client keeps its launch environment. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
+`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. The Mac's `codex_cliproxy` can opt into session-start failover using the procedure below. The `_mac` profiles, named Claude profiles and Will's own `claude_cliproxy` use fixed hosts. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
 
 For exact-model discovery and an authorized T3 task, follow [the Kimi CLIProxy routing recipe](KIMI_ROUTING.md).
 
@@ -170,6 +170,46 @@ The previous fleet.1 source is `d4fa77254e2922a834f6f97ddac0d7a88249b9ad`, based
 The following rollback record applies only to the October 15 fleet.3 deployment. First preserve the failed runtime configuration in a new private directory, stop only the proxy, and restore the backed-up Compose, `.env`, configuration and deployment metadata on that host. Restore the Mac's backed-up `docker-compose.override.yml` too. Both hosts had `.env` files before fleet.3; their image selections must be restored. Use the receipt to distinguish pre-existing files from metadata added during this deployment, and move added metadata into the failed-release backup. Recreate with `docker compose up -d --no-deps --pull never --no-build cli-proxy-api`, then run the restored verifier and a real client request. Preserve newly refreshed OAuth files. The retained Mac image is `sha256:1914227451c32a2e19cc3c1919c8e53fe48507dc2a09a2f0f1d76563bdae361e`. The retained Will image is `sha256:cff34aadce0684523ca94d7829be961954ce1bebfba7c8c3fb847c50b7281e0a`.
 
 Tailscale Serve can remain in place during an application rollback. To remove only the new private route, use `sudo tailscale serve --tcp=8317 off` on Will. Do not reset Serve: HTTPS 443 belongs to T3. Revert T3 routes through `server.updateSettings` or the app settings, preserving secrets in the app's secret store.
+
+### Enable or roll back Codex failover
+
+1. After review and CI, obtain Andrew's live promote phrase for the Mac
+   checkout update and T3 profile change. Check that both hosts accept the
+   profile's existing client key and serve the model IDs used by the profile.
+2. From the approved Mac checkout, run the local closed-port test and print
+   the executable's absolute path for T3 Settings.
+
+   ```sh
+   node --test --test-name-pattern='connection refusal' ops/codex_fallback_launcher.test.mjs
+   printf '%s/ops/codex_fallback_launcher.mjs\n' "$(pwd -P)"
+   ```
+
+3. Use those [profile settings](README.md#codex-failover) on a temporary
+   copy of `codex_cliproxy` for a closed-port T3 drill. Generate a closed
+   loopback URL and a separate decision log:
+
+   ```sh
+   node -e 'const s = require("node:net").createServer(); s.listen(0, "127.0.0.1", () => { const {port} = s.address(); s.close(() => console.log("http://127.0.0.1:" + port + "/v1")); });'
+   codex_drill_dir=$(mktemp -d)
+   printf '%s/codex-failover.jsonl\n' "$codex_drill_dir"
+   ```
+
+   Replace only the copy's primary `base_url` value with the printed
+   loopback URL and set its `CLIPROXY_CODEX_FAILOVER_LOG` to the printed file.
+   Start a new session on the copy and check that the approved smoke request
+   completes through the Mac. Run `cat "$codex_drill_dir/codex-failover.jsonl"`
+   and check for `"selected":"fallback"` with `"reason":"fallback_healthy"`.
+   End that session and remove the temporary profile.
+4. Apply the [profile settings](README.md#codex-failover) to
+   `codex_cliproxy` in T3 Settings, with its original Will launch arguments.
+   Start a fresh session while Will is healthy and check the new decision in
+   `ops/runtime/fleet/codex-failover.jsonl` for `"selected":"primary"` and
+   `"reason":"primary_healthy"`.
+
+To roll back, restore `config.binaryPath` to `/opt/homebrew/bin/codex` and
+remove `CLIPROXY_FALLBACK_URL` and `CODEX_REAL_BINARY` from that profile's
+environment. Save the profile and use a fresh session. A session already
+running stays on the host it started with until its Codex process exits.
 
 ## Operations on November 18, 2026
 

@@ -364,7 +364,7 @@ listed in [README.md](README.md#host-failover-for-the-shared-pool); this section
 | D. The Mac server proxies to Will | Needs a Go change and adds a second hop to every request. |
 | **E. Harden the launcher, for one profile** | **Chosen.** No new service, no Go change, and the launcher already sits in the request path of each session. |
 
-**Only `claude_cliproxy` on the Mac fails over.** The launcher refuses `CLIPROXY_FALLBACK_URL` on
+**For Claude, only `claude_cliproxy` on the Mac fails over.** The launcher refuses `CLIPROXY_FALLBACK_URL` on
 a named account route, because a pinned account must never move to another host. Named routes
 never cross hosts, so failover cannot reach an account mismatch even if the hosts drift
 ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 6 and 14). The `_mac` profiles are already local and
@@ -394,9 +394,10 @@ and the check was a resolver comparison. With the raw address, a foreign network
 100.x range could receive the traffic in clear
 ([FLEET.md](FLEET.md#running-fleet), design question 3). Since the November 18 parity cleanup the
 Mac's `codex_cliproxy` uses the name too, for the same reason: its
-`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. It has no
-launcher, so a failed lookup fails the request instead of failing over. M1 and the Will entry in
-CLIProxyBar (the Mac menu-bar quota app) still use the raw address (section 4).
+`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. With the optional
+Codex launcher enabled, a failed startup lookup can send a new Codex session to the Mac
+(section 4). M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw
+address.
 
 The name does not help on a network whose resolver answers every name, as some captive portals do:
 a session already running would send requests, with the client key, in clear to that address, and
@@ -654,14 +655,16 @@ Nothing tracked by git holds one.
 
 ## 4. What is still manual or accepted
 
+**Codex session-start failover.** With the [Codex launcher enabled](README.md#codex-failover),
+the Mac's `codex_cliproxy` checks Will at startup and selects the Mac automatically if Will
+fails its health check and the Mac passes. If both fail, it starts with the Will URL. The
+launcher reuses the three-second `/healthz` probe from section 2.6. A healthy `/healthz`
+cannot reveal an upstream egress outage. Codex CLI keeps one `base_url` per process, so an
+existing session stays on its selected host. Until Andrew enables the launcher, switching is
+manual. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to the Mac.
+
 **Not automatic:**
 
-- **Codex-family profiles** (`codex_cliproxy`, `codex_cliproxy_mac`, `codex_kimi_mac`). Codex CLI
-  has one `base_url`, and no launcher sits in front of it. When Will is unreachable, selecting the
-  `_mac` profile is a manual action. Parity keeps that profile a close substitute, but not an
-  exact one today: the Mac also serves the `camoff-astra` prefix (dated exceptions, section 2.1),
-  which waits for Andrew's OAuth login on Will. The design's optional wrapper (unit 10) is not
-  built.
 - **CLIProxyBar's Will entry uses Will's raw address.** The Mac's `codex_cliproxy` moved to the
   tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
   CLIProxyBar's Will entry still reaches Will at its raw tailnet IP address, so the section 2.6
