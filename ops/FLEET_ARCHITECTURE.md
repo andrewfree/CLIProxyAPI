@@ -32,14 +32,14 @@ secrets and logs.
                                         pool mode, failover ON        |   Linux amd64, always on
                                                                       |   container on loopback,
                                                                       |   Tailscale Serve TCP 8317   Anthropic
-                                                                      |   by name: claude_cliproxy   (3 Claude accounts
+                                                                      |   by name, from the Mac:     (3 Claude accounts
                                                                       |   will.<tailnet>.ts.net       per host)
-                                                                      |   by address: Codex and M1   OpenAI Codex
+                                                                      |   by address: M1 only        OpenAI Codex
                                                                       +-> Mac   (fallback)           Kimi
    claude_cliproxy_mac (shared pool) -> launcher, pool mode ------------> Mac                        Z.ai Coding Plan
    3 named Claude profiles -----------> launcher, account prefix -------> Mac                        Cursor plugin
-                                                                          Docker Desktop, arm64      NVIDIA (Mac only)
-   codex_cliproxy --------------------- (no launcher, one base_url) ----> Will  (tailnet address)
+                                                                          Docker Desktop, arm64      NVIDIA
+   codex_cliproxy --------------------- (no launcher, one base_url) ----> Will  (tailnet name)
    codex_cliproxy_mac, codex_kimi_mac - (no launcher, one base_url) ----> Mac   127.0.0.1:8317
 
  Will, T3
@@ -50,6 +50,7 @@ secrets and logs.
 
  Only the first arrow pair is automatic. Every other profile has one fixed host.
  The two proxies share no runtime state and neither is in the other's request path.
+ CLIProxyBar (the Mac menu-bar quota app, not shown) still reaches Will by address (section 4).
 ```
 
 Sources: profile list and hosts in [FLEET.md](FLEET.md#running-fleet); per-client routes in
@@ -140,10 +141,13 @@ Three details of the parity design matter when you change it:
   tags made with a nonce that exists for one run ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 4
   and 8).
 - **Every difference needs a dated exception.** [fleet/exceptions.json](fleet/exceptions.json)
-  holds nine entries dated November 18 with `review_by` December 2: debug logging, NVIDIA on the
-  Mac only, the quota plugin on Will only, the `camoff-astra` prefix on the Mac and the extra
-  `kimi-ai` credential on Will. None is on a Claude row. An expired exception fails parity, so a
-  temporary difference cannot become permanent by being forgotten.
+  holds three entries dated November 18 with `review_by` December 2: debug logging, and two for
+  the `camoff-astra` prefix on the Mac. Six more were seeded that day, for NVIDIA on the Mac only,
+  the quota plugin on Will only and the extra `kimi-ai` credential on Will. They were removed the
+  same day once those differences were gone
+  ([FLEET.md](FLEET.md#operations-on-november-18-2026), parity cleanup). None is on a Claude row.
+  An expired exception fails parity, so a temporary difference cannot become permanent by being
+  forgotten.
 
 **What went wrong with parity itself.** After the fleet.4 activation, parity reported a credential
 error on Will. It was a Codex account with a `model_not_supported` cooldown for one model, which
@@ -343,8 +347,9 @@ the same way, and failover never relieves a 429 ([FLEET_DESIGN.md](FLEET_DESIGN.
 
 Failover has been live since shortly after 12:53 Pacific on November 18, when `claude_cliproxy`
 got its fallback (fleet design unit 3, PR #14;
-[FLEET.md](FLEET.md#operations-on-november-18-2026)). PR #13, the SYN-retry bound, is merged but
-takes effect only when each container is next recreated (section 2.7). The exact behaviour is
+[FLEET.md](FLEET.md#operations-on-november-18-2026)). PR #13, the SYN-retry bound, has been live
+on both hosts since their containers were recreated at about 15:19 Pacific the same day
+(section 2.7). The exact behaviour is
 listed in [README.md](README.md#host-failover-for-the-shared-pool); this section gives the reasons.
 
 #### Why the launcher, and why one profile (option E)
@@ -387,8 +392,11 @@ Public resolvers answer NXDOMAIN for that name. With Tailscale stopped the looku
 fail at once, and the launcher would fail over. This was not tested: Tailscale was not stopped,
 and the check was a resolver comparison. With the raw address, a foreign network that reuses the
 100.x range could receive the traffic in clear
-([FLEET.md](FLEET.md#running-fleet), design question 3). Only `claude_cliproxy` uses the name; the
-Mac's `codex_cliproxy` and M1 still use the raw address (section 4).
+([FLEET.md](FLEET.md#running-fleet), design question 3). Since the November 18 parity cleanup the
+Mac's `codex_cliproxy` uses the name too, for the same reason: its
+`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. It has no
+launcher, so a failed lookup fails the request instead of failing over. M1 and the Will entry in
+CLIProxyBar (the Mac menu-bar quota app) still use the raw address (section 4).
 
 The name does not help on a network whose resolver answers every name, as some captive portals do:
 a session already running would send requests, with the client key, in clear to that address, and
@@ -536,10 +544,11 @@ per account per round. With three accounts and `request-retry: 3` the worst case
 about 86 seconds, above the design's 30-second target. The next remedies in the design (a launcher
 health hint, then a dial bound in the fork that would need Andrew's ruling) are not built.
 
-**Why it is not live yet.** A sysctl is applied when a container is created. Each container picks
-it up at its next recreate: the next activation, or on the Mac when the watchdog's repair runs
-`docker compose up`. Until then Will's verifier reports `container_sysctls_drift`, which is
-expected ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
+**When it went live.** A sysctl is applied when a container is created, so the merged setting
+waited for a recreate. Both containers were recreated on unchanged images on November 18, the Mac
+at 23:18:46Z and Will at 23:19:06Z, and each reads `net.ipv4.tcp_syn_retries` back as 2. Will's
+verifier reported `container_sysctls_drift` until then and now reports ok
+([FLEET.md](FLEET.md#operations-on-november-18-2026), parity cleanup).
 
 **Why there is no pre-deploy idle gate.** A recreate drops every stream on the host, so the design
 proposed deploying only when traffic was quiet for two 15-second windows. Measured across 80
@@ -601,8 +610,8 @@ their own transcripts.
   UTC. The repository records no reason for this overlap. Its effect is that sessions already
   running keep working, because a running session keeps the key it launched with.
 - The Z.ai Coding Plan key was replaced on both hosts and the old one deleted.
-- The NVIDIA key (Mac only) was rotated and the old one deleted. The new key expires on
-  2027-11-18.
+- The NVIDIA key (then Mac only) was rotated and the old one deleted. The new key expires on
+  2027-11-18. Later that day the NVIDIA provider was added to Will as well.
 
 FLEET.md records no rotation of OAuth credentials, the management key or other provider keys.
 
@@ -631,8 +640,12 @@ Nothing tracked by git holds one.
 | The hosts drifted without anyone deciding it | `fleetctl check`, `parity`, `fingerprint`, `health`; dated exceptions | `ops/fleetctl.py`, `ops/fleet/` | PRs #7 and #10; [FLEET.md](FLEET.md#fleet-contract) |
 | Parity raised a false credential warning | A credential whose only cooldowns are `model_not_supported` counts as healthy while it still serves an unrestricted model | `ops/fleetctl.py` | PR #10; [evidence/fleet4-activation-20261118/](evidence/fleet4-activation-20261118/README.md) |
 | With Will unreachable, the pooled Claude profile failed | Launcher failover from Will to the Mac for `claude_cliproxy` | `ops/claude_account_launcher.mjs`; T3 profile environment | PR #14; [README.md](README.md#host-failover-for-the-shared-pool) |
-| With Tailscale stopped, traffic could go to whatever holds 100.x | `claude_cliproxy`'s primary is Will's tailnet name; the Mac's `codex_cliproxy` and M1 still use the address (section 4) | T3 profile `CLIPROXY_BASE_URL` | [FLEET.md](FLEET.md#running-fleet) |
-| A dropped SYN made one Claude dial wait about 133 to 135 s | `net.ipv4.tcp_syn_retries: 2` (after the next recreate) | Both Compose files; Will's policy and verifier | PR #13; [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| With Tailscale stopped, traffic could go to whatever holds 100.x | The Mac's `claude_cliproxy` and `codex_cliproxy` reach Will by its tailnet name; M1 and CLIProxyBar still use the address (section 4) | T3 profile `CLIPROXY_BASE_URL`; Codex `model_providers.cliproxy.base_url` | [FLEET.md](FLEET.md#running-fleet) |
+| A dropped SYN made one Claude dial wait about 133 to 135 s | `net.ipv4.tcp_syn_retries: 2`, live since the November 18 recreate | Both Compose files; Will's policy and verifier | PR #13; [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| Z.ai answered `glm-5.2` with GLM-5.3, and Will's Cursor `glm-5.2` entry returned 503 `auth_not_found` | Client ID `glm-5.2` maps to upstream `glm-5.3` on `zai-coding-plan` | Host `config.yaml` on both hosts | [GLM_ROUTING.md](GLM_ROUTING.md#glm-52-maps-to-glm-53) |
+| Only the Mac served the NVIDIA models | NVIDIA provider and its three aliases added to Will | Will `config.yaml` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; unit 5 is planned for quota statistics | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| Will's extra `kimi-ai` login looked like extra Kimi capacity | Removed: its usage counters matched the `kimi` login, so both share one quota | Will `auths/`; private backup in Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026); [KIMI_ROUTING.md](KIMI_ROUTING.md) |
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
 | A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
 | Codex CLI slept for days on a long `Retry-After` | The header is omitted above one minute | Fleet release (server) | [FLEET.md](FLEET.md#running-fleet) |
@@ -646,14 +659,15 @@ Nothing tracked by git holds one.
 - **Codex-family profiles** (`codex_cliproxy`, `codex_cliproxy_mac`, `codex_kimi_mac`). Codex CLI
   has one `base_url`, and no launcher sits in front of it. When Will is unreachable, selecting the
   `_mac` profile is a manual action. Parity keeps that profile a close substitute, but not an
-  exact one today: the Mac also serves the `camoff-astra` prefix and the NVIDIA models, and Will
-  has an extra `kimi-ai` credential (dated exceptions, section 2.1). The design's optional wrapper
-  (unit 10) is not built.
-- **The Mac's `codex_cliproxy` uses Will's raw address.** It still reaches Will at
-  its raw tailnet IP address ([KIMI_ROUTING.md](KIMI_ROUTING.md)), not at the tailnet name, so
-  the section 2.6 reason for the name applies to it too: with Tailscale stopped on another network,
-  it would send requests, with its client key, in clear to whatever holds that address. Moving it
-  to the name is a separate live change for Andrew.
+  exact one today: the Mac also serves the `camoff-astra` prefix (dated exceptions, section 2.1),
+  which waits for Andrew's OAuth login on Will. The design's optional wrapper (unit 10) is not
+  built.
+- **CLIProxyBar's Will entry uses Will's raw address.** The Mac's `codex_cliproxy` moved to the
+  tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
+  CLIProxyBar's Will entry still reaches Will at its raw tailnet IP address, so the section 2.6
+  reason for the name applies to it too: with Tailscale stopped on another network, it would send
+  its requests in clear to whatever holds that address. Moving it to the name is a separate change
+  for Andrew.
 - **Named Claude profiles.** They are fixed to one host by design (section 2.6). A cooldown on a
   named account is returned to the chat.
 - **M1.** It reaches Will only. The Mac is loopback-only, so it cannot be M1's fallback; M1's
@@ -666,17 +680,17 @@ Nothing tracked by git holds one.
   nothing tells Andrew when Will's egress is down. `fleetctl health` cannot tell either, because
   `/healthz` stays green when only egress is down. Signs of an egress outage are `egress_hold`
   lines in `ops/runtime/fleet/failover.jsonl` on the Mac and dial-error 5xx answers from Will.
-  For a host that is down or drifted, run `fleetctl health` and `parity` by hand.
+  For a host that is down or drifted, run `fleetctl health` and `parity` by hand. Unit 5 is also
+  where quota statistics are planned to come from, since the quota plugin was removed from Will.
 - **Shipping ops files.** `fleetctl ship` is deferred. The Mac runs from its checkout and Will
   from a copied tree (section 2.8).
 
 **Accepted:**
 
 - **A message can run twice** if Will's egress fails in the middle of a request (section 2.6).
-- **Egress-down delay.** Until each container is recreated, a dropped-SYN dial waits about 133 to
-  135 seconds, and one request can make up to 12 such dials with three credentials and
-  `request-retry: 3`. After the recreate a dial fails in about 7 seconds, about 86 seconds per
-  request in the worst case (section 2.7).
+- **Egress-down delay.** Since both containers were recreated on November 18, a dropped-SYN dial
+  fails in about 7 seconds, but one request can make up to 12 such dials with three credentials
+  and `request-retry: 3`, about 86 seconds per request in the worst case (section 2.7).
 - **A failover can cost a cold cache write**, because bindings and date pins are per host
   (section 1).
 - **A resolver that answers every name** defeats the tailnet-name protection; not tested
@@ -685,7 +699,8 @@ Nothing tracked by git holds one.
   and both hosts use the same accounts and providers.
 - **Each host learns a cap separately.** Cooldown state is not shared, so a capped account costs
   about one wasted call per host per window ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
-- **Nine dated exceptions**, due for review by December 2, 2026 (section 2.1).
+- **Three dated exceptions** (debug logging and `camoff-astra`), due for review by December 2,
+  2026 (section 2.1).
 - **Will uses the flat legacy YAML layout** until the layout migration (design unit 7). The loaded
   view makes the two layouts comparable in the meantime.
 - **Old client keys overlap** until 2026-11-19 10:30 UTC, so sessions launched with an old key

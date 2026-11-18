@@ -84,7 +84,9 @@ class FleetCTLTest(unittest.TestCase):
         self.paths = fleet.read_json(fleet.OPS / "fleet/paths.json")
         self.release = fleet.read_json(fleet.OPS / "fleet-release.json")
         self.hosts = fleet.read_json(fleet.OPS / "fleet/hosts.json")
-        self.exceptions = fleet.read_json(fleet.OPS / "fleet/exceptions.json")
+        # The synthetic fleet below models the exceptions recorded on 2026-11-18, so the tests use that
+        # frozen list; the live ops/fleet/exceptions.json is checked by `fleetctl check` and parity.
+        self.exceptions = fleet.read_json(fleet.OPS / "test_fleetctl_exceptions.json")
 
     def fixture(self):
         directory = TemporaryDirectory()
