@@ -52,6 +52,21 @@ test("the pool keeps its own launch arguments, so Claude in Chrome stays on the 
   assert.equal(poolProviders(created, options).claude_cliproxy.config.launchArgs, "--verbose");
 });
 
+test("a pool launchArgs equal to the direct profile's is dropped, another is kept, and a new pool gets none", () => {
+  const withArgs = (providers, id, launchArgs) => ({ ...providers, [id]: { ...providers[id], config: { ...providers[id].config, launchArgs } } });
+  const chrome = withArgs(existing, "claudeAgent", "--chrome");
+  // An earlier version copied the direct config into the pool, --chrome included.
+  const inherited = withArgs(poolProviders(chrome, options), "claude_cliproxy", "--chrome");
+  assert.equal(poolProviders(inherited, options).claude_cliproxy.config.launchArgs, "");
+  assert.equal(poolProviders(inherited, options).claudeAgent.config.launchArgs, "--chrome");
+  const own = withArgs(poolProviders(chrome, options), "claude_cliproxy", "--verbose");
+  assert.equal(poolProviders(own, options).claude_cliproxy.config.launchArgs, "--verbose");
+  assert.equal(poolProviders(chrome, options).claude_cliproxy.config.launchArgs, "");
+  // Without direct launch arguments, an existing pool value is still the pool's own.
+  const plain = withArgs(poolProviders(existing, options), "claude_cliproxy", "--verbose");
+  assert.equal(poolProviders(plain, options).claude_cliproxy.config.launchArgs, "--verbose");
+});
+
 test("refuses to overwrite another provider or accept an ambiguous endpoint", () => {
   for (const id of ["claudeAgent", "named", "codex"]) assert.throws(() => poolProviders(existing, { ...options, id }), /Refusing to replace/);
   for (const upstream of ["http://user:secret@localhost", "http://localhost/v1", "http://localhost?key=secret", "file:///host"]) {

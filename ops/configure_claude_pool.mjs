@@ -29,13 +29,16 @@ export function poolProviders(providers, { id, label, upstream, fallback, launch
   }
   const direct = providers.claudeAgent;
   if (direct?.driver !== "claudeAgent") throw new Error("The native Claude provider must exist.");
+  // Launch arguments such as --chrome belong to the direct profile. A pool value equal to the direct
+  // one was inherited from it, so it is cleared; any other existing value is the pool's own.
+  const previousArgs = previous?.config?.launchArgs;
+  const launchArgs = previousArgs === undefined || previousArgs === direct.config?.launchArgs ? "" : previousArgs;
   return {
     ...providers,
     claudeAgent: { ...direct, displayName: direct.displayName || "Claude - Direct login" },
     [id]: {
       driver: "claudeAgent", displayName: label, enabled: true,
-      // Launch arguments such as --chrome belong to the direct profile; the pool keeps its own.
-      config: { ...direct.config, binaryPath: launcher, launchArgs: previous?.config?.launchArgs ?? "" },
+      config: { ...direct.config, binaryPath: launcher, launchArgs },
       environment: [
         { name: "CLIPROXY_CLAUDE_ROUTE", value: "shared-pool", sensitive: false },
         { name: "CLIPROXY_ACCOUNT_PREFIX", value: "", sensitive: false },
