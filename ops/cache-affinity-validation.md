@@ -62,3 +62,18 @@ git show 777557c8:ops/cache_probe.py | shasum -a 256
 Measured probe SHA-256 is `ed327f1de503692cfb5a19a0bbc7494b26c3ee8adfcade6e9709354de83f93f1`. Final probe SHA-256 is `618e5798884e7353b3a16eb0cc7276364023a63ee8615b92d2a12b57bcd8bb89`. The original comparison is not attributed to the later hardened source.
 
 Final validation passed 84 ops tests, including 21 probe tests and an added routing regression test. Tests changed to add coverage. Focused Go auth, session, service, and configuration tests passed, and the server built. The initial system-Python ops run lacked PyYAML; the complete passing run used the isolated report venv with PyYAML 6.0.3. No test was weakened to accommodate that dependency failure. No full local-ci or native T3 cache comparison is claimed. The later [client validation receipt](evidence/cache-affinity-20261102/client-validation.json) records separate HTTP and native T3 connectivity checks for the final setup.
+
+## November 18, 2026: affinity enabled from real traffic
+
+The November 2 trial above used 120 synthetic Luna requests. It did not measure Claude, Codex, or native T3 traffic, which is where most pooled requests go.
+
+A read-only parse of Mac request logs from November 11 to 18 measured that traffic. It covered 47,887 `/v1/messages` and 8,765 `/v1/responses` logs. The parser extracted only timestamps, hashed session and agent IDs, models, per-attempt account labels and statuses, and usage counts. Consecutive turns of one stream within 300 seconds were compared by serving account:
+
+| Stream | Turn pairs | Account switched | Cache hit, same account | Cache hit, switched |
+| --- | --- | --- | --- | --- |
+| Claude pool | 35,343 | 2,361 | 98.7% | 88.1% |
+| Codex pool | 7,627 | 2,713 | 98.6% | 96.0% |
+
+Claude switches reached 20% of turns on November 12 and 38% on November 13. A switched Claude turn wrote a median of 5,464 cache tokens and a 90th percentile of 39,984, against 1,604 and 6,327 on the same account. That added about 11% and 24% to those days' input cost at API-price equivalents. Switching fell to zero on later days only because a single account remained eligible. Codex switches reached 66% of turns on November 14 and 44% on November 15. The parser could not tell apart the two unprefixed Codex credentials, so the Codex rate is a lower bound. Will retains only one day of logs and could not be measured. How subscription limits weigh cache writes against reads is not published, so the cost figures are price equivalents, not measured quota.
+
+Session affinity wraps the quota-aware selector. It binds each stream by `X-Claude-Code-Session-Id` plus agent ID, or by Codex `Session-Id`, so new streams are still balanced by quota. Claude Fable and Claude Opus reviewed the evidence and the selector code independently. They agreed on `session-affinity: true` with the existing TTL, subagent and rebind settings, plus the Mac's adoption of Will's `transient-error-cooldown-seconds: -1` and `max-retry-interval: 75`. A post-change measurement on a day with two or more eligible accounts has not been run.

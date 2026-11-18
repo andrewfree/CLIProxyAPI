@@ -13,11 +13,11 @@ The November 14, 2026 activation recorded these routes:
 | Host | Client alias | Upstream model | Verification |
 | --- | --- | --- | --- |
 | Mac | `glm-5p3`, `glm-5.3` | `glm-5.3` | HTTP 200, `GLM_OK` |
-| Mac | `glm-5.3-flash` | `glm-5.3-flash` | Configured; no recorded completion test |
+| Mac | `glm-5p3-flash`, `glm-5.3-flash` | `glm-5.3-flash` | `glm-5p3-flash` added November 18; no recorded completion test |
 | Will | `glm-5p3`, `glm-5.3` | `glm-5.3` | HTTP 200, `GLM_OK` |
 | Will | `glm-5p3-flash`, `glm-5.3-flash` | `glm-5.3-flash` | HTTP 200, `GLM_OK` |
 
-Will's `glm-5.3` check used `/v1/responses`. Its other three checks used
+Until November 18 the Mac lacked the `glm-5p3-flash` alias, so the Mac catalog listed that name under the Cursor plugin. Will's `glm-5.3` check used `/v1/responses`. Its other three checks used
 `/v1/chat/completions`. Each response named the expected upstream model.
 Will retains the older `glm-5.2` Cursor entry; it is outside this direct
 Coding Plan configuration and was not used for inference.
