@@ -308,6 +308,7 @@ func TestClaudeCloakedDateReminderT3SessionByteStability(t *testing.T) {
 			third := request(`[{"role":"user","content":"Say OK."},{"role":"assistant","content":"OK"},{"role":"user","content":"Say it again."},{"role":"assistant","content":"OK"},{"role":"user","content":"Once more."}]`)
 			worker := request(`[{"role":"user","content":"Summarize the repository layout."}]`)
 			workerNext := request(`[{"role":"user","content":"Summarize the repository layout."},{"role":"assistant","content":"OK"},{"role":"user","content":"Shorter."}]`)
+			fork := request(`[{"role":"user","content":"Say OK."},{"role":"assistant","content":"OK"},{"role":"user","content":"Say it again."},{"role":"assistant","content":"OK"},{"role":"user","content":"Fork: check the tests."}]`)
 			main := optionsFor(clientSession, "")
 
 			if _, err := exec.Execute(ctx, auth, first, main); err != nil {
@@ -330,15 +331,18 @@ func TestClaudeCloakedDateReminderT3SessionByteStability(t *testing.T) {
 			if _, err := exec.ExecuteStream(ctx, auth, workerNext, optionsFor(clientSession, "worker")); err != nil {
 				t.Fatalf("subagent second turn (stream): %v", err)
 			}
+			if _, err := exec.Execute(ctx, auth, fork, optionsFor(clientSession, "fork-1")); err != nil {
+				t.Fatalf("fork turn: %v", err)
+			}
 			execution := optionsFor(clientSession, "")
 			execution.Metadata = map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "run-" + mode}
 			if _, err := exec.ExecuteStream(ctx, auth, request(`[{"role":"user","content":"Run the scheduled check."}]`), execution); err != nil {
 				t.Fatalf("execution-session stream turn: %v", err)
 			}
-			if len(capturedBodies) != 7 {
-				t.Fatalf("captured %d requests, want 7", len(capturedBodies))
+			if len(capturedBodies) != 8 {
+				t.Fatalf("captured %d requests, want 8", len(capturedBodies))
 			}
-			if date := extractClaudeCloakDate(t, capturedBodies[6]); date != "2026-08-03" {
+			if date := extractClaudeCloakDate(t, capturedBodies[7]); date != "2026-08-03" {
 				t.Fatalf("stream turn with execution metadata date = %q, want its own session date 2026-08-03", date)
 			}
 			for _, session := range upstreamSessions {
@@ -362,12 +366,21 @@ func TestClaudeCloakedDateReminderT3SessionByteStability(t *testing.T) {
 			if date := extractClaudeCloakDate(t, capturedBodies[3]); date != "2026-08-02" {
 				t.Fatalf("other session with the same opening date = %q, want its own date 2026-08-02", date)
 			}
-			if date := extractClaudeCloakDate(t, capturedBodies[4]); date != "2026-08-02" {
-				t.Fatalf("subagent started after midnight date = %q, want its own start date 2026-08-02", date)
+			if date := extractClaudeCloakDate(t, capturedBodies[4]); date != "2026-08-01" {
+				t.Fatalf("subagent date = %q, want the session date 2026-08-01", date)
 			}
 			workerFirst := ojson.GetBytes(capturedBodies[4], "messages.0").Raw
 			if got := ojson.GetBytes(capturedBodies[5], "messages.0").Raw; got != workerFirst {
 				t.Fatalf("subagent messages[0] changed a day later:\nfirst: %s\ngot:   %s", workerFirst, got)
+			}
+			// The cloak gives subagents default cache TTLs, so compare the date reminder block
+			// itself; cache_control markers are outside the date pin's control.
+			parentReminder := ojson.GetBytes(capturedBodies[0], "messages.0.content.0.text").String()
+			if got := ojson.GetBytes(capturedBodies[6], "messages.0.content.0.text").String(); got == "" || got != parentReminder {
+				t.Fatalf("fork launched two days later must keep the parent's date reminder:\nparent: %q\nfork:   %q", parentReminder, got)
+			}
+			if date := extractClaudeCloakDate(t, capturedBodies[6]); date != "2026-08-01" {
+				t.Fatalf("fork date = %q, want the session date 2026-08-01", date)
 			}
 		})
 	}

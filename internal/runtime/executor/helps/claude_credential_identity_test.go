@@ -125,17 +125,13 @@ func TestClaudeDatePinSessionID(t *testing.T) {
 
 	agentHeaders := headers.Clone()
 	agentHeaders.Set("X-Claude-Code-Agent-Id", "worker")
-	agentPin := ClaudeDatePinSessionID(ctx, agentHeaders, firstUpstream)
-	if agentPin == pin || agentPin == "" {
-		t.Fatalf("subagent must get its own pin ID, got %q", agentPin)
-	}
-	if got := ClaudeDatePinSessionID(ctx, agentHeaders, secondUpstream); got != agentPin {
-		t.Fatalf("subagent pin ID changed across turns: %q then %q", agentPin, got)
+	if got := ClaudeDatePinSessionID(ctx, agentHeaders, firstUpstream); got != pin {
+		t.Fatalf("subagent pin ID = %q, want the session pin %q", got, pin)
 	}
 	suffixHeaders := headers.Clone()
 	suffixHeaders.Set("X-Claude-Code-Session-Id", session+":agent:worker")
-	if got := ClaudeDatePinSessionID(ctx, suffixHeaders, secondUpstream); got != agentPin {
-		t.Fatalf("suffixed session pin ID = %q, want subagent pin %q", got, agentPin)
+	if got := ClaudeDatePinSessionID(ctx, suffixHeaders, secondUpstream); got != pin {
+		t.Fatalf("suffixed session pin ID = %q, want the session pin %q", got, pin)
 	}
 
 	noSessionHeader := headers.Clone()
