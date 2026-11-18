@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { maskHosts, runDrill, splitPrimaries } from "./claude_failover_drill.mjs";
+import { maskHosts, resolveKey, runDrill, splitPrimaries } from "./claude_failover_drill.mjs";
 
 const drill = fileURLToPath(new URL("./claude_failover_drill.mjs", import.meta.url));
 const launcher = fileURLToPath(new URL("./claude_account_launcher.mjs", import.meta.url));
@@ -48,13 +49,32 @@ async function fakeProxy(t) {
   return { origin: `http://127.0.0.1:${server.address().port}`, port: server.address().port, requests };
 }
 
-async function closedOrigin() {
-  const server = http.createServer();
+// Keeps its port bound for the whole test and resets every connection, so no other test can take
+// the port and every request to it fails.
+async function refusingOrigin(t) {
+  const server = net.createServer((socket) => socket.resetAndDestroy());
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  const { port } = server.address();
-  await new Promise((resolve) => server.close(resolve));
-  return `http://127.0.0.1:${port}`;
+  t.after(() => server.close());
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+// A primary that passes its health check and never answers count_tokens. `requested` resolves when
+// count_tokens arrives, and `released` when the launcher closes that connection.
+async function hangingProxy(t) {
+  let onRequest;
+  let onRelease;
+  const requested = new Promise((resolve) => { onRequest = resolve; });
+  const released = new Promise((resolve) => { onRelease = resolve; });
+  const server = http.createServer((request, response) => {
+    if (request.url === "/healthz") return response.end('{"status":"ok"}');
+    request.socket.once("close", onRelease);
+    onRequest();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  return { origin: `http://127.0.0.1:${server.address().port}`, requested, released };
 }
 
 function quiet() {
@@ -69,9 +89,9 @@ function withoutTimings(result) {
   return rest;
 }
 
-test("a closed primary port sends the request to the fallback after a startup probe failure", async (t) => {
+test("a primary that refuses connections sends the request to the fallback after a startup probe failure", async (t) => {
   const fallback = await fakeProxy(t);
-  const primary = await closedOrigin();
+  const primary = await refusingOrigin(t);
   const { ok, results } = await runDrill({ primaries: [primary], fallback: fallback.origin, env: drillEnv(t), ...quiet() });
   assert.equal(ok, true);
   assert.equal(results.length, 1);
@@ -135,7 +155,7 @@ test("an explicit key command supplies the key", async (t) => {
   const command = path.join(tempDir(t, "drill-key-"), "key");
   fs.writeFileSync(command, "#!/bin/sh\nprintf 'from-command-key\\n'\n", { mode: 0o700 });
   const { ok } = await runDrill({
-    primaries: [await closedOrigin()], fallback: fallback.origin, keyCommand: command, env: drillEnv(t), ...quiet(),
+    primaries: [await refusingOrigin(t)], fallback: fallback.origin, keyCommand: command, env: drillEnv(t), ...quiet(),
   });
   assert.equal(ok, true);
   assert.deepEqual(fallback.requests.map((request) => request.key), ["from-command-key"]);
@@ -147,43 +167,106 @@ test("a failing key command stops the drill before any run", async (t) => {
   fs.writeFileSync(command, "#!/bin/sh\nexit 3\n", { mode: 0o700 });
   await assert.rejects(
     runDrill({ primaries: [fallback.origin], fallback: fallback.origin, keyCommand: command, env: drillEnv(t), ...quiet() }),
-    /The key command failed/,
+    /The --key-command failed/,
   );
   assert.deepEqual(fallback.requests, []);
 });
 
-test("a run that outlives its deadline is stopped and reported as failed", async (t) => {
-  const hanging = http.createServer((request, response) => {
-    if (request.url === "/healthz") return response.end('{"status":"ok"}');
-    // count_tokens is never answered.
+test("key errors do not echo the --key-command string", async (t) => {
+  const env = drillEnv(t);
+  const missing = path.join(env.HOME, "secret-in-path-0123");
+  await assert.rejects(resolveKey({ keyCommand: missing, env }), (error) => {
+    assert.equal(error.message, "The --key-command failed.");
+    return true;
   });
-  hanging.listen(0, "127.0.0.1");
-  await once(hanging, "listening");
-  t.after(() => { hanging.closeAllConnections(); hanging.close(); });
+  const silent = path.join(tempDir(t, "drill-key-"), "secret-in-path-4567");
+  fs.writeFileSync(silent, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await assert.rejects(resolveKey({ keyCommand: silent, env }), (error) => {
+    assert.equal(error.message, "The --key-command printed no key.");
+    return true;
+  });
+});
+
+test("CLIPROXY_DRILL_KEY is trimmed, and a blank one falls back to the default key command", async (t) => {
+  const env = drillEnv(t);
+  assert.equal(await resolveKey({ env: { ...env, CLIPROXY_DRILL_KEY: `  ${fakeKey}\n` } }), fakeKey);
+  // HOME holds no default key command, so it fails.
+  await assert.rejects(resolveKey({ env: { ...env, CLIPROXY_DRILL_KEY: " \n" } }), /default key command .* failed/);
+});
+
+test("a run that outlives its deadline is stopped and reported as failed", async (t) => {
+  const hanging = await hangingProxy(t);
   const { ok, results } = await runDrill({
-    primaries: [`http://127.0.0.1:${hanging.address().port}`], fallback: await closedOrigin(),
+    primaries: [hanging.origin], fallback: await refusingOrigin(t),
     deadlineMs: 500, env: drillEnv(t), ...quiet(),
   });
   assert.equal(ok, false);
   assert.equal(results[0].status, null);
   assert.notEqual(results[0].exit, 0);
   assert.ok(results[0].totalSeconds < 10);
+  await hanging.released;
 });
 
-async function runCli(t, args) {
-  const proc = spawn(process.execPath, [drill, ...args], { stdio: ["ignore", "pipe", "pipe"], env: drillEnv(t) });
+function startCli(t, args, env = drillEnv(t)) {
+  const proc = spawn(process.execPath, [drill, ...args], { stdio: ["ignore", "pipe", "pipe"], env });
   let stdout = "";
   let stderr = "";
   proc.stdout.on("data", (chunk) => { stdout += chunk; });
   proc.stderr.on("data", (chunk) => { stderr += chunk; });
-  const [code] = await once(proc, "close");
-  return { code, stdout, stderr, lines: stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) };
+  const done = once(proc, "close").then(([code, signal]) => ({
+    code, signal, stdout, stderr, lines: stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)),
+  }));
+  return { proc, done };
+}
+
+function runCli(t, args) {
+  return startCli(t, args).done;
+}
+
+// Command lines of running processes that mention `text`, or null where ps is unavailable.
+function processesMentioning(text) {
+  const listing = spawnSync("ps", ["-A", "-ww", "-o", "command="], { encoding: "utf8" });
+  if (listing.error || listing.status !== 0) return null;
+  return listing.stdout.split("\n").filter((line) => line.includes(text));
+}
+
+async function settledProcesses(text) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const found = processesMentioning(text);
+    if (!found?.length) return found;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return processesMentioning(text);
+}
+
+for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  test(`${name} stops the launcher and its stub, removes the temporary directory and exits 128 + ${os.constants.signals[name]}`, async (t) => {
+    const hanging = await hangingProxy(t);
+    const tmp = tempDir(t, "drill-tmp-");
+    const { proc, done } = startCli(t, ["--primary", hanging.origin, "--fallback", await refusingOrigin(t)], { ...drillEnv(t), TMPDIR: tmp });
+    t.after(() => proc.kill("SIGKILL"));
+    await hanging.requested;
+    assert.equal(fs.readdirSync(tmp).length, 1);
+    const running = processesMentioning(tmp);
+    if (running) assert.equal(running.length, 2, "the launcher and the stub run from the drill's temporary directory");
+    proc.kill(name);
+    const { code, signal, lines, stderr } = await done;
+    assert.equal(signal, null);
+    assert.equal(code, 128 + os.constants.signals[name]);
+    assert.deepEqual(lines, []);
+    assert.match(stderr, new RegExp(`stopped by ${name}`));
+    assert.doesNotMatch(stderr, new RegExp(fakeKey));
+    assert.deepEqual(fs.readdirSync(tmp), []);
+    await hanging.released;
+    const left = await settledProcesses(tmp);
+    if (left) assert.deepEqual(left, []);
+  });
 }
 
 test("the CLI prints one JSON line per primary and exits 0 when every run returned 200", async (t) => {
   const fallback = await fakeProxy(t);
   const healthy = await fakeProxy(t);
-  const closed = await closedOrigin();
+  const closed = await refusingOrigin(t);
   const { code, stdout, stderr, lines } = await runCli(t, [
     "--primary", `${closed},${healthy.origin}`, "--primary", closed, "--fallback", fallback.origin,
   ]);
@@ -196,7 +279,7 @@ test("the CLI prints one JSON line per primary and exits 0 when every run return
 });
 
 test("the CLI exits 1 when a run does not return 200", async (t) => {
-  const { code, stdout, stderr, lines } = await runCli(t, ["--primary", await closedOrigin(), "--fallback", await closedOrigin()]);
+  const { code, stdout, stderr, lines } = await runCli(t, ["--primary", await refusingOrigin(t), "--fallback", await refusingOrigin(t)]);
   assert.equal(code, 1);
   assert.equal(lines.length, 1);
   assert.equal(lines[0].status, 502);
@@ -207,4 +290,31 @@ test("the CLI rejects a run without a primary", async (t) => {
   const { code, lines } = await runCli(t, ["--fallback", "http://127.0.0.1:9"]);
   assert.equal(code, 2);
   assert.deepEqual(lines, []);
+});
+
+test("the CLI exits 2 on an unknown option, a stray argument or a bad deadline, without echoing them", async (t) => {
+  const primary = ["--primary", "http://127.0.0.1:9"];
+  for (const args of [
+    [...primary, "--bogus-secret-value"],
+    [...primary, "stray-secret-value"],
+    [...primary, "--deadline-seconds"],
+    ...["0", "-1", "abc", "", "NaN"].map((value) => [...primary, "--deadline-seconds", value]),
+  ]) {
+    const { code, stdout, stderr } = await runCli(t, args);
+    assert.equal(code, 2, args.join(" "));
+    assert.equal(stdout, "");
+    assert.match(stderr, /^Usage:/);
+    assert.doesNotMatch(stderr, /secret-value/);
+  }
+});
+
+test("a deadline beyond the timer limit is clamped instead of firing at once", async (t) => {
+  const fallback = await fakeProxy(t);
+  const healthy = await fakeProxy(t);
+  const { code, stderr, lines } = await runCli(t, [
+    "--primary", healthy.origin, "--fallback", fallback.origin, "--deadline-seconds", "99999999999",
+  ]);
+  assert.equal(code, 0, stderr);
+  assert.deepEqual(lines.map((line) => [line.status, line.host]), [[200, "primary"]]);
+  assert.doesNotMatch(stderr, /TimeoutOverflowWarning/);
 });
