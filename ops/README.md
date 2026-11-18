@@ -72,7 +72,10 @@ On the Mac, configure `claude_cliproxy` for Will and
 `claude_cliproxy_mac` for the local proxy. On Will, use its own loopback
 proxy. Pass `--fallback <origin>` to give a pool profile a second host. The
 tool rewrites the profile's whole environment, so pass `--fallback` again on
-every rerun or the fallback is removed. No route can produce a reply while
+every rerun or the fallback is removed. A rerun clears a pool `launchArgs` value that equals
+the direct profile's (an inherited `--chrome`); if the direct profile's
+arguments changed after a pool copied them, clear the pool's value once by
+hand in T3 settings. No route can produce a reply while
 every eligible account is at its upstream limit.
 
 To roll back, use `server.updateSettings` to remove only the added profile
@@ -91,8 +94,9 @@ launcher keeps the default connection agent and starts no timers or probes.
 With the variable set, the launcher:
 
 - Gives each upstream connection 3 seconds to connect
-  (`CLIPROXY_CONNECT_TIMEOUT_MS`, 100 to 60000). Nothing times out after a
-  connection exists.
+  (`CLIPROXY_CONNECT_TIMEOUT_MS`, 100 to 60000). No timer ends a client
+  request after its connection exists; only health probes are bounded after
+  connect.
 - Checks a host with `GET /healthz`, which must return 200 with
   `{"status":"ok"}` within 3 seconds. It checks the primary at startup.
 - Replays any request on the fallback when the primary refused it, could not
@@ -130,14 +134,67 @@ With the variable set, the launcher:
   502.
 
 Every response from a CLIProxy host carries `X-CLIProxy-Host: primary` or
-`fallback`; the launcher's own 400, 404 and 415 rejections do not. Host
+`fallback`. The launcher's own 502s after a failed attempt carry it too,
+naming the host last tried; its 400, 404 and 415 rejections do not. A launcher
+without `CLIPROXY_FALLBACK_URL` sends no such header. Host
 transitions are appended to `ops/runtime/fleet/failover.jsonl` (ignored by git;
 `CLIPROXY_FAILOVER_LOG` overrides the path) as one JSON line each, with no
 request bodies, URLs or keys.
 
-To turn failover off, remove `CLIPROXY_FALLBACK_URL` from the profile through
-`server.updateSettings`. New sessions then use the primary only; running
-sessions keep failover until they end.
+Turn failover on or off for one pool profile with `set_pool_fallback.mjs`.
+It changes only `CLIPROXY_BASE_URL` and `CLIPROXY_FALLBACK_URL`. T3 returns
+the profile's key redacted, so the tool stores the key passed on stdin again
+as a sensitive variable. That key must be the client key the profile already
+uses. Before it opens a T3 session, the tool sends `GET /v1/models` with the
+key to the primary and, when `--fallback` is given, to the fallback, and
+stops unless each returns HTTP 200. Pass `--no-key-check` to skip that check,
+for example while one host is down. The tool keeps private before and after
+settings (mode `0600`) in the backup directory. They hold no value for the
+key or any sensitive variable: T3 returns those empty, and the tool replaces
+any it did not with `<redacted>`. To restore, rerun the tool with the
+previous URLs and the key. It also checks that the profile's
+`config` block and every other profile are unchanged. Its report lists only
+an allowlisted set of variables, with tailnet names masked; the key is never
+printed. New sessions use the change; running sessions keep their launch
+environment until they end.
+
+```sh
+node ops/set_pool_fallback.mjs --base-dir ~/.t3 --profile-id claude_cliproxy \
+  --primary <primary-origin> --fallback http://127.0.0.1:8317 \
+  --backup-dir <new-private-backup-directory> < <private-key-file>
+node ops/set_pool_fallback.mjs --base-dir ~/.t3 --profile-id claude_cliproxy \
+  --primary <primary-origin> --no-fallback \
+  --backup-dir <new-private-backup-directory> < <private-key-file>
+```
+
+To check failover end to end without touching T3, run the drill. It starts
+the launcher once per primary with a stub in place of Claude Code, sends one
+`count_tokens` request, and prints one JSON line per primary with the status,
+the answering host and the transitions. The key comes from
+`~/.local/bin/cliproxy-codex-token`. When `CLIPROXY_DRILL_KEY` is set, its
+value is used as the key instead, and `--key-command <path>` overrides both.
+The key is never printed.
+
+A closed port, an unresolvable name and a blackholed address should all
+answer from the fallback. A closed port and an unresolvable name answered in
+under 0.5 seconds on November 18. An address that silently drops SYNs
+answers from the fallback after about 3.4 seconds, because the launcher's
+3-second startup health probe must fail first. Will's tailnet name should answer from the primary.
+
+```sh
+node ops/claude_failover_drill.mjs --primary http://127.0.0.1:1 \
+  --primary http://will.invalid:8317 \
+  --primary http://<address-that-drops-SYNs>:8317 \
+  --primary <primary-origin>
+```
+
+Exit 0 means only that every run returned 200. It does not say which side
+answered, so check each line's `host` (`primary` or `fallback`) against the
+expectation above. Exit 1 means at least one run did not return 200 or the
+drill could not run, for example because the key command failed. Exit 2
+means a usage error, such as no `--primary`. On `SIGINT`, `SIGTERM`,
+`SIGHUP` or `SIGQUIT` the drill stops the running launcher and its stub, removes its
+temporary directory, and exits with 128 plus the signal number.
 
 On `SIGTERM`, `SIGINT`, or `SIGHUP`, the launcher closes its listener and
 connections, then forwards the signal to its child. If the child has not exited
@@ -173,7 +230,7 @@ The launcher needs Node.js on the provider process's PATH and has no additional
 package dependencies. No separate long-running service or fixed port is needed.
 
 Verify the launcher with
-`node --test ops/claude_account_launcher.test.mjs ops/claude_account_launcher_process.test.mjs ops/claude_account_failover.test.mjs`.
+`node --test ops/claude_account_launcher.test.mjs ops/claude_account_launcher_process.test.mjs ops/claude_account_failover.test.mjs ops/claude_failover_drill.test.mjs ops/set_pool_fallback.test.mjs ops/configure_claude_pool.test.mjs`.
 For live verification, check a streamed response through the chosen account and
 an unavailable account's error. The `X-CPA-TRACE-ID` header identifies which
 proxy auth entry served the response. To undo this setup, remove the two T3

@@ -6,7 +6,22 @@ import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-function httpOrigin(value, name) {
+// A copy of T3 settings in which every sensitive variable and every ANTHROPIC_API_KEY has its value
+// replaced, in case T3 failed to flag or redact one. Both tools take the key again on every run, and
+// set_pool_fallback.mjs changes no other variable, so a restore loses nothing it needs.
+export function withoutSecrets(settings) {
+  const copy = structuredClone(settings);
+  for (const instance of Object.values(copy?.providerInstances ?? {})) {
+    for (const variable of instance?.environment ?? []) {
+      if ((variable.sensitive || variable.name === "ANTHROPIC_API_KEY") && typeof variable.value === "string" && variable.value) {
+        variable.value = "<redacted>";
+      }
+    }
+  }
+  return copy;
+}
+
+export function httpOrigin(value, name) {
   const origin = new URL(value);
   if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== "/") {
     throw new Error(`The ${name} must be an HTTP origin without credentials or a path.`);
@@ -29,12 +44,16 @@ export function poolProviders(providers, { id, label, upstream, fallback, launch
   }
   const direct = providers.claudeAgent;
   if (direct?.driver !== "claudeAgent") throw new Error("The native Claude provider must exist.");
+  // Launch arguments such as --chrome belong to the direct profile. A pool value equal to the direct
+  // one was inherited from it, so it is cleared; any other existing value is the pool's own.
+  const previousArgs = previous?.config?.launchArgs;
+  const launchArgs = previousArgs === undefined || previousArgs === direct.config?.launchArgs ? "" : previousArgs;
   return {
     ...providers,
     claudeAgent: { ...direct, displayName: direct.displayName || "Claude - Direct login" },
     [id]: {
       driver: "claudeAgent", displayName: label, enabled: true,
-      config: { ...direct.config, binaryPath: launcher },
+      config: { ...direct.config, binaryPath: launcher, launchArgs },
       environment: [
         { name: "CLIPROXY_CLAUDE_ROUTE", value: "shared-pool", sensitive: false },
         { name: "CLIPROXY_ACCOUNT_PREFIX", value: "", sensitive: false },
@@ -124,13 +143,13 @@ async function main() {
       id: values["profile-id"], label: values.label, upstream: values.upstream, fallback: values.fallback,
       launcher: fileURLToPath(new URL("./claude_account_launcher.mjs", import.meta.url)), binary: values["claude-binary"], apiKey,
     });
-    fs.writeFileSync(path.join(values["backup-dir"], "settings-before.json"), JSON.stringify(settings, null, 2), { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(path.join(values["backup-dir"], "settings-before.json"), JSON.stringify(withoutSecrets(settings), null, 2), { flag: "wx", mode: 0o600 });
     await client.rpc("server.updateSettings", { patch: { providerInstances: providers } });
     const { settings: after } = await client.rpc("server.getConfig");
     const saved = after.providerInstances[values["profile-id"]];
     const secret = saved.environment.find((variable) => variable.name === "ANTHROPIC_API_KEY");
     if (!secret?.sensitive || !secret.valueRedacted || secret.value) throw new Error("API key secret storage was not confirmed.");
-    fs.writeFileSync(path.join(values["backup-dir"], "settings-after.json"), JSON.stringify(after, null, 2), { flag: "wx", mode: 0o600 });
+    fs.writeFileSync(path.join(values["backup-dir"], "settings-after.json"), JSON.stringify(withoutSecrets(after), null, 2), { flag: "wx", mode: 0o600 });
     console.log(JSON.stringify({ profile: values["profile-id"], label: saved.displayName, upstream: values.upstream, fallback: values.fallback ?? null, secretStoredAndRedacted: true, serverVersion: client.runtime.serverVersion }));
   } finally {
     client.close();
