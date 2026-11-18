@@ -1,0 +1,53 @@
+{
+  "receipt": "nvidia-openai-compatible-provider",
+  "host": "M5 (local fallback, http://127.0.0.1:8317)",
+  "date": "2026-11-11",
+  "operator_model": "Claude Opus 5.5 (claude-opus-5-5) in T3 Code via Claude Code",
+  "credential": {
+    "source_path": "~/.config/nvidia/api.env",
+    "variable": "NVIDIA_API_KEY",
+    "stored_in": "ignored config.yaml, mode 0600; value not recorded"
+  },
+  "config_change": {
+    "file": "config.yaml (gitignored)",
+    "edit": "in place, inode preserved, mode 0600 preserved",
+    "first_write_utc": "2026-11-11T15:01:45Z",
+    "first_write_result": "keys: field ignored; reload logged 0 OpenAI-compat; upstream 'Header of type authorization was missing'",
+    "fix_utc": "2026-11-11T15:02:38Z",
+    "fix_result": "renamed to api-key-entries; reload logged 1 OpenAI-compat",
+    "private_backup": "ops/runtime/nvidia-provider-20261111/backup-20261111T150145Z/config.yaml",
+    "restart": false
+  },
+  "direct_nvidia_checks": {
+    "catalog_http": 200,
+    "catalog_model_count": 84,
+    "passed": [
+      "nvidia/nemotron-3-ultra-550b-a55b",
+      "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "deepseek-ai/deepseek-v4.1-flash (87s)",
+      "minimaxai/minimax-m3.1-flash"
+    ],
+    "failed": {
+      "moonshotai/kimi-k2.6": "HTTP 404 Function not found for account",
+      "nvidia/nemotron-3-super-120b-a12b": "HTTP 404 Function not found for account",
+      "z-ai/glm-5.3-flash": "timeout 90s",
+      "openai/gpt-oss-20b": "timeout 90s"
+    }
+  },
+  "proxy_checks": {
+    "nvidia-nemotron-3.5-lightning": {"chat": "NV-PROXY-OK 3.1s", "responses": "NV-RESP-OK 4.0s"},
+    "nvidia-minimax-m3.1-flash": {"chat": "NV-PROXY-OK 12.3s", "responses": "NV-RESP-OK 8.6s"},
+    "nvidia-nemotron-3-ultra": {"chat": "NV-PROXY-OK on retry; first call empty content", "note": "two direct NVIDIA calls also returned finish_reason stop with empty content"},
+    "nvidia-deepseek-v4.1-flash": {"chat": "timeout 200s", "responses": "timeout 200s", "action": "alias removed"}
+  },
+  "fleet_verifier": "python3 ops/verify_fleet_instance.py: failures []",
+  "t3_checks": {
+    "catalog": "orchestrator_capabilities search nvidia lists nvidia-* under codex_cliproxy_mac and codex_kimi_mac",
+    "child_run": "delegate_task codex_cliproxy_mac / nvidia-nemotron-3.5-lightning, reasoningEffort low: status completed, summary NV-T3-OK"
+  },
+  "not_covered": [
+    "Will primary has no NVIDIA provider or key",
+    "NVIDIA account rate limits and credit balance",
+    "tool-calling or long-context behavior through the Codex driver"
+  ]
+}

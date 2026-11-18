@@ -1,0 +1,43 @@
+{
+  "checkout_branch": "main",
+  "checkout_sha": "caca0a047155bc3b53d9eb0c199cde93d51c0db6",
+  "deployed_source": "815987ae113117253b37c7c0755e209fadd01372",
+  "files": {
+    "sdk/cliproxy/auth/selector.go": {
+      "sha256": "ead3c6097eaceb813e4ac21b1505adeaf5c49d54b26fb4ceac4b417261e68e9d",
+      "working_tree_identical": true
+    },
+    "sdk/cliproxy/auth/quota_selector.go": {
+      "sha256": "589605d6070431d9b34bfd54340fb03cee1177a8b35a2fbe3ab4e17a44bdd7c7",
+      "working_tree_identical": true
+    },
+    "sdk/cliproxy/auth/conductor_selection.go": {
+      "sha256": "c4ab3717a0f7ad974e5865f64a0ebfcb27a02ff1a6bf0bbcc6afd42edc5da26b",
+      "working_tree_identical": true
+    },
+    "sdk/cliproxy/auth/scheduler.go": {
+      "sha256": "5ad8e828035b26b38657226628248e271005371b94b941d64a20e4e4ed2285d4",
+      "working_tree_identical": true
+    },
+    "sdk/cliproxy/auth/conductor_cooldown.go": {
+      "sha256": "11df3a160df286b565a18f22542922d56c4f9d84af7c8470e1b3cee92a222716",
+      "working_tree_identical": true
+    },
+    "sdk/cliproxy/auth/conductor_refresh.go": {
+      "sha256": "c3351970fdef7e75d3f68b9c39aea64efb0226831c61bdd9090aa923632e3704",
+      "working_tree_identical": true
+    },
+    "internal/auth/claude/anthropic_auth.go": {
+      "sha256": "5eb2f982a51d43541853dc36f339f92e850a4e4d957631294afa7853778c61e0",
+      "working_tree_identical": true
+    },
+    "sdk/auth/manager.go": {
+      "sha256": "0a401ea8f94f4419fe130a2164b12cadeea83ede6aa86154eb7fe8a35e3fccde",
+      "working_tree_identical": true
+    },
+    "internal/cmd/anthropic_login.go": {
+      "sha256": "10bb342dcc8f3434c11d51027f3cda40958a4edd0ecda30c7a23196b9defc015",
+      "working_tree_identical": true
+    }
+  }
+}

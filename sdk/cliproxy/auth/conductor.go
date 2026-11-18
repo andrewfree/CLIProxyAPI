@@ -101,6 +101,8 @@ type Result struct {
 	// cooldown. Zero means unknown (direct MarkResult callers) and is exempt
 	// from the ordering guard.
 	ExecutionSeq uint64
+	// Only account-pinned operator verification can authorize early quota recovery.
+	quotaRecheckGeneration *uint64
 }
 
 // Selector chooses an auth candidate for execution.

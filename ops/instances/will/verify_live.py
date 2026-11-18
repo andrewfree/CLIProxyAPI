@@ -52,7 +52,7 @@ with open(sys.argv[1]) as source:
 fields = [
     "request-retry", "max-retry-credentials", "max-retry-interval",
     "quota-cooldown-max-seconds", "save-cooldown-status",
-    "routing.strategy", "routing.session-affinity",
+    "transient-error-cooldown-seconds", "routing.strategy", "routing.session-affinity",
     "routing.session-affinity-ttl", "routing.session-affinity-subagents",
     "routing.session-affinity-rebind-on", "plugins.enabled",
     "plugins.configs.auth-cursor.enabled", "usage-statistics-enabled",
@@ -64,6 +64,7 @@ v8_paths = {
     "max-retry-interval": "routing.retry.max-retry-interval",
     "quota-cooldown-max-seconds": "routing.cooldown.quota-cooldown-max-seconds",
     "save-cooldown-status": "routing.cooldown.save-cooldown-status",
+    "transient-error-cooldown-seconds": "routing.cooldown.transient-error-cooldown-seconds",
     "usage-statistics-enabled": "observability.usage.usage-statistics-enabled",
     "request-log": "observability.logs.request-log",
     "logging-to-file": "observability.logs.logging-to-file",

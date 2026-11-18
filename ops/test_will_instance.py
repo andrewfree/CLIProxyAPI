@@ -114,6 +114,14 @@ class WillInstanceVerifierTests(unittest.TestCase):
         self.assertIn("container_port_exposure_drift", findings)
         self.assertIn("listener_exposure_drift", findings)
 
+    def test_transient_cooldown_drift_is_detected(self):
+        observation = matching_observation()
+        observation["config"]["transient-error-cooldown-seconds"] = "0"
+
+        findings = evaluate_observation(self.contract, self.policy, observation)
+
+        self.assertIn("config_policy_drift", findings)
+
     def test_retry_policy_and_mount_identity_drift_are_detected(self):
         observation = matching_observation()
         observation["config"]["max-retry-interval"] = "0"
@@ -177,6 +185,12 @@ class WillInstanceVerifierTests(unittest.TestCase):
                 if key.startswith("routing.")}
         self.assertEqual(will, release["routing_policy"]["amd64"])
 
+    def test_will_contract_pins_runtime_policy_to_release_policy(self):
+        release = json.loads((INSTANCE_DIR.parent.parent / "fleet-release.json").read_text())
+        for key, value in release["runtime_policy"].items():
+            with self.subTest(key=key):
+                self.assertEqual(self.policy["required_config"][key], value)
+
     def test_probe_reports_disabled_affinity_defaults_when_fields_are_absent(self):
         observed = self.probe_config({"routing": {"strategy": "round-robin"}})
         expected = {
@@ -206,7 +220,8 @@ class WillInstanceVerifierTests(unittest.TestCase):
                 ))
 
     def test_probe_accepts_legacy_and_v8_quota_settings(self):
-        settings = {"quota-cooldown-max-seconds": 3600, "save-cooldown-status": True}
+        settings = {"quota-cooldown-max-seconds": 3600, "save-cooldown-status": True,
+                    "transient-error-cooldown-seconds": -1}
         for config in (settings, {"routing": {"cooldown": settings}}):
             with self.subTest(config=config):
                 observed = self.probe_config(config)
@@ -218,13 +233,15 @@ class WillInstanceVerifierTests(unittest.TestCase):
         config.update({
             "routing": {
                 "retry": {"request-retry": 0, "max-retry-credentials": 0, "max-retry-interval": 0},
-                "cooldown": {"quota-cooldown-max-seconds": 0, "save-cooldown-status": False},
+                "cooldown": {"quota-cooldown-max-seconds": 0, "save-cooldown-status": False,
+                             "transient-error-cooldown-seconds": 0},
             },
             "observability": {"usage": {"usage-statistics-enabled": True}},
         })
         observed = self.probe_config(config)
         expected = {"request-retry": "0", "max-retry-credentials": "0", "max-retry-interval": "0",
                     "quota-cooldown-max-seconds": "0", "save-cooldown-status": "False",
+                    "transient-error-cooldown-seconds": "0",
                     "usage-statistics-enabled": "True"}
         for key, value in expected.items():
             self.assertEqual(observed[key], value)

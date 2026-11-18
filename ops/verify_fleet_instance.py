@@ -40,6 +40,10 @@ observed = {
     'usage_statistics_enabled': config.get('usage-statistics-enabled'),
     'quota_cooldown_max_seconds': config.get('quota-cooldown-max-seconds'),
     'save_cooldown_status': config.get('save-cooldown-status'),
+    'transient_error_cooldown_seconds': config.get('transient-error-cooldown-seconds'),
+    'max_retry_interval': config.get('max-retry-interval'),
+    'request_retry': config.get('request-retry'),
+    'max_retry_credentials': config.get('max-retry-credentials'),
     'routing': routing_policy_values(config),
     'routing_policy_matches': routing_policy_matches(
         config, release.get('routing_policy', {}).get(arch)
@@ -59,8 +63,12 @@ expected = {
     'cursor_version': release['cursor_plugin']['version'],
     'cursor_sha256': release['cursor_plugin']['libraries'][arch]['sha256'],
     'usage_statistics_enabled': False,
-    'quota_cooldown_max_seconds': release['runtime_policy']['quota-cooldown-max-seconds'],
-    'save_cooldown_status': release['runtime_policy']['save-cooldown-status'],
+    'quota_cooldown_max_seconds': release['runtime_policy'].get('quota-cooldown-max-seconds', 'missing from manifest'),
+    'save_cooldown_status': release['runtime_policy'].get('save-cooldown-status', 'missing from manifest'),
+    'transient_error_cooldown_seconds': release['runtime_policy'].get('transient-error-cooldown-seconds', 'missing from manifest'),
+    'max_retry_interval': release['runtime_policy'].get('max-retry-interval', 'missing from manifest'),
+    'request_retry': release['runtime_policy'].get('request-retry', 'missing from manifest'),
+    'max_retry_credentials': release['runtime_policy'].get('max-retry-credentials', 'missing from manifest'),
     'routing_policy_matches': True,
     'do_not_track': True,
 }

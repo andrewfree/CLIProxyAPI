@@ -1,0 +1,80 @@
+{
+  "recorded_at": "2026-11-14T11:18:29.248978+00:00",
+  "client_keys_verified": 2,
+  "client_catalogs_match": true,
+  "existing_catalog_preserved": true,
+  "cursor_glm_53_aliases_absent": true,
+  "cursor_remaining_glm": [
+    "glm-5.2"
+  ],
+  "glm_alias_owners": {
+    "glm-5.3": "zai-coding-plan",
+    "glm-5.3-flash": "zai-coding-plan",
+    "glm-5p3": "zai-coding-plan",
+    "glm-5p3-flash": "zai-coding-plan"
+  },
+  "config_inode_preserved": true,
+  "legacy_layout_preserved": true,
+  "container_unchanged": true,
+  "glm_results": [
+    {
+      "alias": "glm-5p3",
+      "protocol": "chat/completions",
+      "http": 200,
+      "reply": "GLM_OK",
+      "model": "glm-5.3"
+    },
+    {
+      "alias": "glm-5.3-flash",
+      "protocol": "chat/completions",
+      "http": 200,
+      "reply": "GLM_OK",
+      "model": "glm-5.3-flash"
+    },
+    {
+      "alias": "glm-5p3-flash",
+      "protocol": "chat/completions",
+      "http": 200,
+      "reply": "GLM_OK",
+      "model": "glm-5.3-flash"
+    },
+    {
+      "alias": "glm-5.3",
+      "protocol": "responses",
+      "http": 200,
+      "reply": "GLM_OK",
+      "model": "glm-5.3"
+    }
+  ],
+  "scope": "Will direct Z.ai Coding Plan activation, November 14, 2026",
+  "verification_model": "GPT-6.1 Sol",
+  "reviews": [
+    "Claude Fable 5.2",
+    "Claude Opus 5.5"
+  ],
+  "fleet_verifier": {
+    "failures": []
+  },
+  "owner_verifier": {
+    "status": "ok",
+    "findings": []
+  },
+  "validation": {
+    "owner_verifier_unit_tests": 16,
+    "native_catalog_priority_tests": "passed",
+    "go_server_build": "passed",
+    "mac_to_will_health_http": 200
+  },
+  "preservation": {
+    "existing_configuration_semantics": true,
+    "client_keys": true,
+    "config_mode": "0600",
+    "persistent_container_ids_and_images": true
+  },
+  "limitations": [
+    "A second watcher reload was needed to remove stale Cursor registrations after the first hot-add. This is an operational workaround, not a server-source fix.",
+    "Cold restart behavior was not tested.",
+    "Legacy glm-5.2 remains on Cursor; it was not used for inference.",
+    "The operational verifier was corrected to exclude disposable research-container lifetimes from persistent-container checks. Existing unit tests were unchanged."
+  ]
+}

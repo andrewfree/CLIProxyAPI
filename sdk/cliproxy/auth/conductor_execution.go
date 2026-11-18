@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -2467,14 +2468,23 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	sessionID := fmt.Sprintf("verify-%s-%d", auth.ID, time.Now().UTC().UnixNano())
 	// Codex upstreams reject integer max_output_tokens below 16, so the minimal
 	// verification budget must sit at that floor.
-	payload := []byte(fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":16,"store":false}`, verifyModel))
+	payloadDoc := ojson.NewDocString(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":16,"store":false}`)
+	sourceFormat := sdktranslator.FormatOpenAIResponse
+	if provider == "claude" {
+		payloadDoc = ojson.NewDocString(`{"messages":[{"role":"user","content":"Reply with exactly OK."}],"max_tokens":32,"stream":true,"thinking":{"type":"disabled"}}`)
+		sourceFormat = sdktranslator.FormatClaude
+	}
+	if errSet := payloadDoc.Set("model", verifyModel); errSet != nil {
+		return auth, fmt.Errorf("build inference verification payload: %w", errSet)
+	}
+	payload := payloadDoc.Bytes()
 	req := cliproxyexecutor.Request{
 		Model:   verifyModel,
 		Payload: payload,
 	}
 	opts := cliproxyexecutor.Options{
 		Stream:          true,
-		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		SourceFormat:    sourceFormat,
 		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
 		OriginalRequest: payload,
 		Headers:         http.Header{"X-Session-Id": {sessionID}},
@@ -2523,21 +2533,25 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 				return updated, incompleteErr
 			}
 			m.MarkResult(execCtx, Result{
-				AuthID:            auth.ID,
-				Provider:          provider,
-				Model:             stateModel,
-				RouteModel:        routeModel,
-				Success:           true,
-				CompletedResponse: true,
-				Options:           opts,
-				AccessToken:       accessToken,
-				CredentialVersion: credVersion,
-				RegistrationEpoch: regEpoch,
-				ExecutionSeq:      executionSeq,
+				AuthID:                 auth.ID,
+				Provider:               provider,
+				Model:                  stateModel,
+				RouteModel:             routeModel,
+				Success:                true,
+				CompletedResponse:      true,
+				quotaRecheckGeneration: &auth.Generation,
+				Options:                opts,
+				AccessToken:            accessToken,
+				CredentialVersion:      credVersion,
+				RegistrationEpoch:      regEpoch,
+				ExecutionSeq:           executionSeq,
 			})
 			updated, okUpdated := m.GetByID(auth.ID)
 			if !okUpdated || updated == nil {
 				return nil, &Error{Code: "auth_not_found", Message: "credential was removed during verification", HTTPStatus: http.StatusConflict}
+			}
+			if updated.Quota.Reason == "credential_quota" && updated.Quota.NextRecoverAt.After(time.Now()) {
+				return updated, &Error{Code: "quota_not_revalidated", Message: "credential quota remains blocked; verification did not safely establish restored capacity", HTTPStatus: http.StatusConflict}
 			}
 			if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
 				return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
@@ -2617,21 +2631,25 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		return updated, incompleteErr
 	}
 	m.MarkResult(execCtx, Result{
-		AuthID:            auth.ID,
-		Provider:          provider,
-		Model:             stateModel,
-		RouteModel:        routeModel,
-		Success:           true,
-		CompletedResponse: true,
-		Options:           opts,
-		AccessToken:       accessToken,
-		CredentialVersion: credVersion,
-		RegistrationEpoch: regEpoch,
-		ExecutionSeq:      executionSeq,
+		AuthID:                 auth.ID,
+		Provider:               provider,
+		Model:                  stateModel,
+		RouteModel:             routeModel,
+		Success:                true,
+		CompletedResponse:      true,
+		quotaRecheckGeneration: &auth.Generation,
+		Options:                opts,
+		AccessToken:            accessToken,
+		CredentialVersion:      credVersion,
+		RegistrationEpoch:      regEpoch,
+		ExecutionSeq:           executionSeq,
 	})
 	updated, okUpdated := m.GetByID(auth.ID)
 	if !okUpdated || updated == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "credential was removed during verification", HTTPStatus: http.StatusConflict}
+	}
+	if updated.Quota.Reason == "credential_quota" && updated.Quota.NextRecoverAt.After(time.Now()) {
+		return updated, &Error{Code: "quota_not_revalidated", Message: "credential quota remains blocked; verification did not safely establish restored capacity", HTTPStatus: http.StatusConflict}
 	}
 	if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
 		return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
