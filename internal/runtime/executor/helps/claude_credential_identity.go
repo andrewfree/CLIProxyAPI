@@ -40,19 +40,25 @@ func ClaudeAgentSessionUUIDForRequest(headers http.Header, originalPayload, tran
 	return claudeAgentSessionUUID(headers, originalPayload, translatedPayload, metadataSets...)
 }
 
-type claudeExecutionMetadataKey struct{}
+type claudeSessionMetadataKey struct{}
 
-// WithClaudeExecutionMetadata attaches whether the request had an explicit execution session metadata to ctx.
-func WithClaudeExecutionMetadata(ctx context.Context, present bool) context.Context {
-	return context.WithValue(ctx, claudeExecutionMetadataKey{}, present)
+type claudeSessionMetadata struct {
+	execution bool
+	derived   bool
+}
+
+// WithClaudeSessionMetadata records which internal session signals the request carries.
+func WithClaudeSessionMetadata(ctx context.Context, metadataSets ...map[string]any) context.Context {
+	return context.WithValue(ctx, claudeSessionMetadataKey{}, claudeSessionMetadata{
+		execution: ClaudeRequestHasExecutionMetadata(metadataSets...),
+		derived:   DerivedSessionID(metadataSets...) != "",
+	})
 }
 
 // ClaudeExecutionMetadataFromContext retrieves whether execution metadata was present from ctx.
 func ClaudeExecutionMetadataFromContext(ctx context.Context) bool {
-	if v, ok := ctx.Value(claudeExecutionMetadataKey{}).(bool); ok {
-		return v
-	}
-	return false
+	metadata, _ := ctx.Value(claudeSessionMetadataKey{}).(claudeSessionMetadata)
+	return metadata.execution
 }
 
 // ClaudeRequestHasExecutionMetadata reports whether the request explicitly carried
@@ -64,6 +70,20 @@ func ClaudeRequestHasExecutionMetadata(metadataSets ...map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// ClaudeDatePinSessionID scopes a cloaked date pin to the caller's parent session.
+// Internal session metadata keeps the same pin identity used for continuity.
+func ClaudeDatePinSessionID(ctx context.Context, headers http.Header, sessionID string) string {
+	metadata, _ := ctx.Value(claudeSessionMetadataKey{}).(claudeSessionMetadata)
+	if metadata.execution || metadata.derived || !IsClaudeCodeUserAgent(headerValue(headers, "User-Agent")) {
+		return sessionID
+	}
+	parent, _, _ := strings.Cut(headerValue(headers, "X-Claude-Code-Session-Id"), ":agent:")
+	if parent = strings.TrimSpace(parent); parent == "" {
+		return sessionID
+	}
+	return stableProviderSessionUUID("claude", "date-pin", "claude:"+parent)
 }
 
 func claudeAgentSessionUUID(headers http.Header, originalPayload, translatedPayload []byte, metadataSets ...map[string]any) string {

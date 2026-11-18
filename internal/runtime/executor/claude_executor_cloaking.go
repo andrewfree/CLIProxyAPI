@@ -276,7 +276,8 @@ func resolveClaudeContinuityTags(
 	// The currentDate reminder is pinned to the session on its first request so
 	// a local-midnight flip between requests cannot rewrite it and invalidate
 	// the prompt-cache prefix in front of the whole conversation.
-	pinnedDate := resolveClaudeSessionPinnedDate(cfg, auth, payload, continuityKey, sessionID)
+	datePinSessionID := helps.ClaudeDatePinSessionID(ctx, incomingHeaders, sessionID)
+	pinnedDate := resolveClaudeSessionPinnedDate(cfg, auth, payload, continuityKey, datePinSessionID)
 
 	if existingPromptID != "" {
 		promptID = existingPromptID
@@ -337,7 +338,8 @@ func resolveClaudeContinuityTagsDoc(
 	isNewTurn := isClaudeNewPromptTurnDoc(doc)
 	continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
 
-	pinnedDate := resolveClaudeSessionPinnedDateDoc(cfg, auth, doc, continuityKey, sessionID)
+	datePinSessionID := helps.ClaudeDatePinSessionID(ctx, incomingHeaders, sessionID)
+	pinnedDate := resolveClaudeSessionPinnedDateDoc(cfg, auth, doc, continuityKey, datePinSessionID)
 
 	if existingPromptID != "" {
 		promptID = existingPromptID

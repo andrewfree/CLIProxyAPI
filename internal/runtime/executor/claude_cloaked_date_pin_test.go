@@ -234,6 +234,85 @@ func TestClaudeCloakedDateReminderSessionByteStability(t *testing.T) {
 	}
 }
 
+func TestClaudeCloakedDateReminderT3SessionByteStability(t *testing.T) {
+	helps.ResetClaudeDiagnosticsForTest()
+	t.Cleanup(helps.ResetClaudeDiagnosticsForTest)
+	mockTime := time.Date(2026, 8, 1, 23, 59, 0, 0, time.UTC)
+	claudeCodeCurrentTimeFunc = func(*config.Config, *cliproxyauth.Auth) time.Time { return mockTime }
+	t.Cleanup(func() { claudeCodeCurrentTimeFunc = nil })
+
+	const clientSession = "11111111-2222-4333-8444-555555555555"
+	var capturedBodies [][]byte
+	var upstreamSessions []string
+	transport := datePinRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		capturedBodies = append(capturedBodies, body)
+		upstreamSessions = append(upstreamSessions, req.Header.Get("X-Claude-Code-Session-Id"))
+		const response = `{"id":"msg_t3_date_pin","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":10,"output_tokens":2}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(response)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	auth := &cliproxyauth.Auth{
+		ID:         "test-date-pin-t3-oauth",
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-t3-date-pin", "timezone": "UTC"},
+		Metadata: map[string]any{
+			"account_uuid": "22222222-3333-4444-8555-666666666666",
+			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
+				"00000000000000000000000000000000000000000000000000000000000000d1",
+			},
+		},
+	}
+	exec := NewClaudeExecutor(&config.Config{})
+	options := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers: http.Header{
+			"User-Agent":               {"claude-cli/2.1.322 (external, t3-code, agent-sdk/0.3.321)"},
+			"X-Claude-Code-Session-Id": {clientSession},
+		},
+	}
+	first := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(`{
+		"model":"claude-opus-5", "max_tokens":100,
+		"messages":[{"role":"user","content":"Say OK."}]
+	}`)}
+	second := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(`{
+		"model":"claude-opus-5", "max_tokens":100,
+		"messages":[{"role":"user","content":"Say OK."},{"role":"assistant","content":"OK"},{"role":"user","content":"Say it again."}]
+	}`)}
+	if _, err := exec.Execute(ctx, auth, first, options); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	mockTime = mockTime.Add(2 * time.Minute)
+	if _, err := exec.Execute(ctx, auth, second, options); err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	if len(capturedBodies) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(capturedBodies))
+	}
+	for _, session := range upstreamSessions {
+		if session == "" || session == clientSession {
+			t.Fatal("expected a proxy-generated upstream session ID")
+		}
+	}
+	if upstreamSessions[0] == upstreamSessions[1] {
+		t.Fatal("expected the existing upstream identity to change with the first assistant turn")
+	}
+	if date := extractClaudeCloakDate(t, capturedBodies[0]); date != "2026-08-01" {
+		t.Fatalf("first turn date = %q, want 2026-08-01", date)
+	}
+	firstMessage := ojson.GetBytes(capturedBodies[0], "messages.0").Raw
+	if secondMessage := ojson.GetBytes(capturedBodies[1], "messages.0").Raw; secondMessage != firstMessage {
+		t.Fatalf("messages[0] changed across midnight:\nfirst:  %s\nsecond: %s", firstMessage, secondMessage)
+	}
+}
+
 // Explicit max_tokens overrides must not rerun the built-in probe date policy.
 func TestClaudeCloakedDateReminderProbeOverrideDoesNotReinitializeSessionDate(t *testing.T) {
 	helps.ResetClaudeDiagnosticsForTest()

@@ -82,7 +82,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	continuityCtx := &helps.ClaudeContinuityContext{}
 	ctx = helps.WithClaudeContinuityContext(ctx, continuityCtx)
 	ctx = helps.WithIncomingHeaders(ctx, incomingHeaders)
-	ctx = helps.WithClaudeExecutionMetadata(ctx, helps.ClaudeRequestHasExecutionMetadata(opts.Metadata, req.Metadata))
+	ctx = helps.WithClaudeSessionMetadata(ctx, opts.Metadata, req.Metadata)
 	if claudeSessionID != "" {
 		ctx = helps.WithClaudeSessionID(ctx, claudeSessionID)
 	}
