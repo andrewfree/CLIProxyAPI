@@ -1,0 +1,141 @@
+[
+  {
+    "surface": "P2/debug",
+    "hosts": [
+      "m5",
+      "will"
+    ],
+    "reason": "M5 has debug logging on and Will has it off. Review logging separately.",
+    "decision_ref": "Fleet design 2026-11-17 Q13",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02",
+    "count": 1
+  },
+  {
+    "surface": "P2/nvidia",
+    "hosts": [
+      "m5"
+    ],
+    "reason": "The NVIDIA provider is configured only on M5 pending Will setup.",
+    "decision_ref": "Fleet design 2026-11-17 Q8",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02",
+    "count": 1
+  },
+  {
+    "surface": "P2/cliproxybar-quota",
+    "hosts": [
+      "will"
+    ],
+    "reason": "Will retains the quota plugin configuration pending removal review.",
+    "decision_ref": "Fleet design 2026-11-17 Q11",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02",
+    "count": 1
+  },
+  {
+    "surface": "P5/nvidia",
+    "hosts": [
+      "m5"
+    ],
+    "reason": "The NVIDIA provider key is present only on M5.",
+    "decision_ref": "Fleet design 2026-11-17 Q8",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02",
+    "count": 1
+  },
+  {
+    "surface": "P6/camoff-astra",
+    "hosts": [
+      "m5"
+    ],
+    "reason": "One Mac Codex credential has this prefix. Unit 0 found 5,985 of 8,765 Mac rows used it, so review mirroring before removal.",
+    "decision_ref": "Fleet design 2026-11-17 Q9 and unit 0 prechecks",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02",
+    "count": 1
+  },
+  {
+    "surface": "P6/kimi-ai",
+    "hosts": [
+      "will"
+    ],
+    "reason": "Will has one extra kimi-ai credential. Account equivalence has not been established.",
+    "decision_ref": "Fleet design 2026-11-17 Q10 and unit 0 prechecks",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02",
+    "count": 1
+  },
+  {
+    "surface": "P8/nvidia",
+    "hosts": [
+      "m5"
+    ],
+    "reason": "M5 serves three documented NVIDIA aliases pending Will setup.",
+    "decision_ref": "Fleet design 2026-11-17 Q8 and ops/NVIDIA_ROUTING.md",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02"
+  },
+  {
+    "surface": "P8/camoff-astra",
+    "hosts": [
+      "m5"
+    ],
+    "reason": "The Mac Codex credential exposes its additional prefixed catalog.",
+    "decision_ref": "Fleet design 2026-11-17 Q9",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02"
+  },
+  {
+    "surface": "P8/kimi-ai",
+    "hosts": [
+      "will"
+    ],
+    "reason": "Will's extra kimi-ai credential can add kimi-ai catalog entries pending review.",
+    "decision_ref": "Fleet design 2026-11-17 Q10",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02"
+  },
+  {
+    "surface": "P10/cliproxybar-quota",
+    "hosts": [
+      "will"
+    ],
+    "reason": "Will retains the enabled quota plugin version 0.1.0 pending removal review.",
+    "decision_ref": "Fleet design 2026-11-17 Q11 and fleet.3 amd64 qualification",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02",
+    "count": 1
+  },
+  {
+    "surface": "layout/legacy",
+    "hosts": [
+      "will"
+    ],
+    "reason": "Will uses flat legacy YAML until the layout migration. Loaded JSON is already canonical on both hosts.",
+    "decision_ref": "Fleet design 2026-11-17 unit 7",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02"
+  },
+  {
+    "surface": "bundle/working-tree",
+    "hosts": [
+      "m5",
+      "will"
+    ],
+    "reason": "The Mac still runs scripts from its primary checkout and Will has a hand-copied ops subset. Shipped bundle receipts will follow.",
+    "decision_ref": "Fleet design 2026-11-17 units 2b and 2c",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02"
+  },
+  {
+    "surface": "bundle/installed-token-helper",
+    "hosts": [
+      "m5"
+    ],
+    "reason": "The installed Mac token helper did not match the tracked copy or reachable history in unit 0.",
+    "decision_ref": "Fleet design 2026-11-17 unit 0 prechecks",
+    "date": "2026-11-18",
+    "review_by": "2026-12-02"
+  }
+]
