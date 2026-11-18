@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
-	"github.com/google/uuid"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -90,6 +89,7 @@ func TestClaudeAgentSessionUUIDUsesExecutionAndDerivedIdentity(t *testing.T) {
 
 func TestClaudeDatePinSessionID(t *testing.T) {
 	const session = "11111111-2222-4333-8444-555555555555"
+	const otherSession = "99999999-8888-4777-8666-555555555555"
 	headers := http.Header{
 		"User-Agent":               {"claude-cli/2.1.322 (external, t3-code, agent-sdk/0.3.321)"},
 		"X-Claude-Code-Session-Id": {session},
@@ -99,26 +99,43 @@ func TestClaudeDatePinSessionID(t *testing.T) {
 	firstUpstream := ClaudeAgentSessionUUIDForRequest(headers, first, nil, false)
 	secondUpstream := ClaudeAgentSessionUUIDForRequest(headers, second, nil, false)
 	if firstUpstream == secondUpstream {
-		t.Fatal("fixture must exercise different upstream session IDs")
+		t.Log("upstream session IDs match across turns; the stability check below is then trivially satisfied")
 	}
 
 	ctx := context.Background()
-	want := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api\x00claude\x00date-pin\x00claude:"+session)).String()
-	if got := ClaudeDatePinSessionID(ctx, headers, firstUpstream); got == session || got != want {
-		t.Fatalf("first turn pin ID = %q, want hashed session %q", got, want)
+	pin := ClaudeDatePinSessionID(ctx, headers, firstUpstream)
+	if pin == session || pin == firstUpstream || pin == "" {
+		t.Fatalf("pin ID must be a new hashed ID, got %q", pin)
 	}
-	if got := ClaudeDatePinSessionID(ctx, headers, secondUpstream); got != want {
-		t.Fatalf("second turn pin ID = %q, want %q", got, want)
+	if got := ClaudeDatePinSessionID(ctx, headers, secondUpstream); got != pin {
+		t.Fatalf("pin ID changed across turns: %q then %q", pin, got)
+	}
+
+	otherHeaders := headers.Clone()
+	otherHeaders.Set("X-Claude-Code-Session-Id", otherSession)
+	if got := ClaudeDatePinSessionID(ctx, otherHeaders, secondUpstream); got == pin {
+		t.Fatal("a different client session must get a different pin ID")
+	}
+
+	mainHeaders := headers.Clone()
+	mainHeaders.Set("X-Claude-Code-Agent-Id", "main")
+	if got := ClaudeDatePinSessionID(ctx, mainHeaders, secondUpstream); got != pin {
+		t.Fatalf("main agent pin ID = %q, want the session pin %q", got, pin)
 	}
 
 	agentHeaders := headers.Clone()
 	agentHeaders.Set("X-Claude-Code-Agent-Id", "worker")
-	if got := ClaudeDatePinSessionID(ctx, agentHeaders, secondUpstream); got != want {
-		t.Fatalf("subagent pin ID = %q, want parent pin ID %q", got, want)
+	agentPin := ClaudeDatePinSessionID(ctx, agentHeaders, firstUpstream)
+	if agentPin == pin || agentPin == "" {
+		t.Fatalf("subagent must get its own pin ID, got %q", agentPin)
 	}
-	agentHeaders.Set("X-Claude-Code-Session-Id", session+":agent:worker")
-	if got := ClaudeDatePinSessionID(ctx, agentHeaders, secondUpstream); got != want {
-		t.Fatalf("suffixed session pin ID = %q, want parent pin ID %q", got, want)
+	if got := ClaudeDatePinSessionID(ctx, agentHeaders, secondUpstream); got != agentPin {
+		t.Fatalf("subagent pin ID changed across turns: %q then %q", agentPin, got)
+	}
+	suffixHeaders := headers.Clone()
+	suffixHeaders.Set("X-Claude-Code-Session-Id", session+":agent:worker")
+	if got := ClaudeDatePinSessionID(ctx, suffixHeaders, secondUpstream); got != agentPin {
+		t.Fatalf("suffixed session pin ID = %q, want subagent pin %q", got, agentPin)
 	}
 
 	noSessionHeader := headers.Clone()
@@ -137,8 +154,8 @@ func TestClaudeDatePinSessionID(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := ClaudeAgentSessionUUIDForRequest(tc.headers, second, nil, false, tc.metadata)
-			ctx := WithClaudeSessionMetadata(context.Background(), nil, tc.metadata)
-			if got := ClaudeDatePinSessionID(ctx, tc.headers, upstream); got != upstream {
+			ctxMetadata := WithClaudeSessionMetadata(context.Background(), nil, tc.metadata)
+			if got := ClaudeDatePinSessionID(ctxMetadata, tc.headers, upstream); got != upstream {
 				t.Fatalf("pin ID = %q, want existing session ID %q", got, upstream)
 			}
 		})

@@ -72,18 +72,28 @@ func ClaudeRequestHasExecutionMetadata(metadataSets ...map[string]any) bool {
 	return false
 }
 
-// ClaudeDatePinSessionID scopes a cloaked date pin to the caller's parent session.
-// Internal session metadata keeps the same pin identity used for continuity.
+// ClaudeDatePinSessionID scopes a cloaked date pin to the caller's Claude Code
+// session, and to the subagent when one is named, so each stream keeps one date
+// and a subagent started later is told its own start date rather than the
+// parent's. Internal session metadata keeps the same pin identity used for continuity.
 func ClaudeDatePinSessionID(ctx context.Context, headers http.Header, sessionID string) string {
 	metadata, _ := ctx.Value(claudeSessionMetadataKey{}).(claudeSessionMetadata)
 	if metadata.execution || metadata.derived || !IsClaudeCodeUserAgent(headerValue(headers, "User-Agent")) {
 		return sessionID
 	}
-	parent, _, _ := strings.Cut(headerValue(headers, "X-Claude-Code-Session-Id"), ":agent:")
+	parent, suffixAgent, _ := strings.Cut(headerValue(headers, "X-Claude-Code-Session-Id"), ":agent:")
 	if parent = strings.TrimSpace(parent); parent == "" {
 		return sessionID
 	}
-	return stableProviderSessionUUID("claude", "date-pin", "claude:"+parent)
+	identity := "claude:" + parent
+	agent := strings.TrimSpace(headerValue(headers, "X-Claude-Code-Agent-Id"))
+	if agent == "" {
+		agent = strings.TrimSpace(suffixAgent)
+	}
+	if agent != "" && agent != "main" {
+		identity += ":agent:" + agent
+	}
+	return stableProviderSessionUUID("claude", "date-pin", identity)
 }
 
 func claudeAgentSessionUUID(headers http.Header, originalPayload, translatedPayload []byte, metadataSets ...map[string]any) string {
