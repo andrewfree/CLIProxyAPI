@@ -76,6 +76,7 @@ for (const { label, status = 429, body, retryAfter, shouldRetry = null } of [
   { label: "selector cooldown Claude Code can ride out", body: selectorCooldown(180) },
   { label: "Claude cooldown just over the limit", body: claudeCooldown("3m1s"), shouldRetry: "false" },
   { label: "Claude cooldown Claude Code can ride out", body: claudeCooldown("2m59s") },
+  { label: "Claude cooldown at the limit", body: claudeCooldown("3m0s") },
   { label: "empty JSON 429", body: "" },
   { label: "long Claude cooldown", body: claudeCooldown("2h17m30s"), shouldRetry: "false" },
   { label: "long cooldown at the 64 KiB limit", body: selectorCooldown(3600).padEnd(64 * 1024), shouldRetry: "false" },

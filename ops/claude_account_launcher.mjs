@@ -17,7 +17,8 @@ const supportedOperations = new Set([
 
 const childShutdownGraceMs = 5000;
 const maxCooldownBodyBytes = 64 * 1024;
-// Claude Code's own retries absorb cooldowns up to about 160 s; only longer ones should end the turn.
+// Claude Code's own retries span about 160 s and CLIProxy holds a request for up to 75 s,
+// so cooldowns up to 180 s are absorbed; only longer ones should end the turn.
 const noRetryCooldownSeconds = 180;
 
 function forwardedHeaders(headers) {
