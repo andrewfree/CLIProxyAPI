@@ -489,6 +489,9 @@ for two blackholed addresses in 3.4 seconds, which is the probe bound. It answer
 primary for Will by name. Tailscale and Will were not touched
 ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
 
+`node ops/claude_failover_drill.mjs` repeats it ([README.md](README.md#host-failover-for-the-shared-pool));
+`node ops/set_pool_fallback.mjs` turns failover on or off for the profile.
+
 The drill covered only pre-connect failures on a replayable call. The dial-error 5xx and egress
 hold, the zero-byte reset and the liveness watch were not exercised live; they rest on the node
 tests in `ops/claude_account_failover.test.mjs`.
@@ -535,7 +538,7 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | `/Users/rever/cliproxy` on the Mac | A git checkout, and also the deployed location. T3 runs the launcher from it through `config.binaryPath`; the LaunchAgents run the watchdog and archiver from it; Compose reads `docker-compose.yml` there. | A pull, a branch checkout or an uncommitted edit in that tree changes what runs. |
 | `~/cliproxy` on Will | A hand-copied subset of the tree, not a git checkout. | Files are replaced by copying, with the previous versions backed up under `ops/runtime/`. Hashes are the only link to a commit. |
 | `ops/runtime/` on each host | Private state, ignored by git (`.gitignore`): backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it; copy a receipt into `ops/evidence/` only after checking it. |
-| `ops/evidence/` | Sanitized, tracked records of activations and measurements. | This is where "why do we believe this" lives. |
+| `ops/evidence/` | Sanitized, tracked records of activations and measurements, and the as-run scripts of each operation, byte-identical to what ran (for example `evidence/key-rotation-20261118/`). | This is where "why do we believe this" lives. Maintained tools that a runbook tells you to run live directly in `ops/` with tests. |
 | `config.yaml`, `.env`, `auths/` | Per host, never tracked, never copied between hosts. | The server's secrets; client-side copies are listed in section 2.9. |
 | `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 18. | See below. |
 

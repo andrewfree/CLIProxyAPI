@@ -135,9 +135,35 @@ transitions are appended to `ops/runtime/fleet/failover.jsonl` (ignored by git;
 `CLIPROXY_FAILOVER_LOG` overrides the path) as one JSON line each, with no
 request bodies, URLs or keys.
 
-To turn failover off, remove `CLIPROXY_FALLBACK_URL` from the profile through
-`server.updateSettings`. New sessions then use the primary only; running
-sessions keep failover until they end.
+Turn failover on or off for one pool profile with `set_pool_fallback.mjs`.
+It changes only `CLIPROXY_BASE_URL` and `CLIPROXY_FALLBACK_URL`, stores the
+key passed on stdin again as a sensitive variable, keeps private before and
+after settings (mode `0600`) in the backup directory, and checks that the
+profile's `config` block and every other profile are unchanged. New sessions
+use the change; running sessions keep their launch environment until they
+end.
+
+```sh
+node ops/set_pool_fallback.mjs --base-dir ~/.t3 --profile-id claude_cliproxy \
+  --primary <primary-origin> --fallback http://127.0.0.1:8317 \
+  --backup-dir <new-private-backup-directory> < <private-key-file>
+node ops/set_pool_fallback.mjs --base-dir ~/.t3 --profile-id claude_cliproxy \
+  --primary <primary-origin> --no-fallback \
+  --backup-dir <new-private-backup-directory> < <private-key-file>
+```
+
+To check failover end to end without touching T3, run the drill. It starts
+the launcher once per primary with a stub in place of Claude Code, sends one
+`count_tokens` request, and prints one JSON line per primary with the status,
+the answering host and the transitions. The key comes from
+`~/.local/bin/cliproxy-codex-token` and is never printed. A closed port, an
+unresolvable name and a blackholed address should all answer from the
+fallback; Will's tailnet name should answer from the primary.
+
+```sh
+node ops/claude_failover_drill.mjs --primary http://127.0.0.1:1 \
+  --primary http://will.invalid:8317 --primary <primary-origin>
+```
 
 On `SIGTERM`, `SIGINT`, or `SIGHUP`, the launcher closes its listener and
 connections, then forwards the signal to its child. If the child has not exited
@@ -173,7 +199,7 @@ The launcher needs Node.js on the provider process's PATH and has no additional
 package dependencies. No separate long-running service or fixed port is needed.
 
 Verify the launcher with
-`node --test ops/claude_account_launcher.test.mjs ops/claude_account_launcher_process.test.mjs ops/claude_account_failover.test.mjs`.
+`node --test ops/claude_account_launcher.test.mjs ops/claude_account_launcher_process.test.mjs ops/claude_account_failover.test.mjs ops/claude_failover_drill.test.mjs ops/set_pool_fallback.test.mjs ops/configure_claude_pool.test.mjs`.
 For live verification, check a streamed response through the chosen account and
 an unavailable account's error. The `X-CPA-TRACE-ID` header identifies which
 proxy auth entry served the response. To undo this setup, remove the two T3
