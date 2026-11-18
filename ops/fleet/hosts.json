@@ -1,0 +1,28 @@
+{
+  "m5": {
+    "name": "m5",
+    "ssh": null,
+    "arch": "arm64",
+    "port": 8317,
+    "instance_root": "/Users/rever/cliproxy",
+    "bundle_root": "/Users/rever/cliproxy-live/ops",
+    "hidden_expected": {
+      "server.host": [""],
+      "server.port": [8317],
+      "oauth.auth-dir": ["~/.cli-proxy-api", "/root/.cli-proxy-api"]
+    }
+  },
+  "will": {
+    "name": "will",
+    "ssh": "will.local",
+    "arch": "amd64",
+    "port": 8317,
+    "instance_root": "/home/andrew/cliproxy",
+    "bundle_root": "/home/andrew/cliproxy/ops",
+    "hidden_expected": {
+      "server.host": [""],
+      "server.port": [8317],
+      "oauth.auth-dir": ["~/.cli-proxy-api", "/root/.cli-proxy-api"]
+    }
+  }
+}

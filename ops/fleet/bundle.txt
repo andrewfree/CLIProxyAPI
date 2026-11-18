@@ -1,0 +1,13 @@
+ops/archive_logs.py
+ops/claude_account_launcher.mjs
+ops/cliproxy-codex-token
+ops/cliproxy_watchdog.py
+ops/fleetctl.py
+ops/fleet-release.json
+ops/fleet_routing.py
+ops/fleet/bundle.txt
+ops/fleet/exceptions.json
+ops/fleet/hosts.json
+ops/fleet/paths.json
+ops/instances/will/config-policy.json
+ops/verify_fleet_instance.py

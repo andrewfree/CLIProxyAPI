@@ -1,5 +1,64 @@
 # CLIProxy fleet
 
+## Fleet contract
+
+Will is the primary and the M5 Mac is the fallback. The fleet target is the
+same release, effective config, model catalog, and accounts under the same
+prefixes on both hosts. Keep each host's OAuth files, cooldown state, secrets,
+and logs local. Change both hosts together or record the exact difference,
+reason, decision reference, and review date in [exceptions.json](fleet/exceptions.json).
+
+Run these checks from a worktree before and after a fleet change, login, or
+logout:
+
+```sh
+python3 ops/fleetctl.py check
+python3 ops/fleetctl.py health
+python3 ops/fleetctl.py fingerprint --host m5
+python3 ops/fleetctl.py parity
+```
+
+`check` checks tracked pins against Will's owner policy offline. `health`
+probes each host's `/healthz`. `fingerprint` checks one instance against the
+available pins and reports counts and allowlisted settings. `parity` compares
+the loaded config, selected disk-only settings, static key and account tags,
+account errors, the catalog for every client key, Cursor overlap, and plugin
+registrations. The tool checks the server version and the pinned Cursor
+library. It reads Will over SSH with a loopback worker and prints differences
+without account identities or tags. Exit 0 means the selected checks passed.
+Exit 1 indicates drift or an invalid offline contract. Exit 2 indicates the
+probe could not complete. An expired exception fails live parity. The parity
+report lists exception scopes with no observed difference in `unused_exceptions`.
+
+The [release manifest](fleet-release.json) pins the shared config projection
+and the initial full M5 fingerprint. The shared projection sets aside debug
+logging, NVIDIA, and the Will quota plugin for scoped comparison. Discovery
+and the log size cap are intentionally host-specific. Will's legacy YAML and
+M5's v8 YAML feed the same loaded config view.
+
+The read-only checks cover the management API contract. Use the existing
+instance verifiers for Docker image and Compose checks. The bundle manifest
+lists files for the later shipping step. Shipping, bundle activation receipts,
+in-container egress checks, and scheduled health notifications follow in
+separate units.
+
+Operational differences recorded on November 18, 2026, for review by December 2, 2026:
+
+- Will uses flat legacy YAML until the layout migration (fleet design November 17, unit 7).
+- The Mac runs scripts from its primary checkout and Will has a hand-copied ops subset
+  pending bundle receipts (units 2b and 2c).
+- The installed Mac token helper differed from the tracked copy and reachable history
+  during prechecks (unit 0).
+
+Until bundle cutover, updating the watchdog, log archiver, Claude launcher,
+their plists, or Compose configuration in the Mac's primary checkout is a
+live change and requires Andrew's promote phrase. Edit those files in a
+worktree. Activate the Mac first, then Will. If verification fails, roll back
+the host just changed. A host that already passed requires Andrew's
+instruction to roll back.
+
+## Running fleet
+
 Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`.
 
 `fleet-release.json` pins one application source commit, one Cursor plugin version, and the exact platform image and plugin hashes. Both images are built from the same commit. ARM64 runs on the Mac's Docker VM; AMD64 runs on Will. Compose uses immutable local image IDs with `pull_policy: never`, so a restart cannot silently select a new release. The two Compose files and owner contracts must be changed together for the next release.

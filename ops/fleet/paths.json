@@ -1,0 +1,65 @@
+{
+  "secret_paths": [
+    "plugins.store-auth",
+    "ampcode.upstream-api-keys",
+    "tls.key"
+  ],
+  "host_paths": [
+    "discovery",
+    "logs-max-total-size-mb"
+  ],
+  "hidden_paths": {
+    "server.host": "",
+    "server.port": 0,
+    "oauth.auth-dir": "",
+    "server.github-token": "",
+    "management.allow-remote": false,
+    "management.disable-control-panel": false,
+    "management.disable-auto-update-panel": false,
+    "management.panel-github-repository": "",
+    "management.base-url": "",
+    "server.response-compression.enabled": true,
+    "server.response-compression.min-bytes": 1024
+  },
+  "print_paths": {
+    "claude-header-defaults.timezone": [
+      "America/Los_Angeles"
+    ],
+    "debug": [
+      false,
+      true
+    ],
+    "max-retry-interval": [
+      0,
+      75
+    ],
+    "routing.session-affinity": [
+      false,
+      true
+    ],
+    "routing.strategy": [
+      "quota-aware",
+      "round-robin"
+    ],
+    "transient-error-cooldown-seconds": [
+      -1,
+      0
+    ],
+    "usage-statistics-enabled": [
+      false,
+      true
+    ]
+  },
+  "fingerprint_keys": [
+    "claude-header-defaults",
+    "credential-concurrency",
+    "credential-in-flight",
+    "debug",
+    "oauth-model-alias",
+    "openai-compatibility",
+    "plugins",
+    "response-compression",
+    "routing",
+    "tls-handshake-timeout-seconds"
+  ]
+}

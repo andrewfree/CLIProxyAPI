@@ -32,6 +32,12 @@
     "arm64": "sha256:43c85866015ac08365741c004a033a56e42ccc5b89d999bcc6d83425b2aad5af",
     "amd64": "sha256:bd8ebc2b1ee329d88ac4ada235aaaa2744856740933e404966ec8a9eca18f473"
   },
+  "config_fingerprint": {
+    "shared": "c32120a3b8238ecaffc42f29c95a024977e03c248d31ff24cf15c5c347bf1958",
+    "observed": {
+      "m5": "44bca0891de10baf51f96662c91278a07a68c972e5be6edf02d07e7200fe5751"
+    }
+  },
   "runtime_policy": {
     "quota-cooldown-max-seconds": 3600,
     "save-cooldown-status": true,
