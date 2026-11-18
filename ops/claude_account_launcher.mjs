@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import os from "node:os";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const hopHeaders = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -20,6 +22,202 @@ const maxCooldownBodyBytes = 64 * 1024;
 // Claude Code's own retries span about 160 s and CLIProxy holds a request for up to 75 s,
 // so cooldowns up to 180 s are absorbed; only longer ones should end the turn.
 const noRetryCooldownSeconds = 180;
+
+// Host failover applies only when a fallback origin is configured (ops/FLEET_DESIGN.md sections 6 and 7).
+export const failoverDefaults = Object.freeze({
+  connectTimeoutMs: 3000,
+  probeTimeoutMs: 3000,
+  livenessIntervalMs: 20_000,
+  livenessFailures: 3,
+  recoveryIntervalMs: 15_000,
+  recoverySuccesses: 2,
+  recoveryMinimumMs: 30_000,
+  egressHoldMs: 120_000,
+  egressHoldMaxMs: 600_000,
+});
+const maxFailoverErrorBytes = 64 * 1024;
+const maxHealthBodyBytes = 4096;
+const defaultFailoverLog = fileURLToPath(new URL("./runtime/fleet/failover.jsonl", import.meta.url));
+const accountOrQuotaError = /invalid_grant|unauthorized|rate_limit_error|usage_limit_reached|quota_exceeded|model_cooldown/i;
+const dialError = /\bdial (?:tcp|udp)[46]?\b|\bdial upstream:|\blookup \S+ .*(?:no such host|server misbehaving)|\bnetwork is unreachable\b/i;
+
+// A 5xx whose error says CLIProxy could not dial its upstream means nothing reached the provider,
+// so the request can be replayed on the other host.
+export function isEgressFailure(statusCode, body) {
+  if (statusCode < 500) return false;
+  let error;
+  try {
+    error = JSON.parse(body)?.error;
+  } catch {
+    return false;
+  }
+  const message = typeof error === "string" ? error : error?.message;
+  if (typeof message !== "string" || accountOrQuotaError.test([error?.type, error?.code, message].join(" "))) return false;
+  return dialError.test(message);
+}
+
+function requestOptions(origin, method, url, headers) {
+  return {
+    protocol: origin.protocol, hostname: origin.hostname, port: origin.port,
+    method, path: `${origin.pathname.replace(/\/$/, "")}${url}`, headers,
+  };
+}
+
+// GET /healthz must return 200 with {"status":"ok"}; a TCP accept alone proves nothing.
+export function probeHealth(origin, timeoutMs = failoverDefaults.probeTimeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (healthy) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      probe.destroy();
+      resolve(healthy);
+    };
+    const transport = origin.protocol === "https:" ? https : http;
+    const probe = transport.request({
+      ...requestOptions(origin, "GET", "/healthz", { accept: "application/json" }), path: "/healthz", agent: false,
+    }, (response) => {
+      const chunks = [];
+      let size = 0;
+      response.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > maxHealthBodyBytes) return finish(false);
+        chunks.push(chunk);
+      });
+      response.on("end", () => {
+        try {
+          finish(response.statusCode === 200 && JSON.parse(Buffer.concat(chunks)).status === "ok");
+        } catch {
+          finish(false);
+        }
+      });
+      response.on("error", () => finish(false));
+    });
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    probe.on("error", () => finish(false));
+    probe.end();
+  });
+}
+
+const realClock = {
+  now: Date.now,
+  setTimeout: (callback, ms) => { const timer = setTimeout(callback, ms); timer.unref?.(); return timer; },
+  clearTimeout: (timer) => clearTimeout(timer),
+  setInterval: (callback, ms) => { const timer = setInterval(callback, ms); timer.unref?.(); return timer; },
+  clearInterval: (timer) => clearInterval(timer),
+};
+
+// One JSON line per host transition. It holds no request bodies, URLs or keys.
+function transitionLog(file) {
+  return (entry) => {
+    const line = `${JSON.stringify({ ts: new Date().toISOString(), pid: process.pid, ...entry })}\n`;
+    fs.promises.mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+      .then(() => fs.promises.appendFile(file, line, { mode: 0o600 }))
+      .catch(() => {});
+  };
+}
+
+// Chooses the host for new requests. The primary leaves service on a failed connect or health check
+// and returns after enough passing probes; an egress failure holds new requests on the fallback instead,
+// because the primary's own health check stays green while its upstream is unreachable.
+function createHostSelector({ clock, probe, log, settings }) {
+  let down = null;
+  let holdUntil = 0;
+  let holdMs = settings.egressHoldMs;
+
+  function markDown(reason) {
+    if (down) return;
+    const state = { since: clock.now(), successes: 0, probing: false };
+    down = state;
+    state.timer = clock.setInterval(async () => {
+      if (state.probing) return;
+      state.probing = true;
+      const healthy = await probe("primary");
+      state.probing = false;
+      if (down !== state) return;
+      state.successes = healthy ? state.successes + 1 : 0;
+      if (state.successes >= settings.recoverySuccesses && clock.now() - state.since >= settings.recoveryMinimumMs) {
+        clock.clearInterval(state.timer);
+        down = null;
+        log({ event: "primary_up" });
+      }
+    }, settings.recoveryIntervalMs);
+    log({ event: "primary_down", reason });
+  }
+
+  return {
+    choose: () => (down || clock.now() < holdUntil ? "fallback" : "primary"),
+    markDown,
+    egressDown() {
+      holdUntil = clock.now() + holdMs;
+      log({ event: "egress_hold", seconds: holdMs / 1000 });
+      holdMs = Math.min(holdMs * 2, settings.egressHoldMaxMs);
+    },
+    primaryAnswered() {
+      holdMs = settings.egressHoldMs;
+    },
+    stop() {
+      if (down) clock.clearInterval(down.timer);
+      down = null;
+    },
+  };
+}
+
+// While requests are open, probes their hosts. A request is ended only when its host failed
+// `livenessFailures` probes in a row and the request received no bytes over that whole window,
+// so a stream that is still delivering is never cut.
+function createLivenessWatch({ clock, probe, settings, onHostFailing }) {
+  const watched = new Set();
+  const hostFailures = new Map();
+  let timer = null;
+  let ticking = false;
+
+  async function tick() {
+    if (ticking) return;
+    ticking = true;
+    try {
+      const hosts = [...new Set([...watched].map((entry) => entry.host))];
+      const healthy = new Map(await Promise.all(hosts.map(async (host) => [host, await probe(host)])));
+      for (const host of hosts) {
+        const failures = healthy.get(host) ? 0 : (hostFailures.get(host) ?? 0) + 1;
+        hostFailures.set(host, failures);
+        if (failures >= settings.livenessFailures) onHostFailing(host);
+      }
+      for (const entry of [...watched]) {
+        if (!healthy.has(entry.host)) continue;
+        const bytes = entry.socket.bytesRead;
+        entry.silent = healthy.get(entry.host) || bytes !== entry.bytes ? 0 : entry.silent + 1;
+        entry.bytes = bytes;
+        if (entry.silent >= settings.livenessFailures) entry.cut();
+      }
+    } finally {
+      ticking = false;
+    }
+  }
+
+  function stop() {
+    if (timer !== null) clock.clearInterval(timer);
+    timer = null;
+    hostFailures.clear();
+  }
+
+  return {
+    add(entry) {
+      watched.add(entry);
+      timer ??= clock.setInterval(tick, settings.livenessIntervalMs);
+      return () => {
+        watched.delete(entry);
+        if (!watched.size) stop();
+      };
+    },
+    stop() {
+      watched.clear();
+      stop();
+    },
+  };
+}
 
 function forwardedHeaders(headers) {
   const excluded = new Set(hopHeaders);
@@ -112,15 +310,52 @@ function forwardUpstreamResponse(upstream, response, outgoing) {
   upstream.once("end", finish);
 }
 
-export async function startAccountProxy({ route = "account", prefix, upstream }) {
+function isHttpOrigin(origin) {
+  return ["http:", "https:"].includes(origin.protocol) && !origin.username && !origin.password && !origin.search && !origin.hash;
+}
+
+export async function startAccountProxy({ route = "account", prefix, upstream, fallbackUpstream, failover = {} }) {
   if (route !== "account" && route !== "shared-pool") throw new Error("CLIPROXY_CLAUDE_ROUTE must be account or shared-pool.");
   if (route === "shared-pool" && prefix) throw new Error("The shared-pool route must not set CLIPROXY_ACCOUNT_PREFIX.");
   if (route === "account" && !/^[a-zA-Z0-9_-]+$/.test(prefix ?? "")) throw new Error("A valid CLIPROXY_ACCOUNT_PREFIX is required.");
   const target = new URL(upstream);
-  if (!["http:", "https:"].includes(target.protocol) || target.username || target.password || target.search || target.hash) {
+  if (!isHttpOrigin(target)) {
     throw new Error("CLIPROXY_BASE_URL must be an HTTP origin without credentials or query parameters.");
   }
+  const fallback = fallbackUpstream ? new URL(fallbackUpstream) : null;
+  if (fallback) {
+    // A named account never crosses hosts: only the shared pool is the same on both.
+    if (route !== "shared-pool") throw new Error("CLIPROXY_FALLBACK_URL is only supported on the shared-pool route.");
+    if (!isHttpOrigin(fallback)) throw new Error("CLIPROXY_FALLBACK_URL must be an HTTP origin without credentials or query parameters.");
+    if (fallback.origin === target.origin) throw new Error("CLIPROXY_FALLBACK_URL must name a different CLIProxy host.");
+  }
   const transport = target.protocol === "https:" ? https : http;
+
+  const deliver = (request, path, response, upstreamResponse) => {
+    const outgoing = forwardedHeaders(upstreamResponse.headers);
+    if (request.method === "GET" && path === "/v1/models" && upstreamResponse.statusCode === 200) {
+      (async () => {
+        try {
+          const chunks = [];
+          for await (const chunk of upstreamResponse) chunks.push(chunk);
+          const value = JSON.parse(Buffer.concat(chunks));
+          value.data = route === "shared-pool"
+            ? value.data.filter((model) => model.id.startsWith("claude-") && !model.id.includes("/"))
+            : value.data.filter((model) => model.id.startsWith(`${prefix}/`)).map((model) => ({
+              ...model, id: model.id.slice(prefix.length + 1),
+            }));
+          response.writeHead(200, outgoing);
+          response.end(JSON.stringify(value));
+        } catch {
+          fail(response, 502, "The proxy returned an invalid model list.");
+        }
+      })();
+      return;
+    }
+    forwardUpstreamResponse(upstreamResponse, response, outgoing);
+  };
+
+  const failoverRoute = fallback && createFailoverRoute({ target, fallback, deliver, options: failover });
   const server = http.createServer(async (request, response) => {
     let body;
     const path = request.url.split("?")[0];
@@ -160,37 +395,185 @@ export async function startAccountProxy({ route = "account", prefix, upstream })
     const headers = forwardedHeaders(request.headers);
     headers["accept-encoding"] = "identity";
     if (body.length) headers["content-length"] = String(body.length);
-    const upstreamRequest = transport.request({
-      protocol: target.protocol, hostname: target.hostname, port: target.port,
-      method: request.method, path: `${target.pathname.replace(/\/$/, "")}${request.url}`, headers,
-    }, async (upstreamResponse) => {
-      const outgoing = forwardedHeaders(upstreamResponse.headers);
-      if (request.method === "GET" && path === "/v1/models" && upstreamResponse.statusCode === 200) {
-        try {
-          const chunks = [];
-          for await (const chunk of upstreamResponse) chunks.push(chunk);
-          const value = JSON.parse(Buffer.concat(chunks));
-          value.data = route === "shared-pool"
-            ? value.data.filter((model) => model.id.startsWith("claude-") && !model.id.includes("/"))
-            : value.data.filter((model) => model.id.startsWith(`${prefix}/`)).map((model) => ({
-              ...model, id: model.id.slice(prefix.length + 1),
-            }));
-          response.writeHead(200, outgoing);
-          response.end(JSON.stringify(value));
-        } catch {
-          fail(response, 502, "The proxy returned an invalid model list.");
-        }
-        return;
-      }
-      forwardUpstreamResponse(upstreamResponse, response, outgoing);
+    if (failoverRoute) return failoverRoute.forward(request, path, response, body, headers);
+    const upstreamRequest = transport.request(requestOptions(target, request.method, request.url, headers), (upstreamResponse) => {
+      deliver(request, path, response, upstreamResponse);
     });
-    upstreamRequest.on("error", () => fail(response, 502, "CLIProxy is unavailable for the selected Claude route."));
+    upstreamRequest.on("error", () => fail(response, 502, unavailableMessage));
     response.on("close", () => upstreamRequest.destroy());
     upstreamRequest.end(body);
   });
+  if (failoverRoute) {
+    server.once("close", failoverRoute.stop);
+    await failoverRoute.start();
+  }
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   return { server, baseURL: `http://127.0.0.1:${server.address().port}` };
+}
+
+const unavailableMessage = "CLIProxy is unavailable for the selected Claude route.";
+
+function retryableFailure(response, message) {
+  if (!response.headersSent) response.setHeader("x-should-retry", "true");
+  fail(response, 502, message);
+}
+
+function createFailoverRoute({ target, fallback, deliver, options }) {
+  const settings = { ...failoverDefaults, ...options.settings };
+  const clock = options.clock ?? realClock;
+  const log = options.log ?? transitionLog(defaultFailoverLog);
+  const origins = { primary: target, fallback };
+  const probe = options.probe ?? ((host) => probeHealth(origins[host], settings.probeTimeoutMs));
+  const selector = createHostSelector({ clock, probe, log, settings });
+  const watch = createLivenessWatch({
+    clock, probe, settings, onHostFailing: (host) => { if (host === "primary") selector.markDown("liveness"); },
+  });
+  const other = (host) => (host === "primary" ? "fallback" : "primary");
+
+  function forward(request, path, response, body, headers) {
+    // count_tokens and the model list are safe to replay; a message may already be generating upstream.
+    const replayable = !(request.method === "POST" && path === "/v1/messages");
+    let failedOver = false;
+    let active = null;
+    response.once("close", () => active?.destroy());
+
+    const switchHost = (host) => {
+      if (failedOver) return false;
+      failedOver = true;
+      send(other(host));
+      return true;
+    };
+
+    const send = (host) => {
+      if (response.destroyed || response.writableEnded) return;
+      const origin = origins[host];
+      response.setHeader("x-cliproxy-host", host);
+      let socket = null;
+      let connected = false;
+      let guard = null;
+      let release = () => {};
+      const upstreamRequest = (origin.protocol === "https:" ? https : http).request({
+        ...requestOptions(origin, request.method, request.url, headers),
+        agent: false,
+        ...(options.lookup ? { lookup: options.lookup } : {}),
+      }, (upstreamResponse) => {
+        if (active !== upstreamRequest || response.destroyed) return void upstreamResponse.destroy();
+        if (host === "primary" && upstreamResponse.statusCode >= 500 && !failedOver) {
+          return classifyPrimaryError(upstreamRequest, upstreamResponse);
+        }
+        if (host === "primary" && upstreamResponse.statusCode < 500) selector.primaryAnswered();
+        deliver(request, path, response, upstreamResponse);
+      });
+      active = upstreamRequest;
+      upstreamRequest.once("socket", (assigned) => {
+        socket = assigned;
+        if (assigned.connecting) {
+          guard = clock.setTimeout(() => {
+            upstreamRequest.destroy(Object.assign(new Error("connect timeout"), { code: "ECONNECTGUARD" }));
+          }, settings.connectTimeoutMs);
+          assigned.once("connect", () => {
+            connected = true;
+            clock.clearTimeout(guard);
+            guard = null;
+          });
+        } else {
+          connected = true;
+        }
+        release = watch.add({
+          host, socket: assigned, bytes: assigned.bytesRead, silent: 0,
+          cut() {
+            if (active !== upstreamRequest) return;
+            active = null;
+            log({ event: "request_cut", host });
+            if (response.headersSent) response.destroy();
+            else retryableFailure(response, "CLIProxy stopped answering; retry the request.");
+            upstreamRequest.destroy();
+          },
+        });
+      });
+      upstreamRequest.once("close", () => {
+        if (guard !== null) clock.clearTimeout(guard);
+        release();
+      });
+      upstreamRequest.on("error", (error) => {
+        if (active !== upstreamRequest || response.destroyed) return;
+        active = null;
+        if (!connected) {
+          // Nothing reached the host, so any request may be sent to the other one.
+          if (host === "primary") selector.markDown(error.code === "ECONNECTGUARD" ? "connect_timeout" : error.code ?? "connect_error");
+          if (!switchHost(host)) fail(response, 502, unavailableMessage);
+          return;
+        }
+        if (response.headersSent) return void response.destroy();
+        if ((socket?.bytesRead ?? 0) > 0) return void fail(response, 502, unavailableMessage);
+        // Closed after connect with nothing received: check the host once before deciding.
+        const healthy = probe(host).then((ok) => {
+          if (!ok && host === "primary") selector.markDown("reset");
+          return ok;
+        });
+        if (replayable && switchHost(host)) return;
+        healthy.then(() => {
+          if (!response.destroyed && !response.writableEnded) {
+            retryableFailure(response, "CLIProxy closed the connection before replying; retry the request.");
+          }
+        });
+      });
+      upstreamRequest.end(body);
+    };
+
+    const classifyPrimaryError = (upstreamRequest, upstreamResponse) => {
+      const chunks = [];
+      let size = 0;
+      upstreamResponse.on("error", () => { if (active === upstreamRequest) response.destroy(); });
+      const passThrough = () => response.writeHead(upstreamResponse.statusCode, forwardedHeaders(upstreamResponse.headers));
+      const collect = (chunk) => {
+        chunks.push(chunk);
+        size += chunk.length;
+        if (size > maxFailoverErrorBytes) {
+          upstreamResponse.off("data", collect);
+          upstreamResponse.off("end", complete);
+          passThrough();
+          response.write(Buffer.concat(chunks));
+          upstreamResponse.pipe(response);
+        }
+      };
+      const complete = () => {
+        if (active !== upstreamRequest || response.destroyed) return;
+        const errorBody = Buffer.concat(chunks);
+        if (isEgressFailure(upstreamResponse.statusCode, errorBody)) {
+          selector.egressDown();
+          active = null;
+          switchHost("primary");
+          return;
+        }
+        passThrough();
+        response.end(errorBody);
+      };
+      upstreamResponse.on("data", collect);
+      upstreamResponse.on("end", complete);
+    };
+
+    send(selector.choose());
+  }
+
+  return {
+    forward,
+    async start() {
+      if (!(await probe("primary"))) selector.markDown("startup_probe");
+    },
+    stop() {
+      selector.stop();
+      watch.stop();
+    },
+  };
+}
+
+function connectTimeoutSetting(value) {
+  if (value === undefined || value === "") return {};
+  const ms = Number(value);
+  if (!Number.isInteger(ms) || ms < 100 || ms > 60_000) throw new Error("CLIPROXY_CONNECT_TIMEOUT_MS must be an integer from 100 to 60000.");
+  return { connectTimeoutMs: ms };
 }
 
 async function main() {
@@ -200,6 +583,11 @@ async function main() {
     route: process.env.CLIPROXY_CLAUDE_ROUTE,
     prefix: process.env.CLIPROXY_ACCOUNT_PREFIX,
     upstream: process.env.CLIPROXY_BASE_URL,
+    fallbackUpstream: process.env.CLIPROXY_FALLBACK_URL || undefined,
+    failover: {
+      settings: connectTimeoutSetting(process.env.CLIPROXY_CONNECT_TIMEOUT_MS),
+      log: transitionLog(process.env.CLIPROXY_FAILOVER_LOG || defaultFailoverLog),
+    },
   });
   const child = spawn(binary, process.argv.slice(2), {
     stdio: "inherit",

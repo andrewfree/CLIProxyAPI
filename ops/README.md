@@ -13,8 +13,9 @@ Use a **Claude - CLIProxy pool** profile when any subscribed Claude account
 may handle the request. Set `CLIPROXY_CLAUDE_ROUTE=shared-pool` and leave
 `CLIPROXY_ACCOUNT_PREFIX` empty. The launcher forwards unprefixed Claude
 model IDs to CLIProxy, which selects eligible credentials and handles
-credential retries. The launcher does not retry requests or switch hosts.
-Its model list contains only unprefixed Claude models. Account-qualified
+credential retries. The launcher does not retry requests. It switches hosts
+only when its profile sets `CLIPROXY_FALLBACK_URL` (see
+[Host failover](#host-failover-for-the-shared-pool)). Its model list contains only unprefixed Claude models. Account-qualified
 models are rejected in pool mode.
 
 Use a named profile when a specific account must handle the request.
@@ -68,9 +69,55 @@ uses the installed T3 runtime and its `undici` package. It requires
 orchestration protocol 2. It does not restart T3 or either proxy.
 
 On the Mac, configure `claude_cliproxy` for Will and
-`claude_cliproxy_mac` for the local fallback. On Will, use its own loopback
-proxy. Selecting another host remains manual. No route can produce a reply
-while every eligible account is at its upstream limit.
+`claude_cliproxy_mac` for the local proxy. On Will, use its own loopback
+proxy. Pass `--fallback <origin>` to give a pool profile a second host. The
+tool rewrites the profile's whole environment, so pass `--fallback` again on
+every rerun or the fallback is removed. No route can produce a reply while
+every eligible account is at its upstream limit.
+
+### Host failover for the shared pool
+
+`CLIPROXY_FALLBACK_URL` names a second CLIProxy origin for a shared-pool
+profile. Only `claude_cliproxy` on the Mac sets it (Will primary, Mac
+fallback). The launcher refuses it on a named account route, because a
+pinned account must never move to another host. Without the variable the
+launcher keeps the default connection agent and starts no timers or probes.
+
+With the variable set, the launcher:
+
+- Gives each upstream connection 3 seconds to connect
+  (`CLIPROXY_CONNECT_TIMEOUT_MS`, 100 to 60000). Nothing times out after a
+  connection exists.
+- Checks a host with `GET /healthz`, which must return 200 with
+  `{"status":"ok"}` within 3 seconds. It checks the primary at startup.
+- Replays any request on the fallback when the primary refused it, could not
+  be resolved, or did not connect in time. Nothing reached the primary.
+- Replays any request on the fallback when the primary answers 5xx with a dial
+  or lookup error. CLIProxy could not reach its upstream, so nothing ran. New
+  requests then stay on the fallback for 120 seconds, doubling on each repeat
+  up to 600 seconds, and the hold resets after the primary answers again.
+- Passes 401, 403, 429, 529 and other 5xx responses through unchanged. Both
+  hosts hold the same accounts, so the fallback would answer the same way.
+- Probes the host once when a connection closes with no response bytes.
+  `count_tokens` and the model list replay on the other host. A message
+  request gets a retryable 502 (`x-should-retry: true`) instead, because the
+  primary may already be generating; Claude Code's retry takes the fallback
+  if the probe failed.
+- Destroys the client response, without replay, when a stream breaks after
+  it started.
+- Probes each host with open requests every 20 seconds. Three failed probes in
+  a row take the host out of service for new requests. An open request is
+  ended only when, in addition, it received no bytes during those probes, so
+  a stream that is still delivering is never cut.
+- Returns the primary to service after two passing probes 15 seconds apart,
+  and no sooner than 30 seconds after it left.
+- Fails over at most once per request. If the fallback cannot be reached
+  either, the primary is tried once.
+
+Every response carries `X-CLIProxy-Host: primary` or `fallback`. Host
+transitions are appended to `ops/runtime/fleet/failover.jsonl` (ignored by git;
+`CLIPROXY_FAILOVER_LOG` overrides the path) as one JSON line each, with no
+request bodies, URLs or keys.
 
 To roll back, use `server.updateSettings` to remove only the added profile
 IDs and restore the prior native display name from the backup. Preserve
@@ -111,7 +158,7 @@ The launcher needs Node.js on the provider process's PATH and has no additional
 package dependencies. No separate long-running service or fixed port is needed.
 
 Verify the launcher with
-`node --test ops/claude_account_launcher.test.mjs ops/claude_account_launcher_process.test.mjs`.
+`node --test ops/claude_account_launcher.test.mjs ops/claude_account_launcher_process.test.mjs ops/claude_account_failover.test.mjs`.
 For live verification, check a streamed response through the chosen account and
 an unavailable account's error. The `X-CPA-TRACE-ID` header identifies which
 proxy auth entry served the response. To undo this setup, remove the two T3
