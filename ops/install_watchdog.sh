@@ -2,13 +2,14 @@
 set -euo pipefail
 
 project_root=${0:A:h:h}
+source_dir=${1:-"$project_root/ops"}
 launch_agents_dir="$HOME/Library/LaunchAgents"
 user_domain="gui/$(/usr/bin/id -u)"
 
 /bin/mkdir -p "$launch_agents_dir"
 
 for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
-    source_plist="$project_root/ops/$label.plist"
+    source_plist="$source_dir/$label.plist"
     installed_plist="$launch_agents_dir/$label.plist"
     /usr/bin/plutil -lint "$source_plist"
     /usr/bin/install -m 0644 "$source_plist" "$installed_plist"

@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import json
 import logging
 import logging.handlers
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -26,6 +28,13 @@ except ModuleNotFoundError:  # Direct execution from ops/.
 
 
 DEFAULT_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+PAUSE_SECONDS = 30 * 60
+COMPOSE_FILES = ("docker-compose.yml", "docker-compose.override.yml")
+
+
+def instance_root() -> Path:
+    configured = os.environ.get("CLIPROXY_ROOT")
+    return Path(configured).expanduser().resolve() if configured else Path(__file__).resolve().parent.parent
 
 
 def docker_socket_from_environment(environment: Mapping[str, str]) -> Path:
@@ -111,10 +120,11 @@ class WatchdogConfig:
     health_start_timeout: int = 90
     auth_warn_days: int = 3
     compose_pull_policy: str | None = None
+    guard_compose: bool = False
 
     @classmethod
     def from_environment(cls, root: Path | None = None) -> "WatchdogConfig":
-        project_root = root or Path(__file__).resolve().parent.parent
+        project_root = root or instance_root()
         search_path = os.environ.get("PATH", DEFAULT_PATH)
         docker = os.environ.get("CLIPROXY_DOCKER") or shutil.which(
             "docker", path=search_path
@@ -149,6 +159,7 @@ class WatchdogConfig:
             ),
             auth_warn_days=int(os.environ.get("CLIPROXY_AUTH_WARN_DAYS", "3")),
             compose_pull_policy=compose_pull_policy,
+            guard_compose=bool(os.environ.get("CLIPROXY_ROOT")),
         )
 
 
@@ -177,6 +188,7 @@ class Watchdog:
         *,
         timeout: int,
         cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         try:
             completed = subprocess.run(
@@ -188,7 +200,7 @@ class Watchdog:
                 text=True,
                 timeout=timeout,
                 check=False,
-                env={**os.environ, "PATH": os.environ.get("PATH", DEFAULT_PATH)},
+                env=env if env is not None else {**os.environ, "PATH": os.environ.get("PATH", DEFAULT_PATH)},
             )
         except subprocess.TimeoutExpired:
             return CommandResult(124, stderr=f"timed out after {timeout}s")
@@ -295,6 +307,8 @@ class Watchdog:
         return True
 
     def compose_up(self) -> bool:
+        if self.config.guard_compose:
+            return self.guarded_compose_up()
         command = [
             self.config.docker,
             "compose",
@@ -318,10 +332,113 @@ class Watchdog:
             self.logger.error("Compose repair returned rc=%d", result.returncode)
         return result.returncode == 0
 
+    @property
+    def compose_activation_path(self) -> Path:
+        return self.config.root / "ops/runtime/fleet/compose-activation.json"
+
+    def compose_command(self) -> tuple[list[str], dict[str, str | None]]:
+        root = self.config.root
+        env_file = root / ".env"
+        if env_file.resolve() != env_file or not env_file.is_file():
+            raise ValueError("Expected a local Compose env file")
+        argv = [self.config.docker, "compose", "--project-directory", str(root),
+                "--env-file", str(env_file)]
+        hashes = {}
+        for name in COMPOSE_FILES:
+            path = root / name
+            if path.resolve() != path:
+                raise ValueError("Unexpected symlink in Compose inputs")
+            if name == COMPOSE_FILES[1] and not path.exists():
+                hashes[name] = None
+                continue
+            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            argv.extend(["-f", str(path)])
+        return argv, hashes
+
+    def run_guarded_compose(self, argv: list[str], timeout: int) -> CommandResult:
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("COMPOSE_", "CLI_PROXY_"))}
+        env.setdefault("PATH", DEFAULT_PATH)
+        return self.run_command(argv, timeout=timeout, cwd=self.config.root, env=env)
+
+    def compose_snapshot(self) -> tuple[list[str], dict]:
+        argv, hashes = self.compose_command()
+        images = self.run_guarded_compose([*argv, "config", "--images", self.config.service], 30)
+        rendered = self.run_guarded_compose([*argv, "config", "--hash", self.config.service], 30)
+        image = images.stdout.strip()
+        config_hash = rendered.stdout.split()
+        if (images.returncode or rendered.returncode
+                or not re.fullmatch(r"\S+", image) or len(config_hash) != 2
+                or config_hash[0] != self.config.service
+                or not re.fullmatch(r"[a-f0-9]{64}", config_hash[1])):
+            raise ValueError("Could not resolve Compose image and service hash")
+        return argv, {"files": hashes, "image": image, "config_hash": config_hash[1]}
+
+    def record_compose_activation(self) -> bool:
+        if Path.cwd().resolve() != self.config.root:
+            self.logger.error("Refusing Compose activation receipt outside the instance root")
+            return False
+        try:
+            _, snapshot = self.compose_snapshot()
+            inspect = self.run_command(
+                [self.config.docker, "inspect", "--type", "container", "--format",
+                 '{{json .Config.Image}} {{json (index .Config.Labels "com.docker.compose.config-hash")}} '
+                 '{{json (index .Config.Labels "com.docker.compose.project.working_dir")}} '
+                 '{{json .State.Running}}',
+                 self.config.container], timeout=15,
+            )
+            expected = " ".join(json.dumps(value) for value in (
+                snapshot["image"], snapshot["config_hash"], str(self.config.root), True
+            ))
+            if inspect.returncode or inspect.stdout.strip() != expected:
+                raise ValueError("Running container differs from resolved Compose")
+            receipt = self.compose_activation_path
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                                 dir=receipt.parent, delete=False) as handle:
+                    temporary = Path(handle.name)
+                    handle.write(json.dumps(snapshot, sort_keys=True) + "\n")
+                temporary.replace(receipt)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            self.logger.error("Compose activation receipt refused; expected inputs and running container must match")
+            return False
+        self.logger.info("Recorded Compose activation receipt")
+        return True
+
+    def guarded_compose_up(self) -> bool:
+        if Path.cwd().resolve() != self.config.root:
+            self.logger.error("Refusing Compose repair outside the instance root")
+            return False
+        try:
+            receipt = json.loads(self.compose_activation_path.read_text(encoding="utf-8"))
+            argv, snapshot = self.compose_snapshot()
+            if receipt != snapshot or self.compose_command() != (argv, snapshot["files"]):
+                raise ValueError("Compose inputs differ from the activation receipt")
+        except (OSError, ValueError):
+            self.logger.error("Compose up refused: activation receipt missing or inputs changed; starting existing container")
+            result = self.run_command([self.config.docker, "start", self.config.container], timeout=120)
+            if result.returncode:
+                self.logger.error("Existing container start returned rc=%d", result.returncode)
+            return result.returncode == 0
+        self.logger.warning("recovery action: guarded docker compose up")
+        result = self.run_guarded_compose(
+            [*argv, "up", "-d", "--no-deps", "--pull", "never", "--no-build", self.config.service], 150
+        )
+        if result.returncode:
+            self.logger.error("Compose repair returned rc=%d", result.returncode)
+        return result.returncode == 0
+
     def restart_container(self) -> bool:
-        self.logger.warning("recovery action: docker compose restart %s", self.config.service)
+        command = ([self.config.docker, "restart", self.config.container] if self.config.guard_compose
+                   else [self.config.docker, "compose", "restart", self.config.service])
+        self.logger.warning("recovery action: %s", " ".join(command))
         result = self.run_command(
-            [self.config.docker, "compose", "restart", self.config.service],
+            command,
             timeout=120,
             cwd=self.config.root,
         )
@@ -423,6 +540,15 @@ class Watchdog:
         self, *, check_only: bool = False, skip_auth: bool = False
     ) -> int:
         now = self.clock()
+        pause = self.config.root / "ops/runtime/watchdog.pause"
+        try:
+            age = now - pause.stat().st_mtime
+        except FileNotFoundError:
+            pass
+        else:
+            if 0 <= age < PAUSE_SECONDS:
+                self.logger.info("Watchdog repairs paused by watchdog.pause")
+                check_only = True
         state = self.load_state()
 
         engine_ok = self.engine_ok()
@@ -564,13 +690,18 @@ def main() -> int:
         help="Check only engine, service health, DNS, and TLS",
     )
     parser.add_argument("--verbose", action="store_true", help="Also write status to stderr")
+    parser.add_argument("--record-compose-activation", action="store_true",
+                        help="Record approved Compose inputs after matching the running container")
     args = parser.parse_args()
 
-    root = Path(__file__).resolve().parent.parent
+    root = instance_root()
     logger = build_logger(root / "ops" / "runtime" / "watchdog.log", verbose=args.verbose)
     try:
         config = WatchdogConfig.from_environment(root)
-        return Watchdog(config, logger=logger).run_once(
+        watchdog = Watchdog(config, logger=logger)
+        if args.record_compose_activation:
+            return 0 if watchdog.record_compose_activation() else 1
+        return watchdog.run_once(
             check_only=args.check_only, skip_auth=args.skip_auth
         )
     except Exception:

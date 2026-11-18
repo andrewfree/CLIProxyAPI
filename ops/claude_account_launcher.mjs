@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const hopHeaders = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -37,7 +37,16 @@ export const failoverDefaults = Object.freeze({
 });
 const maxFailoverErrorBytes = 64 * 1024;
 const maxHealthBodyBytes = 4096;
-const defaultFailoverLog = fileURLToPath(new URL("./runtime/fleet/failover.jsonl", import.meta.url));
+const launcherPath = process.argv[1] && path.resolve(process.argv[1]);
+const launcherSource = fileURLToPath(import.meta.url);
+const generationDirectory = `${path.sep}.fleet-releases${path.sep}`;
+const launcherOps = launcherSource.includes(generationDirectory)
+  ? launcherSource.split(generationDirectory, 1)[0]
+  : path.dirname(launcherSource);
+const instanceOps = launcherOps === path.join(os.homedir(), "cliproxy-live/ops")
+  ? path.join(os.homedir(), "cliproxy/ops")
+  : launcherOps;
+const defaultFailoverLog = path.join(instanceOps, "runtime/fleet/failover.jsonl");
 const accountOrQuotaError = /invalid_grant|unauthorized|rate_limit_error|usage_limit_reached|quota_exceeded|model_cooldown/i;
 // Only dial errors: a read or write error means an earlier connection to the upstream existed.
 const dialError = /\bdial (?:tcp|udp)[46]?\b|\bdial upstream:/i;
@@ -656,6 +665,7 @@ async function main() {
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => stop(signal));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (launcherPath && fs.existsSync(launcherPath)
+    && fs.realpathSync(launcherSource) === fs.realpathSync(launcherPath)) {
   main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

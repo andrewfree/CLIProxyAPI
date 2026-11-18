@@ -248,7 +248,9 @@ def build_logger(path: Path, *, verbose: bool = False) -> logging.Logger:
 
 
 def main() -> int:
-    project_root = Path(__file__).resolve().parent.parent
+    configured = os.environ.get("CLIPROXY_ROOT")
+    project_root = (Path(configured).expanduser().resolve()
+                    if configured else Path(__file__).resolve().parent.parent)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--source",

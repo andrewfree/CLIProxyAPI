@@ -7,12 +7,14 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/python3</string>
-        <string>/Users/rever/cliproxy/ops/cliproxy_watchdog.py</string>
+        <string>/Users/rever/cliproxy-live/ops/cliproxy_watchdog.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/rever/cliproxy</string>
     <key>EnvironmentVariables</key>
     <dict>
+        <key>CLIPROXY_ROOT</key>
+        <string>/Users/rever/cliproxy</string>
         <key>PATH</key>
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>CLIPROXY_AUTH_WARN_DAYS</key>
