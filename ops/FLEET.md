@@ -368,8 +368,9 @@ running stays on the host it started with until its Codex process exits.
 
 One job on the Mac checks both proxies and does a TCP connect from inside each
 container to the provider hosts every 300 seconds. It reads Codex, Kimi and
-Z.ai quota each tick, Claude quota every third tick (about 900 seconds), and
-compares parity hourly. It uses the supported usage endpoints and sends no
+Z.ai quota each tick, Claude quota once at least 840 seconds have passed since
+its last Claude poll (about every 900 seconds, and on the first tick after the
+Mac wakes), and compares parity hourly. It uses the supported usage endpoints and sends no
 inference requests. Open CLIProxyBar for a live glance.
 Its Will entry still uses Will's raw address.
 

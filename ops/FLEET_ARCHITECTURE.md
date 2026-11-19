@@ -651,7 +651,8 @@ makes no inference requests and does not change routing or configuration.
 
 The monitor also collects read-only quota data through management API
 credential substitution. It reads Codex, Kimi and Z.ai every tick and
-Claude every third tick, about every 15 minutes. It uses the same Claude
+Claude by elapsed time, about every 15 minutes, so the first tick after the
+Mac wakes reads it. It uses the same Claude
 usage endpoint as the reset tool and records scoped caps and reset-grant
 counts. For Z.ai compatibility keys,
 only a known HTTPS provider origin authorizes a quota request. The Mac is

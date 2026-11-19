@@ -246,7 +246,8 @@ class MonitorTests(unittest.TestCase):
                 current = dict(sample(percent=reading), provider="codex", attempted_at=reading_now.timestamp())
 
                 def collect(host, salt, visited, due):
-                    self.assertEqual(bool(due.get("_skip_claude")), tick % 3 != 0)
+                    # Claude is read by elapsed time: the tick after the 55-minute gap reads it.
+                    self.assertEqual(bool(due.get("_skip_claude")), (False, True, True, False, True, False)[tick])
                     if host["name"] == "m5":
                         self.assertEqual(visited, set())
                         return host_report([current])
@@ -330,9 +331,11 @@ class MonitorTests(unittest.TestCase):
               patch.object(probe, "route_label", return_value="t3-demo"),
               patch.object(probe, "fetch_windows", return_value=("ok", sample()["windows"], None)) as fetch,
               patch.object(monitor, "run_host", side_effect=collect),
-              patch.object(monitor, "run_parity", return_value={"status": "equal"})):
+              patch.object(monitor, "run_parity", return_value={"status": "equal"}),
+              patch.object(monitor, "CLAUDE_POLL_DUE", 0)):
             root = Path(directory)
-            # Rapid manual ticks exercise the guard before Will's reservation expires.
+            # Every tick is due for Claude, so the 300 s account floor spaces the Mac reads
+            # and rapid ticks exercise the guard before Will's reservation expires.
             for offset in range(0, 721, 120):
                 clock.return_value = NOW + timedelta(seconds=offset)
                 monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=True)

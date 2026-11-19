@@ -30,6 +30,9 @@ PARITY_INTERVAL = 3600
 DAILY_AT = local_time(9)
 CLAUDE_MIN_INTERVAL = 300
 CLAUDE_RATE_LIMIT_BACKOFF = 1200
+# Claude is read by elapsed time, so the first tick after the Mac sleeps reads it.
+# The slack keeps a launchd start that lands a little early on the cadence.
+CLAUDE_POLL_DUE = probes.TICK_INTERVAL * probes.CLAUDE_EVERY_TICKS - 60
 CLAUDE_SUMMARY_MAX_AGE = timedelta(minutes=35)
 COOLDOWN_QUIET = timedelta(hours=1)
 TEXT_PORT = 8787
@@ -442,14 +445,16 @@ def tick(root, hosts, runtime, command, no_notify):
     parity_due = checked is None or (now - checked).total_seconds() >= PARITY_INTERVAL
 
     hosts["m5"]["instance_root"] = str(root)
-    claude_tick = state.get("claude_tick", 0)
+    state.pop("claude_tick", None)
+    last_poll = state.get("claude_polled_at")
+    claude_due = last_poll is None or now.timestamp() - last_poll >= CLAUDE_POLL_DUE
     with ThreadPoolExecutor(max_workers=1) as pool:
         parity = pool.submit(run_parity) if parity_due else None
-        if claude_tick == 0:
+        if claude_due:
+            state["claude_polled_at"] = now.timestamp()
             observed = collect_with_claude(hosts, state, state_file)
         else:
             observed = collect_hosts(hosts, state["salt"], {"_skip_claude": True})
-    state["claude_tick"] = (claude_tick + 1) % probes.CLAUDE_EVERY_TICKS
 
     records, state["inventory"] = quota_records(observed, state.get("inventory", {}), captured_at)
     daily_records = summary_records(state, records, now)
