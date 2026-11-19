@@ -18,6 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+if __package__:
+    from .instance_root import instance_root, MissingInstanceRoot
+else:
+    from instance_root import instance_root, MissingInstanceRoot
+
 
 DEFAULT_ARCHIVE_ROOT = Path(
     "/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live"
@@ -248,14 +253,11 @@ def build_logger(path: Path, *, verbose: bool = False) -> logging.Logger:
 
 
 def main() -> int:
-    configured = os.environ.get("CLIPROXY_ROOT")
-    project_root = (Path(configured).expanduser().resolve()
-                    if configured else Path(__file__).resolve().parent.parent)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--source",
         type=Path,
-        default=Path(os.environ.get("CLIPROXY_LOG_SOURCE", project_root / "logs")),
+        default=os.environ.get("CLIPROXY_LOG_SOURCE"),
     )
     parser.add_argument(
         "--destination",
@@ -282,6 +284,10 @@ def main() -> int:
     )
     parser.add_argument("--verbose", action="store_true", help="Also write status to stderr")
     args = parser.parse_args()
+    try:
+        project_root = instance_root(__file__)
+    except MissingInstanceRoot as error:
+        parser.error(str(error))
     if args.min_age_seconds < 60:
         parser.error("--min-age-seconds must be at least 60")
 
@@ -297,7 +303,7 @@ def main() -> int:
             logger.info("Another archive run is already active")
             return 0
         config = ArchiveConfig(
-            source_dir=args.source,
+            source_dir=args.source if args.source is not None else project_root / "logs",
             archive_root=args.destination,
             mount_point=args.mount_point,
             min_age_seconds=args.min_age_seconds,

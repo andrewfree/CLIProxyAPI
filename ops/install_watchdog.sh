@@ -5,13 +5,23 @@ project_root=${0:A:h:h}
 source_dir=${1:-"$project_root/ops"}
 launch_agents_dir="$HOME/Library/LaunchAgents"
 user_domain="gui/$(/usr/bin/id -u)"
+labels=(com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive)
+
+for label in "${labels[@]}"; do
+    source_plist="$source_dir/$label.plist"
+    /usr/bin/plutil -lint "$source_plist"
+    if ! script=$(/usr/bin/plutil -extract ProgramArguments.1 raw -expect string -o - "$source_plist") ||
+        [[ "$script" != /* || ! -f "$script" ]]; then
+        printf 'Cannot install %s because its ProgramArguments script is missing. See the Mac ops bundle cutover in ops/FLEET.md.\n' "$label" >&2
+        exit 1
+    fi
+done
 
 /bin/mkdir -p "$launch_agents_dir"
 
-for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
+for label in "${labels[@]}"; do
     source_plist="$source_dir/$label.plist"
     installed_plist="$launch_agents_dir/$label.plist"
-    /usr/bin/plutil -lint "$source_plist"
     /usr/bin/install -m 0644 "$source_plist" "$installed_plist"
 
     if /bin/launchctl print "$user_domain/$label" >/dev/null 2>&1; then

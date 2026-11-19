@@ -21,20 +21,17 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
-try:
-    from ops.auth_health import format_text, scan_auth_directory
-except ModuleNotFoundError:  # Direct execution from ops/.
+if __package__:
+    from .auth_health import format_text, scan_auth_directory
+    from .instance_root import instance_root, MissingInstanceRoot
+else:
     from auth_health import format_text, scan_auth_directory
+    from instance_root import instance_root, MissingInstanceRoot
 
 
 DEFAULT_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 PAUSE_SECONDS = 30 * 60
 COMPOSE_FILES = ("docker-compose.yml", "docker-compose.override.yml")
-
-
-def instance_root() -> Path:
-    configured = os.environ.get("CLIPROXY_ROOT")
-    return Path(configured).expanduser().resolve() if configured else Path(__file__).resolve().parent.parent
 
 
 def docker_socket_from_environment(environment: Mapping[str, str]) -> Path:
@@ -124,7 +121,7 @@ class WatchdogConfig:
 
     @classmethod
     def from_environment(cls, root: Path | None = None) -> "WatchdogConfig":
-        project_root = root or instance_root()
+        project_root = root or instance_root(__file__)
         search_path = os.environ.get("PATH", DEFAULT_PATH)
         docker = os.environ.get("CLIPROXY_DOCKER") or shutil.which(
             "docker", path=search_path
@@ -694,7 +691,10 @@ def main() -> int:
                         help="Record approved Compose inputs after matching the running container")
     args = parser.parse_args()
 
-    root = instance_root()
+    try:
+        root = instance_root(__file__)
+    except MissingInstanceRoot as error:
+        parser.error(str(error))
     logger = build_logger(root / "ops" / "runtime" / "watchdog.log", verbose=args.verbose)
     try:
         config = WatchdogConfig.from_environment(root)

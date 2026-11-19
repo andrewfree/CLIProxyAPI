@@ -35,6 +35,27 @@ class BundleLaunchAgentsTest(unittest.TestCase):
                 self.assertTrue(plist["RunAtLoad"])
                 self.assertEqual(plist["StartInterval"], seconds)
 
+    @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
+    def test_installer_checks_both_scripts_before_touching_launch_agents(self):
+        ops = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installer = root / "install_watchdog.sh"
+            installer.write_text((ops / installer.name).read_text().replace("/bin/launchctl", "/usr/bin/false"))
+            existing = root / "watchdog.py"
+            existing.touch()
+            for job, script in [("watchdog", existing), ("log-archive", root / "missing.py")]:
+                label = f"com.rever.cliproxy-{job}"
+                plist = {"Label": label, "ProgramArguments": [sys.executable, str(script)]}
+                (root / (label + ".plist")).write_bytes(plistlib.dumps(plist))
+            result = subprocess.run(
+                ["/bin/zsh", "-f", str(installer), str(root)], env={"HOME": str(root)},
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 1, result)
+            self.assertIn("Cannot install com.rever.cliproxy-log-archive", result.stderr)
+            self.assertFalse((root / "Library").exists())
+
 
 class BundleJobsTest(unittest.TestCase):
     def setUp(self):
@@ -158,9 +179,43 @@ class BundleJobsTest(unittest.TestCase):
         ops = Path(__file__).resolve().parent
         live = self.root / "release/ops"
         live.mkdir(parents=True)
-        for name in ("cliproxy_watchdog.py", "auth_health.py"):
+        for name in ("cliproxy_watchdog.py", "auth_health.py", "instance_root.py"):
             (live / name).write_bytes((ops / name).read_bytes())
         result = subprocess.run([sys.executable, "-E", "-B", str(live / "cliproxy_watchdog.py"), "--help"],
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--record-compose-activation", result.stdout)
+
+    def test_bundle_aliases_require_instance_root_before_touching_state(self):
+        ops = Path(__file__).resolve().parent
+        live = self.root / "published/ops"
+        release = live / ".fleet-releases/fixture/ops"
+        release.mkdir(parents=True)
+        (live / ".fleet-current").symlink_to(release.relative_to(live))
+        jobs = {
+            "cliproxy_watchdog.py": ["--check-only", "--skip-auth"],
+            "archive_logs.py": ["--check-only", "--mount-point", str(self.root / "not-mounted")],
+            "auth_health.py": ["--json"],
+        }
+        for name in (*jobs, "instance_root.py"):
+            (release / name).write_bytes((ops / name).read_bytes())
+            (live / name).symlink_to(Path(".fleet-current") / name)
+        fake_environment = {"CLIPROXY_DOCKER": "/usr/bin/false", "CLIPROXY_CURL": "/usr/bin/false",
+                            "CLIPROXY_DOCKER_SOCKET": str(self.root / "missing.sock")}
+        for name, args in jobs.items():
+            with self.subTest(name=name):
+                result = subprocess.run([sys.executable, "-E", "-B", str(live / name), *args],
+                                        env=fake_environment, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 2, result)
+                self.assertIn("CLIPROXY_ROOT is required", result.stderr)
+        self.assertFalse((release / "runtime").exists())
+
+        auth = self.root / "auths/fixture.json"
+        auth.parent.mkdir()
+        auth.write_text('{"type":"fixture","expired":"2099-01-01T00:00:00Z"}')
+        auth.chmod(0o600)
+        result = subprocess.run([sys.executable, "-E", "-B", str(live / "auth_health.py"), "--json"],
+                                env={"CLIPROXY_ROOT": str(self.root)},
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result)
+        self.assertEqual([entry["provider"] for entry in json.loads(result.stdout)], ["fixture"])

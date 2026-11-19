@@ -13,5 +13,6 @@ ops/fleet/paths.json
 ops/fleet_bundle.py
 ops/fleet_routing.py
 ops/fleetctl.py
+ops/instance_root.py
 ops/instances/will/config-policy.json
 ops/verify_fleet_instance.py
