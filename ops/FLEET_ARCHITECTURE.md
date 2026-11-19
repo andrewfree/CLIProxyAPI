@@ -642,8 +642,8 @@ Nothing tracked by git holds one.
 
 ### 2.10 Health and quota monitoring
 
-Once Andrew activates the LaunchAgent, the Mac runs it from the shipped
-bundle. Each five-minute tick reads both instances' loopback `/healthz` and checks provider egress
+The Mac runs the monitor's LaunchAgent from the shipped bundle; Andrew
+activated it on November 18. Each five-minute tick reads both instances' loopback `/healthz` and checks provider egress
 with bounded TCP connects from inside their containers. The sockets send no
 TLS, HTTP or credentials. A healthy proxy with a failed upstream dial is
 `egress-down`. A failed proxy health check is `unreachable`. An incomplete
@@ -735,7 +735,7 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   remedy.
 - **The monitor reports, it does not fail over.** The Mac LaunchAgent runs from the bundle every
   five minutes on Apple's `/usr/bin/python3`, because macOS Local Network privacy blocked SSH to
-  Will from Homebrew's Python under launchd (FLEET.md, live activation). It texts Andrew when
+  Will from Homebrew's Python under launchd ([FLEET.md](FLEET.md#install-or-resume-on-the-mac)). It texts Andrew when
   either proxy is unreachable, when Will loses egress, on parity drift and on quota limits, and
   nothing acts on those texts automatically. With only egress down, `/healthz` can stay green, so
   the monitor also checks egress from inside each container. If the monitor is stopped, use `fleetctl health` and `parity` by hand and look

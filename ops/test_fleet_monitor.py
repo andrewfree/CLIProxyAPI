@@ -213,32 +213,55 @@ for target do printf '%s ok\n' "$target"; done
         body = {"code": 200, "msg": "Operation successful", "success": True, "data": {"level": "lite", "limits": [
             {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 2000, "currentValue": 395,
              "remaining": 1605, "percentage": 19, "nextResetTime": reset},
-            {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000, "currentValue": 482,
-             "remaining": 9518, "nextResetTime": reset}]}}
+            {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000, "currentValue": 9200,
+             "remaining": 800, "percentage": 92, "nextResetTime": reset}]}}
         api = type("FakeAPI", (), {"quota": lambda self, request: {"status_code": 200, "body": json.dumps(body)}})()
         item = {"provider": "zai", "index": "zai-index", "zai_host": "api.z.ai"}
         status, windows, _ = probe.fetch_windows(api, item, NOW)
         self.assertEqual(status, "ok")
-        self.assertEqual([window["used_percent"] for window in windows], [19, 4.82])
-        self.assertEqual(len({window["window"] for window in windows}), 2)
-        self.assertTrue(all(window["window"].startswith("credits-") for window in windows))
+        self.assertEqual([(w["window"], w["period"], w["used_percent"]) for w in windows],
+                         [("credits-5h", "session", 19.75), ("credits-1w", "weekly", 92)])
         self.assertEqual({window["reset_at"] for window in windows}, {SOON})
+        # A weekly Z.ai window warns at 90% like other providers.
+        row = {"provider": "zai", "label": "zai-coding-plan-test", "account_id": "zai-test",
+               "windows": windows, "cooldowns": []}
+        self.assertEqual(monitor.quota_alerts({}, [row], NOW),
+                         [f"zai zai-coding-plan-test credits-1w is 92% used. Reset {monitor.display_time(SOON)}."])
+
+    def test_zai_readings_past_the_limit_count_as_capped(self):
+        over_count = {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 2000, "currentValue": 2013,
+                      "remaining": 0, "percentage": 100}
+        over_percent = {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 101}
+        windows = probe.zai_windows({"data": {"limits": [over_count, over_percent]}})
+        self.assertEqual([(w["window"], w["used_percent"], w["capped"]) for w in windows],
+                         [("credits-1w", 100, True), ("tokens-5h", 100, True)])
+
+    def test_zai_unknown_window_codes_stay_opaque(self):
+        windows = probe.zai_windows({"limits": [
+            {"type": "CREDIT_LIMIT", "unit": 9, "number": 2, "percentage": 10},
+            {"type": "TIME_LIMIT", "unit": 5, "number": 1, "currentValue": 3, "usage": 10}]})
+        self.assertRegex(windows[0]["window"], r"^credits-[0-9a-f]{8}$")
+        self.assertEqual(windows[0]["period"], "unknown")
+        self.assertEqual((windows[1]["window"], windows[1]["period"], windows[1]["used_percent"]),
+                         ("mcp-monthly", "monthly", 30))
 
     def test_kimi_reply_with_only_a_five_hour_limit_is_still_read(self):
-        # Kimi stopped returning its weekly and monthly entries on 2026-11-19.
+        # Kimi stopped returning its weekly and monthly entries on 2026-11-19. The reset is
+        # only in the count-based reading.
         body = {"limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
                             "detail": {"limit": "100", "remaining": "100", "resetTime": SOON}}],
                 "usages": {"limit_5h": {"used_ratio": 0}}}
         api = type("FakeAPI", (), {"quota": lambda self, request: {"status_code": 200, "body": json.dumps(body)}})()
         status, windows, _ = probe.fetch_windows(api, {"provider": "kimi", "index": "kimi-index"}, NOW)
         self.assertEqual(status, "ok")
-        self.assertEqual([(window["window"], window["used_percent"]) for window in windows], [("session", 0)])
+        self.assertEqual([(w["window"], w["used_percent"], w["reset_at"]) for w in windows],
+                         [("session", 0, SOON)])
 
     def test_quota_reads_wait_for_slow_kimi_within_the_remote_deadline(self):
-        # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19. A worker polls at most two
-        # accounts after a Claude wait of up to 15 s, and Will's worker ends at 63 s.
+        # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19. A worker polls at most
+        # two accounts after a Claude wait, before Will's worker deadline.
         self.assertGreaterEqual(probe.HTTP_TIMEOUT, 15)
-        self.assertLess(15 + 2 * probe.HTTP_TIMEOUT, 63)
+        self.assertLess(probe.CLAUDE_MAX_WAIT + 2 * probe.HTTP_TIMEOUT, monitor.REMOTE_DEADLINE)
         response = type("Response", (), {"status": 200, "read": lambda self, *size: b"{}"})()
         with (patch.object(probe.http.client, "HTTPConnection") as connection,
               patch.object(probe.QuotaAPI, "management_key", return_value="fixture-management-key")):
@@ -407,6 +430,8 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(alerts(proxy_down), [])
         opening = alerts(proxy_down)[0]
         self.assertIn("New codex_cliproxy sessions start on the Mac", opening)
+        # The wrapper picks a host only at session start, so open sessions need a restart.
+        self.assertIn("restart open ones or use codex_cliproxy_mac", opening)
         self.assertNotIn("Select the _mac profile", opening)
         self.assertEqual(alerts(clean), [])
         self.assertEqual(alerts(clean), ["Will health checks recovered."])
@@ -414,6 +439,13 @@ class MonitorTests(unittest.TestCase):
         egress_down = host_report(egress="down")
         self.assertEqual(alerts(egress_down), [])
         self.assertIn("Select the _mac profile for Codex-family", alerts(egress_down)[0])
+
+    def test_will_down_text_drops_the_mac_fallback_when_the_mac_is_down_too(self):
+        state = {}
+        both_down = {"m5": host_report(state="unreachable"), "will": host_report(state="unreachable")}
+        self.assertEqual(monitor.status_alerts(state, both_down, None), [])
+        self.assertEqual(monitor.status_alerts(state, both_down, None),
+                         ["Will proxy unreachable.", "Mac proxy down. Check the local fallback."])
 
     def test_short_cooldowns_share_one_episode_until_an_hour_quiet(self):
         state = {}

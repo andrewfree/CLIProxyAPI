@@ -35,8 +35,9 @@ TICK_INTERVAL = 300  # The LaunchAgent's StartInterval.
 CLAUDE_EVERY_TICKS = 3
 WORKER_POLLING = "quota-polling"
 CONTAINER = "cli-proxy-api"
+CLAUDE_MAX_WAIT = 15  # Longer waits defer the Claude account to a later tick.
 # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19. A worker polls at
-# most two accounts after a Claude wait of up to 15 s, inside Will's 63 s deadline.
+# most two accounts after a Claude wait, inside Will's remote deadline.
 HTTP_TIMEOUT = 20
 
 
@@ -184,9 +185,41 @@ def kimi_reset(entry, now):
     return None
 
 
-# The Coding Plan reports CREDIT_LIMIT windows since November 2026. Their
-# percentage is the share used, as for the older types.
+# The Coding Plan reports CREDIT_LIMIT windows since November 2026. Window
+# lengths and the used share follow CodexBar's Z.ai plugin (steipete/CodexBar,
+# Plugins/zai.js), which agrees with the resets observed on 2026-11-19.
 ZAI_PREFIXES = {"TOKENS_LIMIT": "tokens", "TIME_LIMIT": "mcp", "CREDIT_LIMIT": "credits"}
+ZAI_UNITS = {1: (1440, "d"), 3: (60, "h"), 5: (1, "min"), 6: (10080, "w")}
+
+
+def zai_used(entry):
+    usage, current = number(entry.get("usage")), number(entry.get("currentValue"))
+    remaining = number(entry.get("remaining"))
+    used = None
+    if usage is not None and usage > 0:
+        if remaining is not None:
+            used = max(usage - remaining, usage - remaining if current is None else current)
+        elif current is not None:
+            used = current
+    if used is not None:
+        return min(max(used, 0), usage) / usage * 100
+    percent = number(entry.get("percentage"))
+    # Charges can land after a request ends, so a reading can pass 100%.
+    return None if percent is None else min(max(percent, 0), 100)
+
+
+def zai_window(kind, entry):
+    unit, count = number(entry.get("unit")), number(entry.get("number"))
+    if kind == "TIME_LIMIT" and (unit, count) == (5, 1):
+        return "mcp-monthly", "monthly"  # CodexBar's monthly MCP marker.
+    if unit not in ZAI_UNITS or not count or count < 0 or count != int(count):
+        identity = hashlib.sha256(repr((unit, count)).encode()).hexdigest()[:8]
+        return ZAI_PREFIXES[kind] + "-" + identity, "unknown"
+    minutes, suffix = ZAI_UNITS[unit]
+    minutes *= count
+    period = ("session" if minutes <= 1440 else "monthly" if minutes >= 40320
+              else "weekly" if minutes >= 10080 else "unknown")
+    return f"{ZAI_PREFIXES[kind]}-{int(count)}{suffix}", period
 
 
 def zai_windows(body):
@@ -197,18 +230,10 @@ def zai_windows(body):
         kind = entry.get("type")
         if kind not in ZAI_PREFIXES:
             continue
-        used = entry.get("percentage")
-        if used is None and kind != "TOKENS_LIMIT":
-            count, limit = number(entry.get("currentValue")), number(entry.get("usage"))
-            if count is not None and limit is not None and 0 <= count <= limit and limit > 0:
-                used = count / limit * 100
-        units = (number(entry.get("unit")), number(entry.get("number")))
-        identity = hashlib.sha256(repr(units).encode()).hexdigest()[:8]
-        key = ZAI_PREFIXES[kind] + "-" + identity
+        key, period = zai_window(kind, entry)
         occurrences[key] += 1
         name = key if occurrences[key] == 1 else f"{key}-{occurrences[key]}"
-        # CLIProxyBar treats the numeric duration codes as opaque.
-        windows.append(quota_window(name, "unknown", used, entry.get("nextResetTime")))
+        windows.append(quota_window(name, period, zai_used(entry), entry.get("nextResetTime")))
     return windows
 
 
@@ -254,7 +279,10 @@ def fetch_windows(api, item, now):
     unique = {}
     for window in windows:
         if window:
-            unique.setdefault(window["window"], window)
+            kept = unique.setdefault(window["window"], window)
+            # Kimi can put a window's reset only in its second, count-based reading.
+            if kept["reset_at"] is None:
+                kept["reset_at"] = window["reset_at"]
     return ("ok" if unique else "quota-unavailable"), list(unique.values()), grants
 
 
@@ -393,7 +421,7 @@ def collect_account(api, account, now, visited, not_before, egress):
     else:
         due = max(not_before.get(tag, 0), not_before.get("_all", 0))
         delay = max(0, due - time.time()) if provider == "claude" else 0
-        if delay > 15:
+        if delay > CLAUDE_MAX_WAIT:
             result["status"] = "quota-deferred"
             return result
         if delay:
