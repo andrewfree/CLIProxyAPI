@@ -35,7 +35,11 @@ TICK_INTERVAL = 300  # The LaunchAgent's StartInterval.
 CLAUDE_EVERY_TICKS = 3
 WORKER_POLLING = "quota-polling"
 CONTAINER = "cli-proxy-api"
-HTTP_TIMEOUT = 8
+CLAUDE_MAX_WAIT = 15  # Longer waits defer the Claude account to a later tick.
+HTTP_TIMEOUT = 20  # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19.
+# Quota reads end this many seconds after a host collection starts, so a slow
+# provider or a longer account list cannot run past Will's remote deadline.
+POLL_DEADLINE = 55
 
 
 def obj(value):
@@ -182,26 +186,56 @@ def kimi_reset(entry, now):
     return None
 
 
+# The Coding Plan reports CREDIT_LIMIT windows since November 2026. Window
+# lengths and the used share follow CodexBar's Z.ai plugin (steipete/CodexBar,
+# Plugins/zai.js), which agrees with the resets observed on 2026-11-19.
+ZAI_PREFIXES = {"TOKENS_LIMIT": "tokens", "TIME_LIMIT": "mcp", "CREDIT_LIMIT": "credits"}
+ZAI_UNITS = {1: (1440, "d"), 3: (60, "h"), 5: (1, "min"), 6: (10080, "w")}
+
+
+def zai_used(entry):
+    usage, current = number(entry.get("usage")), number(entry.get("currentValue"))
+    remaining, percent = number(entry.get("remaining")), number(entry.get("percentage"))
+    # A negative value is malformed, not an idle window, so it is ignored.
+    shares = [] if percent is None or percent < 0 else [percent]
+    if usage is not None and usage > 0 and (current is None or current >= 0):
+        if remaining is not None:
+            used = max(usage - remaining, usage - remaining if current is None else current)
+        else:
+            used = current
+        if used is not None:
+            shares.append(max(used, 0) / usage * 100)
+    # Charges can land after a request ends, so a reading can pass 100%. Take the
+    # larger share so stale counts never hide a reported cap.
+    return min(max(shares), 100) if shares else None
+
+
+def zai_window(kind, entry):
+    unit, count = number(entry.get("unit")), number(entry.get("number"))
+    if kind == "TIME_LIMIT" and (unit, count) == (5, 1):
+        return "mcp-monthly", "monthly"  # CodexBar's monthly MCP marker.
+    if unit not in ZAI_UNITS or not count or count < 0 or count != int(count):
+        identity = hashlib.sha256(repr((unit, count)).encode()).hexdigest()[:8]
+        return ZAI_PREFIXES[kind] + "-" + identity, "unknown"
+    minutes, suffix = ZAI_UNITS[unit]
+    minutes *= count
+    period = ("session" if minutes <= 1440 else "monthly" if minutes >= 40320
+              else "weekly" if minutes >= 10080 else "unknown")
+    return f"{ZAI_PREFIXES[kind]}-{int(count)}{suffix}", period
+
+
 def zai_windows(body):
     payload = obj(body["data"]) if "data" in body else body
     occurrences = Counter()
     windows = []
     for entry in rows(payload.get("limits")):
         kind = entry.get("type")
-        if kind not in ("TOKENS_LIMIT", "TIME_LIMIT"):
+        if kind not in ZAI_PREFIXES:
             continue
-        used = entry.get("percentage")
-        if used is None and kind == "TIME_LIMIT":
-            count, limit = number(entry.get("currentValue")), number(entry.get("usage"))
-            if count is not None and limit is not None and 0 <= count <= limit and limit > 0:
-                used = count / limit * 100
-        units = (number(entry.get("unit")), number(entry.get("number")))
-        identity = hashlib.sha256(repr(units).encode()).hexdigest()[:8]
-        key = ("tokens" if kind == "TOKENS_LIMIT" else "mcp") + "-" + identity
+        key, period = zai_window(kind, entry)
         occurrences[key] += 1
         name = key if occurrences[key] == 1 else f"{key}-{occurrences[key]}"
-        # CLIProxyBar treats the numeric duration codes as opaque.
-        windows.append(quota_window(name, "unknown", used, entry.get("nextResetTime")))
+        windows.append(quota_window(name, period, zai_used(entry), entry.get("nextResetTime")))
     return windows
 
 
@@ -224,8 +258,8 @@ def quota_request(item):
     return {"auth_index": item["index"], "method": "GET", "url": url, "header": header}
 
 
-def fetch_windows(api, item, now):
-    result = obj(api.quota(quota_request(item)))
+def fetch_windows(api, item, now, timeout=HTTP_TIMEOUT):
+    result = obj(api.quota(quota_request(item), timeout))
     status = result.get("status_code")
     if not isinstance(status, int) or not 200 <= status < 300:
         return "quota-rate-limited" if status == 429 else "quota-unavailable", [], None
@@ -247,13 +281,16 @@ def fetch_windows(api, item, now):
     unique = {}
     for window in windows:
         if window:
-            unique.setdefault(window["window"], window)
+            kept = unique.setdefault(window["window"], window)
+            # Kimi can put a window's reset only in its second, count-based reading.
+            if kept["reset_at"] is None and provider in {"kimi", "kimi-ai"}:
+                kept["reset_at"] = window["reset_at"]
     return ("ok" if unique else "quota-unavailable"), list(unique.values()), grants
 
 
 class QuotaAPI(fleetctl.LocalAPI):
-    def quota(self, payload):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=HTTP_TIMEOUT)
+    def quota(self, payload, timeout=HTTP_TIMEOUT):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             connection.request("POST", "/v8/management/requests/api-call", json.dumps(payload), {
                 "Authorization": "Bearer " + self.management_key(),
@@ -365,12 +402,15 @@ def local_cooldowns(item, now):
             for (scope, reason), retry in sorted(result.items())]
 
 
-def collect_account(api, account, now, visited, not_before, egress):
+def collect_account(api, account, now, visited, not_before, egress, deadline=None):
     tag = account["account_id"]
     item = account["item"]
     provider = account["provider"]
     target = account.get("zai_host") or QUOTA_HOSTS[provider]
-    result = {"provider": provider, "account_id": tag, "label": route_label(api, account),
+    late = deadline is not None and deadline - time.monotonic() < 1
+    # Past the deadline, skip the label lookup; the monitor keeps the remembered label.
+    label = "account-" + tag[:8] if late else route_label(api, account)
+    result = {"provider": provider, "account_id": tag, "label": label,
               "cooldowns": local_cooldowns(item, now), "windows": [], "grants": None,
               "attempted_at": None}
     if item.get("disabled") is True or item.get("status") == "disabled":
@@ -386,14 +426,16 @@ def collect_account(api, account, now, visited, not_before, egress):
     else:
         due = max(not_before.get(tag, 0), not_before.get("_all", 0))
         delay = max(0, due - time.time()) if provider == "claude" else 0
-        if delay > 15:
+        left = math.inf if deadline is None else deadline - time.monotonic() - delay
+        if delay > CLAUDE_MAX_WAIT or left < 1:
             result["status"] = "quota-deferred"
             return result
         if delay:
             time.sleep(delay)
         result["attempted_at"] = time.time()
         try:
-            result["status"], result["windows"], result["grants"] = fetch_windows(api, account, now)
+            result["status"], result["windows"], result["grants"] = fetch_windows(
+                api, account, now, min(HTTP_TIMEOUT, left))
         except Exception:
             result["status"] = "quota-unavailable"
     return result
@@ -432,6 +474,7 @@ def probe_egress(targets):
 
 
 def collect_host(host, salt, visited, not_before, progress=lambda report: None):
+    deadline = time.monotonic() + POLL_DEADLINE
     now = datetime.now(timezone.utc)
     api = QuotaAPI(host["port"], Path(host["instance_root"]) / ".env")
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -469,7 +512,7 @@ def collect_host(host, salt, visited, not_before, progress=lambda report: None):
         targets.update(probe_egress(sorted(additional)))
     progress(dict(result, quota_errors=["inventory-incomplete"], stage=WORKER_POLLING))
     with ThreadPoolExecutor(max_workers=6) as pool:
-        pending = [pool.submit(collect_account, api, account, now, visited, not_before, targets)
+        pending = [pool.submit(collect_account, api, account, now, visited, not_before, targets, deadline)
                    for account in accounts.values()]
         result["accounts"] = [job.result() for job in pending]
     return result

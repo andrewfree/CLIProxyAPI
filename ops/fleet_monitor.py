@@ -24,6 +24,7 @@ else:
 
 OPS = Path(__file__).resolve().parent
 HOST_TIMEOUT = 70
+REMOTE_DEADLINE = 63  # Ends Will's worker even if SSH is interrupted.
 PARITY_TIMEOUT = 105
 TEXT_TIMEOUT = 12
 PARITY_INTERVAL = 3600
@@ -118,8 +119,8 @@ def run_host(host, salt, visited, not_before):
     if destination is None:
         argv = [sys.executable, "-B", str(OPS / "fleet_monitor.py"), "--worker"]
     else:
-        # The remote deadline also ends the worker if SSH is interrupted.
-        argv = [*SSH_ARGS, "--", destination, "timeout", "-k", "1s", "63s", "python3", "-I", "-B", "-"]
+        argv = [*SSH_ARGS, "--", destination, "timeout", "-k", "1s", f"{REMOTE_DEADLINE}s",
+                "python3", "-I", "-B", "-"]
         payload = remote_program(payload)
     try:
         proc = subprocess.run(argv, input=payload, capture_output=True, text=True,
@@ -261,9 +262,16 @@ def status_alerts(state, hosts, parity):
     egress = will["egress"].values()
     affected = ", ".join(name for name, value in sorted(will["egress"].items()) if value == "down")
     egress_down = (True if "down" in egress else False if egress and all(s == "ok" for s in egress) else None)
+    # The Codex wrapper checks only /healthz at session start, so it cannot see egress loss.
     fallback = "Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults."
-    will_opening = ("Will is not reachable over SSH from the Mac." if will.get("ssh_unreachable")
-                    else f"Will proxy unreachable. {fallback}")
+    if will.get("ssh_unreachable"):
+        will_opening = "Will is not reachable over SSH from the Mac."
+    elif unreachable(mac) is not False:
+        will_opening = "Will proxy unreachable."  # The wrapper moves only to a healthy Mac.
+    else:
+        # The wrapper picks a host only when a Codex session starts.
+        will_opening = ("Will proxy unreachable. New codex_cliproxy sessions start on the Mac; restart open "
+                        "ones or use codex_cliproxy_mac. claude_cliproxy fails over per request.")
     issues = [
         ("will-unreachable", unreachable(will), will_opening, "Will health checks recovered."),
         ("will-egress", egress_down if will["reachability"] == "ok" else None,
