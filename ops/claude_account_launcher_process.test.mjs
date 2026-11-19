@@ -44,10 +44,13 @@ await import(${JSON.stringify(pathToFileURL(launcher).href)});`;
   }
 });
 
-test("an imported launcher reports a mismatch when invoked under its name", () => {
+test("an imported launcher reports a mismatch when invoked under its name", (t) => {
+  // Run from an empty directory so the bare name never resolves to the real launcher.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-import-"));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   const source = `await import(${JSON.stringify(pathToFileURL(launcher).href)})`;
   const run = (name) => spawnSync(process.execPath, ["--input-type=module", "-e", source, name], {
-    env: {}, encoding: "utf8", timeout: 5000,
+    cwd, env: {}, encoding: "utf8", timeout: 5000,
   });
   assert.equal(run("borrower.mjs").status, 0);
   const mismatch = run(path.basename(launcher));
