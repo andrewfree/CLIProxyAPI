@@ -370,7 +370,7 @@ def tick(root, hosts, runtime, command, no_notify):
                 attempts[row["account_id"]] = row["attempted_at"]
     state["claude_attempts"] = attempts
     records, state["inventory"] = quota_records(observed, state.get("inventory", {}), captured_at)
-    append_history(runtime / "quota-history.jsonl", records)
+    append_history(runtime / f"quota-history-{now:%Y-%m}.jsonl", records)
 
     health = {name: host_health(report) for name, report in observed.items()}
     if parity_due:

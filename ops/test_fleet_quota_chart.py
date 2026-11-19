@@ -38,6 +38,21 @@ class ChartTests(unittest.TestCase):
             self.assertRegex(html, r'<path d="M[^M]+L[^M]+M[^M]+?"')
             self.assertIn("No quota readings", chart.render(history, start, end, window="absent"))
 
+    def test_monthly_history_opens_only_months_in_range(self):
+        start = datetime(2026, 11, 30, 23, tzinfo=timezone.utc)
+        end = start + timedelta(hours=2)
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory)
+            # An out-of-range shard raises if the reader ever opens it as a file.
+            (history / "quota-history-2026-10.jsonl").mkdir()
+            for at, used in ((start, 91), (end, 97)):
+                path = history / f"quota-history-{at:%Y-%m}.jsonl"
+                path.write_text(json.dumps({"provider": "claude", "label": "fixture", "account_id": "first",
+                                            "captured_at": at.isoformat(),
+                                            "windows": [{"window": "weekly", "used_percent": used}]}))
+            series = chart.read_series(history, start, end)
+            self.assertEqual(series, [("claude", "fixture", {"weekly": [(start, 91), (end, 97)]})])
+
     def test_cli_creates_private_html_at_selected_path(self):
         with tempfile.TemporaryDirectory() as directory:
             history = Path(directory) / "history.jsonl"

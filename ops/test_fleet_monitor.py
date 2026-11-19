@@ -249,10 +249,10 @@ class MonitorTests(unittest.TestCase):
             self.assertIn("Will egress down", messages[2])
             self.assertIn("drift appeared", messages[2])
             self.assertIn("weekly capped", messages[2])
-            history = [json.loads(line) for line in (root / "quota-history.jsonl").read_text().splitlines()]
+            history = [json.loads(line) for line in (root / "quota-history-2026-11.jsonl").read_text().splitlines()]
             self.assertEqual(len(history), 5)
             self.assertEqual(history[-1]["windows"][0]["used_percent"], 100)
-            self.assertEqual(stat.S_IMODE((root / "quota-history.jsonl").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE((root / "quota-history-2026-11.jsonl").stat().st_mode), 0o600)
             health = monitor.read_json(root / "health.json", {})
             self.assertEqual(health["hosts"]["will"]["status"], "egress-down")
             latest = monitor.read_json(root / "latest.json", {})

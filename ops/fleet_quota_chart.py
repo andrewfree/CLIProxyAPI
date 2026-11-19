@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 import json
 import os
+import re
 from pathlib import Path
 
 if __package__:
@@ -19,33 +20,51 @@ LEFT, RIGHT, TOP, BOTTOM = 47, 18, 14, 36
 COLORS = ("#2166ac", "#ad4522", "#772dae", "#087666", "#9e2c68", "#6c591d")
 
 
+def history_lines(history, start, end):
+    if not history.is_dir():
+        with history.open(encoding="utf-8") as source:
+            yield from source
+        return
+
+    month = start.astimezone(timezone.utc).date().replace(day=1)
+    last = end.astimezone(timezone.utc).date().replace(day=1)
+    while month <= last:
+        try:
+            source = (history / f"quota-history-{month:%Y-%m}.jsonl").open(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        else:
+            with source:
+                yield from source
+        month = (month + timedelta(days=32)).replace(day=1)
+
+
 def read_series(history, start, end, account=None, window=None):
     accounts = defaultdict(lambda: defaultdict(list))
     labels = {}
-    with history.open(encoding="utf-8") as source:
-        for line in source:
-            try:
-                row = json.loads(line)
-                if not isinstance(row, dict):
-                    continue
-            except ValueError:
+    for line in history_lines(history, start, end):
+        try:
+            row = json.loads(line)
+            if not isinstance(row, dict):
                 continue
-            at = timestamp(row.get("captured_at"))
-            provider, label, account_id = (row.get(key) for key in ("provider", "label", "account_id"))
-            if at is None or not start <= at <= end or not all(isinstance(v, str) for v in (provider, label, account_id)):
+        except ValueError:
+            continue
+        at = timestamp(row.get("captured_at"))
+        provider, label, account_id = (row.get(key) for key in ("provider", "label", "account_id"))
+        if at is None or not start <= at <= end or not all(isinstance(v, str) for v in (provider, label, account_id)):
+            continue
+        if account and account.casefold() not in (provider + " " + label + " " + account_id).casefold():
+            continue
+        key = provider, account_id
+        if at >= labels.get(key, (start, ""))[0]:
+            labels[key] = at, label
+        for metric in row.get("windows") or []:
+            if not isinstance(metric, dict):
                 continue
-            if account and account.casefold() not in (provider + " " + label + " " + account_id).casefold():
-                continue
-            key = provider, account_id
-            if at >= labels.get(key, (start, ""))[0]:
-                labels[key] = at, label
-            for metric in row.get("windows") or []:
-                if not isinstance(metric, dict):
-                    continue
-                name, used = metric.get("window"), number(metric.get("used_percent"))
-                if (isinstance(name, str) and (window is None or window == name)
-                        and used is not None and 0 <= used <= 100):
-                    accounts[key][name].append((at, used))
+            name, used = metric.get("window"), number(metric.get("used_percent"))
+            if (isinstance(name, str) and (window is None or window == name)
+                    and used is not None and 0 <= used <= 100):
+                accounts[key][name].append((at, used))
     return [(provider, labels[provider, tag][1], series)
             for (provider, tag), series in sorted(accounts.items())]
 
@@ -134,7 +153,8 @@ def render(history, start, end, account=None, window=None):
 def main(argv=None):
     root = Path(os.environ.get("CLIPROXY_ROOT", "~/cliproxy")).expanduser() / "ops/runtime/fleet"
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--history", type=Path, default=root / "quota-history.jsonl")
+    parser.add_argument("--history", type=Path, default=root,
+                        help="directory of monthly history files or an explicit JSONL file")
     parser.add_argument("--output", type=Path, default=root / "quota-chart.html")
     parser.add_argument("--days", type=int, default=7, help="days of history to chart")
     parser.add_argument("--account", help="filter by provider, account label or account ID")
@@ -142,8 +162,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.days <= 3660:
         parser.error("--days must be between 1 and 3660")
-    if args.history.resolve() == args.output.resolve():
-        parser.error("--output must be different from --history")
+    history, output = args.history.resolve(), args.output.resolve()
+    if (history == output or (history == output.parent
+                              and re.fullmatch(r"quota-history-\d{4}-\d{2}\.jsonl", output.name))):
+        parser.error("--output must be different from the history files")
     now = datetime.now(timezone.utc)
     try:
         html = render(args.history, now - timedelta(days=args.days), now, args.account, args.window)
