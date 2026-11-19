@@ -5,7 +5,7 @@ These scripts were used for the "Client key rotation" and "Provider keys" items 
 - Two new CLIProxy client keys were added at the top of both hosts' key lists, and every client
   moved to them. Review agents had printed the old keys in their own transcripts.
 - A new Z.ai Coding Plan key replaced the old one on both hosts and in CodexBar. OpenCode's
-  `zai-coding-plan` credential also held it and was missed; it was replaced that evening (see
+  `zai-coding-plan` credential also held the old key and was missed; it was replaced that evening (see
   FLEET.md, Operations on November 18). Key holders to update next time: both CLIProxy configs,
   CodexBar, and OpenCode (`opencode auth list` shows the Z.AI Coding Plan credential).
 - A new NVIDIA key replaced the old one in the Mac config and `~/.config/nvidia/api.env`.
