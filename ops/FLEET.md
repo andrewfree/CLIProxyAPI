@@ -78,8 +78,9 @@ the instance root for Compose, the host's logs, and private runtime state.
 
 1. Preview the exact commit and record the five current T3 launcher paths.
    Stop if either command fails or the paths differ from the expected checkout
-   launcher. In T3 Settings, also note `codex_cliproxy`'s `config.binaryPath`.
-   The helper reports only the Claude profiles.
+   launcher. In T3 Settings, also write down `codex_cliproxy`'s
+   `config.binaryPath` for the rollback. The helper reports only the Claude
+   profiles.
 
    ```sh
    commit=$(git rev-parse HEAD)
@@ -124,8 +125,9 @@ the instance root for Compose, the host's logs, and private runtime state.
    replaces the locally edited copy so P0 can verify its checksum. The helper
    moves only the Claude profiles. If step 1 found `codex_cliproxy` on the
    checkout's `codex_fallback_launcher.mjs`, change its `config.binaryPath` to
-   `$bundle/codex_fallback_launcher.mjs` in T3 Settings now, so the Codex
-   launcher and its probe module also stop running from the checkout.
+   `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs` in T3 Settings
+   now, so the Codex launcher and its probe module also stop running from the
+   checkout.
 
    ```sh
    /bin/zsh ops/install_watchdog.sh "$bundle"
@@ -141,7 +143,11 @@ the instance root for Compose, the host's logs, and private runtime state.
    check the watchdog log for a normal cycle and the archiver
    log for its usual status. Start one new `claude_cliproxy_mac` session
    and one new named Claude session and verify that each can answer
-   `count_tokens` through its intended route. In a scratch worktree, a
+   `count_tokens` through its intended route. If step 3 changed
+   `codex_cliproxy`, start one new session on it too and check that the
+   newest `"subcommand":"app-server"` line in
+   `ops/runtime/fleet/codex-failover.jsonl` under the instance root has
+   `"selected":"primary"`. In a scratch worktree, a
    local edit to a shipped script should leave the deployed hash unchanged.
    Keep the interim live-change rule until sessions using the old launcher
    have ended. The token and P0 checks run in a subshell, so a failure stops
@@ -320,23 +326,26 @@ Tailscale Serve can remain in place during an application rollback. To remove on
 ### Enable or roll back Codex failover
 
 1. After review and CI, obtain Andrew's live promote phrase for the T3
-   profile change and for the bundle ship (or, before the bundle cutover, the
-   Mac checkout update) that delivers the launcher. Check that both hosts accept the
-   profile's existing client key and serve the model IDs used by the profile.
-2. From a Mac checkout at the commit T3 will run, run the local closed-port
-   test and print the executable's absolute path for T3 Settings. After the
-   Mac bundle cutover, that commit is the `commit` in
-   `$HOME/cliproxy-live/ops/bundle-manifest.json` and the path is the shipped
-   copy. Before it, use the approved checkout. Either way the launcher writes
-   its decision log under the instance root, not inside the bundle.
+   profile change. If the launcher is not on the Mac yet, the phrase also
+   covers the ship or checkout update that delivers it. Check that both hosts
+   accept the profile's existing client key and serve the model IDs used by
+   the profile.
+2. Run the local closed-port test from a Mac checkout at the commit T3 will
+   run, then choose the executable path for T3 Settings:
+   - While the bundle cutover is in effect (not rolled back), use
+     `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs`. The
+     printed checkout and shipped commits must match.
+   - Otherwise use the printed checkout path.
+
+   Either way the launcher writes its decision log under the instance root,
+   not inside the bundle.
 
    ```sh
    node --test --test-name-pattern='connection refusal' ops/codex_fallback_launcher.test.mjs
-   if [ -e "$HOME/cliproxy-live/ops/codex_fallback_launcher.mjs" ]; then
-     printf '%s\n' "$HOME/cliproxy-live/ops/codex_fallback_launcher.mjs"
-   else
-     printf '%s/ops/codex_fallback_launcher.mjs\n' "$(pwd -P)"
-   fi
+   printf '%s/ops/codex_fallback_launcher.mjs\n' "$(pwd -P)"
+   printf 'checkout %s\n' "$(git rev-parse HEAD)"
+   python3 -c 'import json, pathlib; print("shipped ", json.loads((pathlib.Path.home() / "cliproxy-live/ops/bundle-manifest.json").read_text())["commit"])' 2>/dev/null ||
+     printf '%s\n' 'shipped  none (no bundle)'
    ```
 
 3. Use those [profile settings](README.md#codex-failover) on a temporary
