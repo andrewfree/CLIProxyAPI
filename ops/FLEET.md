@@ -438,9 +438,12 @@ monitor. Pause the monitor before using `watch`, and allow at least 300 seconds
 between usage reads of the same account. Keep `monitor-state.json` with the
 history to preserve account labels, polling deadlines and alert state.
 
-For a different notifier, set `CLIPROXY_FLEET_NOTIFY_COMMAND` in the installed
-plist's `EnvironmentVariables` before bootstrapping. Use an absolute executable
-path and optional quoted arguments. The command receives the text on stdin
+For a different notifier, add `CLIPROXY_FLEET_NOTIFY_COMMAND` to
+`EnvironmentVariables` in the tracked `ops/com.rever.cliproxy-fleet-monitor.plist`
+in a reviewed change, ship it, and reinstall with the block above. Do not edit
+the installed plist in place: P0 requires it to match the shipped copy, and a
+reinstall replaces it. Use an absolute executable path and optional quoted
+arguments. The command receives the text on stdin
 and returns zero upon acceptance. If Text Me confirms failure or the
 connection cannot be opened, the monitor retries pending alerts and the
 day's summary on the next tick. Outcomes after an interrupted write or
