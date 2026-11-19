@@ -3,6 +3,7 @@
 from copy import deepcopy
 from datetime import datetime, time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ast
 import json
 import os
 from pathlib import Path
@@ -551,8 +552,28 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(plist["RunAtLoad"])
         self.assertNotIn("KeepAlive", plist)
         self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], "/Users/rever/cliproxy")
+        # Apple's interpreter: macOS Local Network privacy blocks SSH from Homebrew's python3 under launchd.
         self.assertEqual(plist["ProgramArguments"],
-                         ["/opt/homebrew/bin/python3", "-B", "/Users/rever/cliproxy-live/ops/fleet_monitor.py"])
+                         ["/usr/bin/python3", "-B", "/Users/rever/cliproxy-live/ops/fleet_monitor.py"])
+
+    def test_monitor_modules_stay_compatible_with_apple_python_39(self):
+        # /usr/bin/python3 is 3.9: no newer syntax, and no `X | Y` annotations evaluated at runtime.
+        for name in ("fleet_monitor", "fleet_monitor_probe", "fleet_quota_chart", "fleetctl",
+                     "fleet_routing", "claude_usage_resets"):
+            source = (monitor.OPS / (name + ".py")).read_text(encoding="utf-8")
+            tree = ast.parse(source, feature_version=(3, 9))
+            if "from __future__ import annotations" in source:
+                continue
+            for node in ast.walk(tree):
+                notes = []
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    notes = [a.annotation for a in node.args.args + node.args.kwonlyargs if a.annotation]
+                    notes += [node.returns] if node.returns else []
+                elif isinstance(node, ast.AnnAssign):
+                    notes = [node.annotation]
+                for note in notes:
+                    self.assertFalse(any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr) for n in ast.walk(note)),
+                                     f"{name}.py line {note.lineno} uses a runtime X | Y annotation")
 
 
 if __name__ == "__main__":
