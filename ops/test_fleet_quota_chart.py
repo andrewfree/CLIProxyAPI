@@ -53,6 +53,21 @@ class ChartTests(unittest.TestCase):
             series = chart.read_series(history, start, end)
             self.assertEqual(series, [("claude", "fixture", {"weekly": [(start, 91), (end, 97)]})])
 
+    def test_chart_joins_normal_claude_samples_and_breaks_at_a_missed_sample(self):
+        start = datetime(2026, 11, 18, 10, tzinfo=timezone.utc)
+        end = start + timedelta(minutes=45)
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "history.jsonl"
+            history.write_text("\n".join(json.dumps({
+                "provider": provider, "label": "fixture", "account_id": "first",
+                "captured_at": (start + timedelta(seconds=offset)).isoformat(),
+                "windows": [{"window": "weekly", "used_percent": 70 + offset // 900}],
+            }) for provider in ("claude", "codex") for offset in (0, 900, 2700)))
+            claude = chart.render(history, start, end, account="claude")
+            codex = chart.render(history, start, end, account="codex")
+            self.assertRegex(claude, r'<path d="M[^ML]+L[^ML]+M[^ML]+"')
+            self.assertRegex(codex, r'<path d="M[^ML]+M[^ML]+M[^ML]+"')
+
     def test_cli_creates_private_html_at_selected_path(self):
         with tempfile.TemporaryDirectory() as directory:
             history = Path(directory) / "history.jsonl"

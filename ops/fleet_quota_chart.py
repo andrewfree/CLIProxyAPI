@@ -11,9 +11,9 @@ import re
 from pathlib import Path
 
 if __package__:
-    from .fleet_monitor_probe import number, timestamp
+    from .fleet_monitor_probe import CLAUDE_EVERY_TICKS, TICK_INTERVAL, number, timestamp
 else:
-    from fleet_monitor_probe import number, timestamp
+    from fleet_monitor_probe import CLAUDE_EVERY_TICKS, TICK_INTERVAL, number, timestamp
 
 WIDTH, HEIGHT = 790, 236
 LEFT, RIGHT, TOP, BOTTOM = 47, 18, 14, 36
@@ -69,9 +69,10 @@ def read_series(history, start, end, account=None, window=None):
             for (provider, tag), series in sorted(accounts.items())]
 
 
-def chart_svg(series, start, end):
+def chart_svg(series, start, end, provider):
     span = (end - start).total_seconds()
     plot_width, plot_height = WIDTH - LEFT - RIGHT, HEIGHT - TOP - BOTTOM
+    cadence = TICK_INTERVAL * (CLAUDE_EVERY_TICKS if provider == "claude" else 1)
 
     def x(at):
         return LEFT + plot_width * (at - start).total_seconds() / span
@@ -100,7 +101,7 @@ def chart_svg(series, start, end):
         path, previous = [], None
         for at, used in sorted(dict(readings).items()):
             # Draw gaps when a whole scheduled sample was missed.
-            if previous is None or (at - previous).total_seconds() > 450:
+            if previous is None or (at - previous).total_seconds() > 1.5 * cadence:
                 path.append("M" + point(at, used) + "h0.01")
             else:
                 path.append("L" + point(at, used))
@@ -118,7 +119,7 @@ def render(history, start, end, account=None, window=None):
     cards = []
     for provider, label, series in read_series(history, start, end, account, window):
         cards.append(f'<section><h2>{escape(provider)} <span>{escape(label)}</span></h2>'
-                     + chart_svg(series, start, end) + "</section>")
+                     + chart_svg(series, start, end, provider) + "</section>")
     content = "\n".join(cards) or "<p>No quota readings in the selected time range.</p>"
     return f"""<!doctype html>
 <html lang="en">
