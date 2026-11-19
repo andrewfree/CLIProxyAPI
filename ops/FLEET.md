@@ -198,7 +198,12 @@ refuses pre-bundle commits.
 
 After a later ship or bundle rollback, reinstall the token helper and
 LaunchAgents from the bundle using step 3 whenever their tracked files
-changed. They are installed as copies. Rerun the step 4 checks against the
+changed. They are installed as copies. Step 3 covers the watchdog and
+archiver. Once the monitor is installed, reinstall its plist with the block in
+[Install or resume on the Mac](#install-or-resume-on-the-mac) when
+`ops/com.rever.cliproxy-fleet-monitor.plist` changed. P0 reports
+`P0/com.rever.cliproxy-fleet-monitor` while an installed copy differs from the
+shipped one. Rerun the step 4 checks against the
 shipped SHA. A ship publishes the tracked allowlist and
 `bundle-manifest.json` together. Previous copies of managed files go under
 `~/cliproxy-live/prev/<timestamp>/`. An identical retry reports unchanged.
@@ -397,8 +402,10 @@ Install it after the [Mac bundle cutover](#mac-ops-bundle-cutover), from a
 bundle shipped at a commit that contains this monitor. `ops/fleet/bundle.txt`
 lists the monitor, its probe helper, the chart, the plist,
 `claude_usage_resets.py`, and the `fleetctl.py` contract inputs. Install and
-bootstrap the LaunchAgent only after Andrew approves the live change. Its first run can text Andrew. The job uses the existing Text Me
-LaunchAgent's default recipient.
+bootstrap the LaunchAgent only after Andrew approves the live change. Its
+first run can text Andrew. The job uses the existing Text Me LaunchAgent's
+default recipient. The same block reinstalls or resumes the job; it boots out
+a loaded copy first.
 
 ```sh
 bundle="$HOME/cliproxy-live/ops"
@@ -406,6 +413,7 @@ agent="$HOME/Library/LaunchAgents/com.rever.cliproxy-fleet-monitor.plist"
 domain="gui/$(id -u)"
 plutil -lint "$bundle/com.rever.cliproxy-fleet-monitor.plist"
 curl --noproxy '*' --fail --silent --show-error --max-time 5 http://127.0.0.1:8787/health
+launchctl bootout "$domain/com.rever.cliproxy-fleet-monitor" 2>/dev/null || true
 install -m 644 "$bundle/com.rever.cliproxy-fleet-monitor.plist" "$agent"
 launchctl bootstrap "$domain" "$agent"
 launchctl print "$domain/com.rever.cliproxy-fleet-monitor"

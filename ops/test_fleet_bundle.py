@@ -217,7 +217,8 @@ class FleetBundleTest(unittest.TestCase):
         self.destination = self.root / "cliproxy-live/ops"
         ops = Path(__file__).resolve().parent
         fixture_names = ["ops/fleet/bundle.txt", bundle.BUNDLE_MARKER, bundle.LAUNCHER,
-                         "ops/cliproxy-codex-token", *("ops/" + name for name in bundle.JOBS.values())]
+                         "ops/cliproxy-codex-token", *("ops/" + name for name in bundle.JOBS.values()),
+                         "ops/" + bundle.MONITOR + ".plist"]
         for name in fixture_names[3:]:
             self.write(name, "fixture " + name, mode=0o755)
         self.write(fixture_names[0], "\n".join(fixture_names) + "\n")
@@ -238,10 +239,16 @@ class FleetBundleTest(unittest.TestCase):
         shutil.copy2(self.destination / helper.name, helper)
         manifest, _ = bundle.export_bundle(self.repo, commit)
         launchers = [str(self.destination / "claude_account_launcher.mjs")] * 5
+        # The monitor LaunchAgent is optional until activated.
+        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], [])
+        monitor = agents / (bundle.MONITOR + ".plist")
+        shutil.copyfile(self.destination / monitor.name, monitor)
         self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], [])
         launchers[0] = str(self.root / "cliproxy/ops/claude_account_launcher.mjs")
         (self.destination / "archive_logs.py").write_text("edited")
         helper.write_text("different")
+        monitor.write_text("stale")
         self.assertEqual(set(bundle.verify_bundle(host, manifest, launchers)["issues"]), {
             "P0/t3-launchers", "P0/file:ops/archive_logs.py", "P0/token-helper",
+            "P0/" + bundle.MONITOR,
         })
