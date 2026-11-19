@@ -343,6 +343,12 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--dry-run", action="store_true", help="run every check but do not send the claim")
 
     args = parser.parse_args(argv)
+    if ".fleet-releases" in ROOT.parts:
+        # The ops bundle ships this module only for the fleet monitor's imports.
+        # Run as a command there, its .env lookup, receipts and request IDs would
+        # resolve inside a release that the next ship replaces.
+        print("error: run ops/claude_usage_resets.py from the checkout, not the ops bundle", file=sys.stderr)
+        return 2
     proxy = Proxy(args.base_url, load_management_key(args.root))
     try:
         return {"status": cmd_status, "watch": cmd_watch, "claim": cmd_claim}[args.command](proxy, args)

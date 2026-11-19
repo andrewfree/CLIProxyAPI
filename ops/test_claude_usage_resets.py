@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 from typing import Any
@@ -221,6 +223,19 @@ class CliGuardTest(unittest.TestCase):
         self.assertEqual(spy.call_args.kwargs["min_fable_percent"], 99)
         self.assertIn("below required 99%", err)
         self.assertEqual(proxy.posts(), [])
+
+    def test_bundled_copy_refuses_to_run_as_a_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            release = pathlib.Path(tmp).resolve() / ".fleet-releases" / "20261118T000000Z-test"
+            (release / "ops").mkdir(parents=True)
+            script = release / "ops" / "claude_usage_resets.py"
+            script.write_bytes(pathlib.Path(resets.__file__).read_bytes())
+            result = subprocess.run([sys.executable, "-B", str(script), "status"],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("not the ops bundle", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(sorted(path.name for path in release.rglob("*")), ["claude_usage_resets.py", "ops"])
 
     def test_cli_without_min_fable_percent_passes_none(self):
         proxy = FakeProxy([(200, usage_body(fable=98))])
