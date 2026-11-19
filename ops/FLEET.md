@@ -50,8 +50,8 @@ The read-only checks cover the management API contract. Use the existing
 instance verifiers for Docker image and Compose checks. The bundle can be
 shipped separately from the proxy. The Mac cutover below adds the P0 check
 for deployed files and configured launch paths. The Mac's scheduled monitor
-adds [in-container egress and quota checks](#health-and-quota-monitor) after
-the cutover and its own LaunchAgent are activated.
+adds [in-container egress and quota checks](#health-and-quota-monitor). It was
+installed on November 18 and is paused until SSH from launchd jobs to Will works.
 
 Operational differences recorded on November 18, 2026, for review by December 2, 2026:
 
@@ -149,8 +149,8 @@ the instance root for Compose, the host's logs, and private runtime state.
    and one new named Claude session and verify that each can answer
    `count_tokens` through its intended route. In a scratch worktree, a
    local edit to a shipped script should leave the deployed hash unchanged.
-   Keep the interim live-change rule until sessions using the old launcher
-   have ended. The token and P0 checks run in a subshell, so a failure stops
+   Keep treating a checkout launcher edit as live until sessions using the old
+   launcher have ended. The token and P0 checks run in a subshell, so a failure stops
    only that block and leaves `commit` and `backup` set for the rollback.
 
    ```sh
@@ -224,7 +224,7 @@ unmanaged files stay in place.
 
 ## Running fleet
 
-Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`. The Mac's `claude_cliproxy` and `codex_cliproxy` profiles reach Will by its tailnet name, `http://will.<tailnet>.ts.net:8317` (with `/v1` for Codex). Public resolvers answer NXDOMAIN for that name, so with Tailscale stopped the lookup should fail at once, instead of sending traffic and the client key to whatever holds Will's tailnet address on another network. The Claude launcher then fails over. Once enabled, the Codex launcher can select the Mac at session start after that failed lookup. M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw address.
+Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`. The Mac's `claude_cliproxy` and `codex_cliproxy` profiles reach Will by its tailnet name, `http://will.<tailnet>.ts.net:8317` (with `/v1` for Codex). Public resolvers answer NXDOMAIN for that name, so with Tailscale stopped the lookup should fail at once, instead of sending traffic and the client key to whatever holds Will's tailnet address on another network. The Claude launcher then fails over. Since November 18 the Codex launcher selects the Mac at session start after that failed lookup. M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw address.
 
 `fleet-release.json` pins one application source commit, one Cursor plugin version, and the exact platform image and plugin hashes. Both images are built from the same commit. ARM64 runs on the Mac's Docker VM; AMD64 runs on Will. Compose uses immutable local image IDs with `pull_policy: never`, so a restart cannot silently select a new release. The two Compose files and owner contracts must be changed together for the next release.
 
@@ -328,7 +328,9 @@ Tailscale Serve can remain in place during an application rollback. To remove on
 
 ### Enable or roll back Codex failover
 
-Enable it only after the [Mac bundle cutover](#mac-ops-bundle-cutover)
+It was enabled on November 18, 2026 (see the
+[activation record](evidence/live-activation-20261118/README.md)). These steps stay
+as the procedure and the rollback. Enable it only after the [Mac bundle cutover](#mac-ops-bundle-cutover)
 has passed, so T3 runs the launcher from the bundle and never from the
 checkout. The T3 path is
 `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs`. The launcher
