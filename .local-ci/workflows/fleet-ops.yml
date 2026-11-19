@@ -47,11 +47,9 @@ jobs:
       - run: node --test ops/*.test.mjs
       - run: python ops/fleetctl.py check
       # The Mac fleet monitor's LaunchAgent runs Apple's /usr/bin/python3 (3.9), so run its tests there.
-      - uses: actions/setup-python@v5
-        id: python39
-        with:
-          python-version: "3.9"
+      # uv installs a managed 3.9 under the runner's home, which works in local-ci's act container too.
       - name: Run the fleet monitor tests on Python 3.9
-        run: >-
-          "${{ steps.python39.outputs.python-path }}" -m unittest
-          ops/test_fleet_monitor.py ops/test_fleet_quota_chart.py ops/test_fleetctl.py
+        run: |
+          python -m pip install 'uv==0.13.9'
+          python -m uv run --no-project --python 3.9 --python-preference only-managed \
+            python -m unittest ops/test_fleet_monitor.py ops/test_fleet_quota_chart.py ops/test_fleetctl.py
