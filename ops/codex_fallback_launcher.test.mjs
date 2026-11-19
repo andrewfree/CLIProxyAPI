@@ -31,6 +31,17 @@ if (action === "die") {
   process.on("beforeExit", () => { process.exitCode = 37; });
 }
 `;
+const descriptorCodex = `#!/usr/bin/env python3
+import fcntl
+import json
+import os
+import sys
+
+nonblocking = [bool(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK) for fd in range(3)]
+print(json.dumps({"args": sys.argv[1:], "pid": os.getpid(), "nonblocking": nonblocking}))
+sys.stderr.write(sys.stdin.read())
+sys.exit(37)
+`;
 
 function t3Args(primary) {
   return [
@@ -60,11 +71,17 @@ async function fakeHealth(t, respond = (res) => res.end(healthyBody)) {
   return { url: `http://127.0.0.1:${server.address().port}`, requests, closed };
 }
 
-function start(t, args, { fallback, action } = {}) {
+function start(t, args, { fallback, action, fake = fakeCodex, sibling } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-launcher-"));
   const binary = path.join(dir, "fake codex.cjs");
   const log = path.join(dir, "runtime", "codex-failover.jsonl");
-  fs.writeFileSync(binary, fakeCodex, { mode: 0o700 });
+  fs.writeFileSync(binary, fake, { mode: 0o700 });
+  let executable = launcher;
+  if (sibling !== undefined) {
+    executable = path.join(dir, "codex_fallback_launcher.mjs");
+    fs.copyFileSync(launcher, executable);
+    if (sibling !== null) fs.writeFileSync(path.join(dir, "claude_account_launcher.mjs"), sibling);
+  }
   const env = {
     PATH: process.env.PATH,
     CODEX_REAL_BINARY: binary,
@@ -72,7 +89,7 @@ function start(t, args, { fallback, action } = {}) {
   };
   if (fallback) env.CLIPROXY_FALLBACK_URL = fallback;
   if (action) env.FAKE_CODEX_ACTION = action;
-  const child = spawn(launcher, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(executable, args, { env, stdio: ["pipe", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
   const lines = readline.createInterface({ input: child.stdout });
@@ -87,35 +104,59 @@ function start(t, args, { fallback, action } = {}) {
   return { child, ready, done, log, stderr: () => stderr };
 }
 
-async function launch(t, args, fallback) {
-  const run = start(t, args, { fallback });
+async function launch(t, args, fallback, options) {
+  const run = start(t, args, { fallback, ...options });
   run.child.stdin.end("fake stdin\n");
   assert.deepEqual(await run.done, [37, null]);
   assert.equal(run.stderr(), "fake stdin\n");
   return { ...run, args: (await run.ready).args };
 }
 
-function assertDecision(log, selected, reason) {
+function assertDecision(log, selected, reason, subcommand = "app-server") {
   const lines = fs.readFileSync(log, "utf8").trimEnd().split("\n");
   assert.equal(lines.length, 1);
   const { ts, pid, ...decision } = JSON.parse(lines[0]);
   assert.ok(Number.isFinite(Date.parse(ts)));
   assert.ok(Number.isInteger(pid));
   // No URL or launch arguments enter the record.
-  assert.deepEqual(decision, { selected, reason });
+  assert.deepEqual(decision, { selected, reason, subcommand });
   assert.equal(fs.statSync(log).mode & 0o777, 0o600);
 }
 
 const healthRequest = { method: "GET", url: "/healthz", authorization: undefined, connection: "close" };
 
-test("healthy primary runs the T3 argv unchanged and skips the fallback", async (t) => {
-  const primary = await fakeHealth(t);
-  const fallback = await fakeHealth(t);
+test("healthy primary wins even when the concurrent fallback answers first", { timeout: 5000 }, async (t) => {
+  const { promise: fallbackAnswered, resolve } = Promise.withResolvers();
+  const primary = await fakeHealth(t, async (res) => {
+    await fallbackAnswered;
+    res.end(healthyBody);
+  });
+  const fallback = await fakeHealth(t, (res) => res.end(healthyBody, resolve));
   const args = t3Args(primary.url);
   const run = await launch(t, args, fallback.url);
   assert.deepEqual(run.args, args);
   assert.deepEqual(primary.requests, [healthRequest]);
-  assert.deepEqual(fallback.requests, []);
+  assert.deepEqual(fallback.requests, [healthRequest]);
+  assertDecision(run.log, "primary", "primary_healthy");
+});
+
+test("a healthy primary cancels a stalled fallback probe", { timeout: 5000 }, async (t) => {
+  const { promise: fallbackRequested, resolve: requested } = Promise.withResolvers();
+  const { promise: fallbackClosed, resolve: closed } = Promise.withResolvers();
+  const primary = await fakeHealth(t, async (res) => {
+    await fallbackRequested;
+    res.end(healthyBody);
+  });
+  const fallback = await fakeHealth(t, (res) => {
+    res.once("close", closed);
+    requested();
+  });
+  const args = t3Args(primary.url);
+  const started = performance.now();
+  const run = await launch(t, args, fallback.url);
+  await fallbackClosed;
+  assert.ok(performance.now() - started < 2800);
+  assert.deepEqual(run.args, args);
   assertDecision(run.log, "primary", "primary_healthy");
 });
 
@@ -156,6 +197,20 @@ test("the total probe deadline includes a stalled health response body", { timeo
   assertDecision(run.log, "fallback", "fallback_healthy");
 });
 
+test("two silent hosts share one probe deadline", { timeout: 8000 }, async (t) => {
+  const primary = await fakeHealth(t, () => {});
+  const fallback = await fakeHealth(t, () => {});
+  const args = t3Args(primary.url);
+  const started = performance.now();
+  const run = await launch(t, args, fallback.url);
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 2900 && elapsed < 5000, `expected one probe deadline, got ${elapsed} ms`);
+  assert.deepEqual(run.args, args);
+  assert.deepEqual(primary.requests, [healthRequest]);
+  assert.deepEqual(fallback.requests, [healthRequest]);
+  assertDecision(run.log, "primary", "both_unhealthy");
+});
+
 test("both hosts down keeps the primary args", async (t) => {
   const primary = await fakeHealth(t);
   const fallback = await fakeHealth(t);
@@ -187,6 +242,38 @@ test("without the opt-in there is no probe or log and argv is unchanged", async 
   if (process.execve) assert.equal((await run.ready).pid, run.child.pid);
 });
 
+test("passthrough keeps stdin, stdout and stderr blocking across execve", async (t) => {
+  const args = ["--version"];
+  const run = await launch(t, args, undefined, { fake: descriptorCodex });
+  const child = await run.ready;
+  assert.deepEqual(child.nonblocking, [false, false, false]);
+  assert.deepEqual(child.args, args);
+  if (process.execve) assert.equal(child.pid, run.child.pid);
+});
+
+test("passthrough works with no sibling launcher", async (t) => {
+  const args = ["--version"];
+  const run = await launch(t, args, undefined, { sibling: null });
+  assert.deepEqual(run.args, args);
+  assert.equal(fs.existsSync(run.log), false);
+});
+
+for (const [name, sibling] of [
+  ["missing", null],
+  ["broken", "export const = ;"],
+]) {
+  test(`an opted-in launch with a ${name} sibling keeps the original args`, async (t) => {
+    const primary = await fakeHealth(t);
+    const fallback = await fakeHealth(t);
+    const args = t3Args(primary.url);
+    const run = await launch(t, args, fallback.url, { sibling });
+    assert.deepEqual(run.args, args);
+    assert.deepEqual(primary.requests, []);
+    assert.deepEqual(fallback.requests, []);
+    assertDecision(run.log, "primary", "invalid_configuration");
+  });
+}
+
 test("ambiguous base_url overrides bypass probing and keep argv", async (t) => {
   const primary = await fakeHealth(t);
   const fallback = await fakeHealth(t);
@@ -197,6 +284,88 @@ test("ambiguous base_url overrides bypass probing and keep argv", async (t) => {
   assert.deepEqual(fallback.requests, []);
   assertDecision(run.log, "primary", "invalid_configuration");
 });
+
+const overrideForms = [
+  ["short attached", (value) => [`-c${value}`]],
+  ["short equals", (value) => [`-c=${value}`]],
+  ["long equals", (value) => [`--config=${value}`]],
+  ["long separate", (value) => ["--config", value]],
+];
+
+for (const [name, config] of overrideForms) {
+  test(`rewrites only the URL in a ${name} override`, async (t) => {
+    const primary = await fakeHealth(t, (res) => res.writeHead(503).end());
+    const fallback = await fakeHealth(t);
+    const primaryOverride = config(`${baseURLKey} = '${primary.url}/v1/' `);
+    const fallbackOverride = config(`${baseURLKey} = '${fallback.url}/v1/' `);
+    const args = t3Args(primary.url).toSpliced(2, 2, ...primaryOverride);
+    const run = await launch(t, args, fallback.url);
+    assert.deepEqual(run.args, args.toSpliced(2, primaryOverride.length, ...fallbackOverride));
+    assert.deepEqual(primary.requests, [healthRequest]);
+    assert.deepEqual(fallback.requests, [healthRequest]);
+    assertDecision(run.log, "fallback", "fallback_healthy");
+  });
+
+  test(`rejects a duplicate ${name} override after the T3 override`, async (t) => {
+    const primary = await fakeHealth(t);
+    const fallback = await fakeHealth(t);
+    const args = [...t3Args(primary.url), ...config(`${baseURLKey}="${fallback.url}/v1"`)];
+    const run = await launch(t, args, fallback.url);
+    assert.deepEqual(run.args, args);
+    assert.deepEqual(primary.requests, []);
+    assert.deepEqual(fallback.requests, []);
+    assertDecision(run.log, "primary", "invalid_configuration");
+  });
+}
+
+for (const [name, override] of [
+  ["provider table", (url) => `--config=model_providers.cliproxy={base_url="${url}/v1"}`],
+  ["quoted key", (url) => `-cmodel_providers."cliproxy".base_url="${url}/v1"`],
+  ["quoted key with spaces", (url) => `--config="model_providers" . 'cliproxy' . "base_url" = "${url}/v1"`],
+  ["escaped key", (url) => String.raw`-c=model_providers."cli\u0070roxy".'base_url'="${url}/v1"`],
+]) {
+  for (const placement of ["alone", "after"]) {
+    test(`keeps a ${name} override ${placement} without probing`, async (t) => {
+      const primary = await fakeHealth(t);
+      const fallback = await fakeHealth(t);
+      const config = override(primary.url);
+      const args = placement === "alone" ? ["app-server", config] : [...t3Args(primary.url), config];
+      const run = await launch(t, args, fallback.url);
+      assert.deepEqual(run.args, args);
+      assert.deepEqual(primary.requests, []);
+      assert.deepEqual(fallback.requests, []);
+      assertDecision(run.log, "primary", "invalid_configuration");
+    });
+  }
+}
+
+for (const [subcommand, tail] of [
+  ["exec", ["-m", "mcp", "exec", "synthetic prompt"]],
+  ["mcp", ["mcp", "list", "--json"]],
+  ["none", []],
+  ["none", ["synthetic prompt", "exec"]],
+]) {
+  test(`logs ${subcommand} for argv ending in ${JSON.stringify(tail)}`, async (t) => {
+    const primary = await fakeHealth(t);
+    const fallback = await fakeHealth(t);
+    const args = [...t3Args(primary.url).slice(0, -3), ...tail];
+    const run = await launch(t, args, fallback.url);
+    assert.deepEqual(run.args, args);
+    assert.deepEqual(primary.requests, [healthRequest]);
+    assertDecision(run.log, "primary", "primary_healthy", subcommand);
+  });
+}
+
+for (const args of [["--version"], ["mcp", "list", "--json"], ["exec", "--", `-c${baseURLKey}="ignored"`]]) {
+  test(`skips probing and logging for argv without config overrides ${JSON.stringify(args)}`, async (t) => {
+    const fallback = await fakeHealth(t);
+    const run = await launch(t, args, fallback.url, { sibling: null });
+    assert.deepEqual(run.args, args);
+    assert.deepEqual(fallback.requests, []);
+    assert.equal(fs.existsSync(run.log), false);
+    if (process.execve) assert.equal((await run.ready).pid, run.child.pid);
+  });
+}
 
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   test(`forwards ${signal} and preserves the child's exit code`, { timeout: 8000 }, async (t) => {
