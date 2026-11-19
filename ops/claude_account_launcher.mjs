@@ -77,7 +77,7 @@ function requestOptions(origin, method, url, headers) {
 }
 
 // GET /healthz must return 200 with {"status":"ok"}; a TCP accept alone proves nothing.
-export function probeHealth(origin, timeoutMs = failoverDefaults.probeTimeoutMs) {
+export function probeHealth(origin, timeoutMs = failoverDefaults.probeTimeoutMs, signal) {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (healthy) => {
@@ -89,7 +89,7 @@ export function probeHealth(origin, timeoutMs = failoverDefaults.probeTimeoutMs)
     };
     const transport = origin.protocol === "https:" ? https : http;
     const probe = transport.request({
-      ...requestOptions(origin, "GET", "/healthz", { accept: "application/json" }), path: "/healthz", agent: false,
+      ...requestOptions(origin, "GET", "/healthz", { accept: "application/json" }), path: "/healthz", agent: false, signal,
     }, (response) => {
       const chunks = [];
       let size = 0;

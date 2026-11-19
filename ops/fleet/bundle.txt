@@ -2,6 +2,7 @@ ops/archive_logs.py
 ops/auth_health.py
 ops/claude_account_launcher.mjs
 ops/cliproxy-codex-token
+ops/codex_fallback_launcher.mjs
 ops/cliproxy_watchdog.py
 ops/com.rever.cliproxy-log-archive.plist
 ops/com.rever.cliproxy-watchdog.plist
