@@ -135,7 +135,7 @@ for target do printf '%s ok\n' "$target"; done
             host = {**HOSTS["will"], "port": service.server_port, "instance_root": directory}
             worker_args = [sys.executable, "-I", "-B", "-"]
             try:
-                program = monitor.remote_program(json.dumps([host, SALT, [], {}]))
+                program = monitor.remote_program(json.dumps([host, SALT, [], {"_usage_salt": SALT}]))
                 worker = subprocess.run(worker_args, input=program, env=env, capture_output=True,
                                         text=True, timeout=8, check=False)
                 self.assertEqual(worker.returncode, 0, worker.stderr)
@@ -153,6 +153,8 @@ for target do printf '%s ok\n' "$target"; done
                                  {"session", "weekly", "weekly-fable"})
                 self.assertEqual(accounts["claude"]["label"], "t3-demo")
                 self.assertEqual(accounts["claude"]["grants"]["resets_left"], 1)
+                self.assertEqual(accounts["claude"]["usage_id"], probe.claude.usage_account_id(SALT, FILES[0]["email"]))
+                self.assertNotIn("usage_summary", accounts["claude"])
                 by_window = {w["window"]: w for w in accounts["kimi"]["windows"]}
                 self.assertEqual(by_window["session"]["used_percent"], 22)
                 self.assertEqual(by_window["monthly-total"]["reset_at"], LATER)
@@ -179,6 +181,15 @@ for target do printf '%s ok\n' "$target"; done
                 self.assertEqual(next(row["status"] for row in duplicate if row["provider"] == "claude"),
                                  "polled-on-m5")
                 self.assertEqual([row["auth_index"] for row in posts].count("claude-index"), 1)
+
+                program = monitor.remote_program(json.dumps([host, SALT, [], {"_skip_claude": True}]))
+                worker = subprocess.run(worker_args, input=program, env=env, capture_output=True,
+                                        text=True, timeout=8, check=True)
+                deferred = json.loads(worker.stdout.splitlines()[-1])["accounts"]
+                self.assertEqual(next(row["status"] for row in deferred if row["provider"] == "claude"),
+                                 "quota-deferred")
+                counts = {key: sum(row["auth_index"] == key for row in posts) for key in requests}
+                self.assertEqual(counts, {"claude-index": 1, "codex-index": 3, "kimi-index": 3, "zai-index": 3})
             finally:
                 service.shutdown()
                 thread.join(timeout=3)
@@ -229,15 +240,22 @@ class MonitorTests(unittest.TestCase):
               patch.object(monitor, "notify_message", return_value=monitor.TEXT_SENT) as notify):
             root = Path(directory)
 
-            for offset, reading, will_state, will_egress in (
+            for tick, (offset, reading, will_state, will_egress) in enumerate((
                     (0, 89, "ok", "ok"), (300, 92, "unreachable", "unknown"),
                     (600, 92, "unreachable", "unknown"), (3600, 100, "ok", "down"),
-                    (3900, 100, "ok", "down"), (7200, 100, "ok", "ok")):
+                    (3900, 100, "ok", "down"), (7200, 100, "ok", "ok"))):
                 reading_now = NOW + timedelta(seconds=offset)
                 current = dict(sample(percent=reading), provider="codex", attempted_at=reading_now.timestamp())
 
-                runs.side_effect = [host_report([current]),
-                                    host_report(state=will_state, egress=will_egress)]
+                def collect(host, salt, visited, due):
+                    self.assertEqual(bool(due.get("_skip_claude")), tick % 3 != 0)
+                    if host["name"] == "m5":
+                        self.assertEqual(visited, set())
+                        return host_report([current])
+                    self.assertEqual(visited, {"test-account"})
+                    return host_report(state=will_state, egress=will_egress)
+
+                runs.side_effect = collect
                 with patch.object(monitor, "now_utc", return_value=reading_now):
                     monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
 
@@ -260,6 +278,53 @@ class MonitorTests(unittest.TestCase):
             latest = monitor.read_json(root / "latest.json", {})
             self.assertEqual(latest["status"], "drift")
             self.assertEqual(latest["health"]["will"]["status"], "ok")
+
+    def test_monitor_and_status_share_attempts_and_local_snapshot(self):
+        claude = probe.claude
+        start = NOW.timestamp()
+        identity = FILES[0]["email"]
+        other = "other-fixture-account"
+        remote = "will-fixture-account"
+        summary = claude.summarize_usage(FIXTURES["claude-index"])
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(monitor, "now_utc", return_value=NOW),
+              patch.object(claude.time, "time", return_value=start),
+              patch.object(claude, "request_usage", return_value=(200, summary)) as read):
+            root = Path(directory)
+            self.assertEqual(claude.status_usage(None, identity, root), (200, summary))
+            read.assert_called_once()
+
+            def collect(hosts, salt, due):
+                usage_tag = claude.usage_account_id(due["_usage_salt"], identity)
+                self.assertEqual(due[usage_tag], start + probe.CLAUDE_INTERVAL)
+                local_tag = claude.usage_account_id(due["_usage_salt"], other)
+                remote_tag = claude.usage_account_id(due["_usage_salt"], remote)
+                local = dict(sample(), usage_id=local_tag, usage_summary=summary)
+                will = dict(sample(), usage_id=remote_tag)
+                return {"m5": host_report([local]), "will": host_report([will])}, start
+
+            with patch.object(monitor, "collect_hosts", side_effect=collect):
+                monitor.collect_with_claude(root, HOSTS, {"salt": SALT}, start)
+            read.reset_mock()
+            self.assertEqual(claude.status_usage(None, other, root), (200, summary))
+            read.assert_not_called()
+            with claude.locked_usage(root) as (usage, _):
+                self.assertEqual(usage["accounts"][claude.usage_account_id(usage["salt"], remote)],
+                                 {"attempted_at": start})
+
+    def test_uncertain_will_worker_keeps_larger_guard(self):
+        start = NOW.timestamp()
+        for dispatch_delay in (10, 120):
+            with (self.subTest(dispatch_delay=dispatch_delay), tempfile.TemporaryDirectory() as directory,
+                  patch.object(monitor, "now_utc", return_value=NOW),
+                  patch.object(monitor, "collect_hosts",
+                               return_value=({"m5": host_report(), "will": dict(host_report(), uncertain=True)},
+                                             start + dispatch_delay))):
+                root = Path(directory)
+                monitor.collect_with_claude(root, HOSTS, {"salt": SALT}, start)
+                with probe.claude.locked_usage(root) as (usage, _):
+                    self.assertEqual(usage["guard_until"], start + probe.CLAUDE_INTERVAL + max(
+                        2 * monitor.HOST_TIMEOUT + 10, dispatch_delay + monitor.HOST_TIMEOUT))
 
     def test_health_hysteresis_and_ssh_only_wording(self):
         state = {}
@@ -362,6 +427,19 @@ class MonitorTests(unittest.TestCase):
             self.assertNotIn("pending_alerts", state)
             self.assertTrue(state["health_alerts"]["will-unreachable"]["active"])
             self.assertTrue(state["quota_alerts"]["test-account"]["weekly"]["above"])
+
+    def test_summary_labels_recent_claude_reading_during_a_deferred_tick(self):
+        state = {}
+        reading = dict(sample(percent=92), captured_at=probe.iso(NOW))
+        monitor.summary_records(state, [reading], NOW)
+        deferred = sample(status="quota-deferred")
+        records = monitor.summary_records(state, [deferred], NOW + timedelta(minutes=5))
+        summary = monitor.daily_message("fixture day", records, {}, {}, [])
+        self.assertIn("weekly 92%", summary)
+        self.assertIn("as of ", summary)
+        self.assertEqual(deferred["windows"], [])
+        records = monitor.summary_records(state, [deferred], NOW + timedelta(minutes=15))
+        self.assertEqual(records, [deferred])
 
     def test_ambiguous_notification_is_not_resent(self):
         with (tempfile.TemporaryDirectory() as directory,

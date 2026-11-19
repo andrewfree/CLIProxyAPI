@@ -17,8 +17,9 @@ import sys
 import tempfile
 
 if __package__:
-    from . import fleet_monitor_probe as probes, fleetctl
+    from . import claude_usage_resets as claude, fleet_monitor_probe as probes, fleetctl
 else:
+    import claude_usage_resets as claude
     import fleet_monitor_probe as probes
     import fleetctl
 
@@ -28,6 +29,8 @@ PARITY_TIMEOUT = 105
 TEXT_TIMEOUT = 12
 PARITY_INTERVAL = 3600
 DAILY_AT = local_time(9)
+CLAUDE_EVERY_TICKS = 3
+CLAUDE_SUMMARY_MAX_AGE = timedelta(minutes=15)
 COOLDOWN_QUIET = timedelta(hours=1)
 TEXT_PORT = 8787
 TEXT_SENT, TEXT_NOT_SENT, TEXT_UNCONFIRMED = 0, 20, 21
@@ -108,6 +111,7 @@ def run_host(host, salt, visited, not_before):
     if not fleetctl.valid_ssh_host(name, destination):
         return fallback
     endpoint = {name: host[name] for name in ("port", "instance_root")}
+    endpoint["claude_status_snapshot"] = destination is None
     payload = json.dumps([endpoint, salt, sorted(visited), not_before], allow_nan=False)
     if destination is None:
         argv = [sys.executable, "-B", str(OPS / "fleet_monitor.py"), "--worker"]
@@ -342,6 +346,24 @@ def outages(hosts):
     return found
 
 
+def summary_records(state, records, now):
+    previous = state.get("claude_summary_readings", {})
+    recent = {}
+    displayed = []
+    for row in records:
+        tag = row["account_id"]
+        if row["provider"] == "claude":
+            if row["status"] == "ok":
+                recent[tag] = {"sampled_at": row["captured_at"], "windows": row["windows"]}
+            elif tag in previous and now - probes.timestamp(previous[tag]["sampled_at"]) < CLAUDE_SUMMARY_MAX_AGE:
+                recent[tag] = previous[tag]
+                if row["status"] == "quota-deferred":
+                    row = dict(row, **recent[tag])
+        displayed.append(row)
+    state["claude_summary_readings"] = recent
+    return displayed
+
+
 def daily_message(day, records, hosts, parity, seen_outages):
     lines = [f"CLIProxy daily summary {day}"]
     for row in sorted(records, key=account_name):
@@ -350,6 +372,8 @@ def daily_message(day, records, hosts, parity, seen_outages):
                             for w in relevant)
         if not windows:
             windows = "weekly/monthly quota unavailable" if row["status"] == "ok" else row["status"]
+        if row.get("sampled_at"):
+            windows += f" (as of {display_time(row['sampled_at'])})"
         lines.append(f"{account_name(row)}: {windows}")
     if not records:
         lines.append("No quota accounts available.")
@@ -363,6 +387,50 @@ def daily_message(day, records, hosts, parity, seen_outages):
     return "\n".join(lines)
 
 
+def collect_hosts(hosts, salt, not_before):
+    mac = run_host(hosts["m5"], salt, set(), not_before)
+    visited = {row["account_id"] for row in mac["accounts"] if row["attempted_at"] is not None}
+    if mac.get("uncertain") and not not_before.get("_skip_claude"):
+        not_before["_all"] = max(not_before["_all"], now_utc().timestamp() + probes.CLAUDE_INTERVAL)
+    will_dispatched = now_utc().timestamp()
+    will = run_host(hosts["will"], salt, visited, not_before)
+    return {"m5": mac, "will": will}, will_dispatched
+
+
+def collect_with_claude(root, hosts, state, tick_start):
+    interval = probes.CLAUDE_INTERVAL
+    with claude.locked_usage(root) as (usage, save):
+        now = now_utc().timestamp()
+        guard = max(usage.get("guard_until", 0), state.get("claude_guard_until", 0))
+        # Reserve before dispatch in case the monitor exits without worker results.
+        reserve = max(guard, max(tick_start, now) + 2 * HOST_TIMEOUT + 10 + interval)
+        usage["guard_until"] = reserve
+        save()
+        accounts = usage["accounts"]
+        not_before = {tag: attempt + interval for tag, attempt in state.get("claude_attempts", {}).items()}
+        not_before.update({tag: entry["attempted_at"] + interval for tag, entry in accounts.items()})
+        not_before.update(_all=guard, _usage_salt=usage["salt"])
+        observed, will_dispatched = collect_hosts(hosts, state["salt"], not_before)
+        guard = not_before["_all"]
+        if observed["will"].get("uncertain"):
+            guard = max(guard, reserve, will_dispatched + HOST_TIMEOUT + interval)
+        usage["guard_until"] = guard if guard > now else 0
+
+        for report in observed.values():
+            for row in report["accounts"]:
+                if "usage_id" in row:
+                    entry = {"attempted_at": row["attempted_at"]}
+                    if "usage_summary" in row:
+                        entry["summary"] = row["usage_summary"]
+                    accounts[row["usage_id"]] = entry
+        usage["accounts"] = {tag: entry for tag, entry in accounts.items()
+                             if entry["attempted_at"] + interval > now}
+        save()
+    state.pop("claude_attempts", None)
+    state.pop("claude_guard_until", None)
+    return observed
+
+
 def tick(root, hosts, runtime, command, no_notify):
     now = now_utc()
     captured_at = probes.iso(now)
@@ -373,38 +441,18 @@ def tick(root, hosts, runtime, command, no_notify):
     checked = probes.timestamp(latest.get("checked_at"))
     parity_due = checked is None or (now - checked).total_seconds() >= PARITY_INTERVAL
 
-    # If the last collector died after dispatching a request, reserve its entire
-    # possible request window before allowing another Claude usage read.
-    guard = state.get("claude_guard_until", 0)
-    not_before = {tag: attempted + probes.CLAUDE_INTERVAL
-                  for tag, attempted in state.get("claude_attempts", {}).items()}
-    state["claude_guard_until"] = max(guard, now.timestamp() + 2 * HOST_TIMEOUT + 10 + probes.CLAUDE_INTERVAL)
-    write_json(state_file, state)
-
     hosts["m5"]["instance_root"] = str(root)
+    claude_tick = state.get("claude_tick", 0)
     with ThreadPoolExecutor(max_workers=1) as pool:
         parity = pool.submit(run_parity) if parity_due else None
-        # A guard from a killed worker applies even to accounts we could not inventory.
-        not_before = dict(not_before, _all=guard)
-        mac = run_host(hosts["m5"], state["salt"], set(), not_before)
-        visited = {row["account_id"] for row in mac["accounts"] if row["attempted_at"] is not None}
-        if mac.get("uncertain"):
-            not_before["_all"] = max(guard, now_utc().timestamp() + probes.CLAUDE_INTERVAL)
-        will = run_host(hosts["will"], state["salt"], visited, not_before)
-        observed = {"m5": mac, "will": will}
-    state["claude_guard_until"] = not_before["_all"] if not will.get("uncertain") else max(
-        not_before["_all"], now_utc().timestamp() + probes.CLAUDE_INTERVAL)
-    if state["claude_guard_until"] <= now.timestamp():
-        state["claude_guard_until"] = 0
+        if claude_tick == 0:
+            observed = collect_with_claude(root, hosts, state, now.timestamp())
+        else:
+            observed, _ = collect_hosts(hosts, state["salt"], {"_skip_claude": True})
+    state["claude_tick"] = (claude_tick + 1) % CLAUDE_EVERY_TICKS
 
-    attempts = {tag: attempted for tag, attempted in state.get("claude_attempts", {}).items()
-                if attempted > now.timestamp() - probes.CLAUDE_INTERVAL}
-    for report in observed.values():
-        for row in report["accounts"]:
-            if row["provider"] == "claude" and row["attempted_at"] is not None:
-                attempts[row["account_id"]] = row["attempted_at"]
-    state["claude_attempts"] = attempts
     records, state["inventory"] = quota_records(observed, state.get("inventory", {}), captured_at)
+    daily_records = summary_records(state, records, now)
     append_history(runtime / f"quota-history-{now:%Y-%m}.jsonl", records)
 
     health = {name: host_health(report) for name, report in observed.items()}
@@ -428,7 +476,7 @@ def tick(root, hosts, runtime, command, no_notify):
         day = local.date().isoformat()
         summary_due = local.time() >= DAILY_AT and day > state.get("summary_day", "")
         if summary_due:
-            messages.append(daily_message(day, records, health, latest, seen_outages))
+            messages.append(daily_message(day, daily_records, health, latest, seen_outages))
             candidate["summary_day"] = day
         if not messages:
             state = candidate

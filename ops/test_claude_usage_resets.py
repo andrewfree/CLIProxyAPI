@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import io
 import json
@@ -58,6 +59,61 @@ class FakeProxy(resets.Proxy):
 
     def posts(self):
         return [c for c in self.calls if c[0] == "POST"]
+
+
+class StatusUsageTest(unittest.TestCase):
+    def test_status_preserves_output_and_reuses_monitor_snapshot(self):
+        proxy = FakeProxy([])
+        proxy.claude_accounts = lambda: [{"email": EMAIL}]
+        summary = resets.summarize_usage(usage_body())
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with resets.locked_usage(root) as (state, save):
+                tag = resets.usage_account_id(state["salt"], EMAIL.upper())
+                state["accounts"][tag] = {"attempted_at": 1000, "summary": summary}
+                save()
+            args = argparse.Namespace(root=root, account=None, json=True)
+            with (mock.patch.object(resets.time, "time", return_value=1299),
+                  contextlib.redirect_stdout(io.StringIO()) as out):
+                self.assertEqual(resets.cmd_status(proxy, args), 0)
+            self.assertEqual(json.loads(out.getvalue())["accounts"], [{"account": EMAIL, "tier": None, **summary}])
+            self.assertEqual([call[1] for call in proxy.calls], [resets.PROFILE_URL])
+            cache = root / "ops/runtime/claude-resets/usage.json"
+            self.assertNotIn(EMAIL, cache.read_text())
+            self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+
+    def test_missing_snapshot_waits_only_for_the_requested_account(self):
+        proxy = FakeProxy([(200, usage_body(weekly=91)), (200, usage_body(weekly=60))])
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with resets.locked_usage(root) as (state, save):
+                tag = resets.usage_account_id(state["salt"], EMAIL)
+                state["accounts"][tag] = {"attempted_at": 1000}
+                save()
+            with (mock.patch.object(resets.time, "time", side_effect=[1250, 1250, 1300]),
+                  mock.patch.object(resets.time, "sleep") as sleep):
+                self.assertEqual(resets.status_usage(proxy, "other-fixture-account", root)[1]["weekly_percent"], 91)
+                sleep.assert_not_called()
+                self.assertEqual(resets.status_usage(proxy, EMAIL, root)[1]["weekly_percent"], 60)
+                sleep.assert_called_once_with(50)
+            with resets.locked_usage(root) as (state, _):
+                self.assertEqual(state["accounts"][tag]["attempted_at"], 1300)
+                self.assertEqual(state["accounts"][tag]["summary"]["weekly_percent"], 60)
+
+    def test_status_retry_waits_300_seconds_after_http_429(self):
+        proxy = FakeProxy([(429, {}), (200, usage_body())])
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with (mock.patch.object(resets.time, "time", side_effect=[1000, 1060, 1300]),
+                  mock.patch.object(resets.time, "sleep") as wait_for_slot,
+                  contextlib.redirect_stderr(io.StringIO())):
+                short_backoff = mock.Mock()
+                result = resets.fetch_usage(proxy, EMAIL, sleep=short_backoff,
+                                            read=lambda client, email: resets.status_usage(client, email, root))
+            self.assertEqual(result["weekly_percent"], 77)
+            self.assertEqual([call[1] for call in proxy.calls], [resets.USAGE_URL, resets.USAGE_URL])
+            short_backoff.assert_called_once_with(60)
+            wait_for_slot.assert_called_once_with(240)
 
 
 class SummarizeUsageTest(unittest.TestCase):

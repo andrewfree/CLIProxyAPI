@@ -15,13 +15,19 @@ See ops/CLAUDE_USAGE_RESETS.md.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import datetime
+import fcntl
+import hmac
 import json
 import math
+import os
 import pathlib
 import re
+import secrets
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -44,6 +50,7 @@ OAUTH_HEADERS = {
 GRANT_ID_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+USAGE_INTERVAL = 300
 
 
 class ResetError(RuntimeError):
@@ -140,14 +147,72 @@ def limit_percent(summary: dict[str, Any], limit: str) -> int | None:
     return None
 
 
+def usage_account_id(salt: str, identity: str) -> str:
+    return hmac.digest(bytes.fromhex(salt), identity.strip().lower().encode(), "sha256").hex()
+
+
+@contextmanager
+def locked_usage(root: pathlib.Path):
+    """Share attempts and successful status snapshots with the Mac fleet monitor."""
+    directory = root / "ops/runtime/claude-resets"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cache = directory / "usage.json"
+
+    def save():
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as out:
+            staging = pathlib.Path(out.name)
+            try:
+                json.dump(state, out, allow_nan=False)
+                out.flush()
+                os.fsync(out.fileno())
+                staging.replace(cache)
+            finally:
+                staging.unlink(missing_ok=True)
+
+    with os.fdopen(os.open(directory / "usage.lock", os.O_CREAT | os.O_RDWR, 0o600), "r+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            state = json.loads(cache.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            state = {"salt": secrets.token_hex(32), "accounts": {}}
+        yield state, save
+
+
+def request_usage(proxy: Proxy, email: str) -> tuple[int, dict[str, Any] | None]:
+    status, body = proxy.upstream(email, "GET", USAGE_URL)
+    return status, summarize_usage(body) if status == 200 else None
+
+
+def status_usage(proxy: Proxy, email: str, root: pathlib.Path) -> tuple[int, dict[str, Any] | None]:
+    while True:
+        with locked_usage(root) as (state, save):
+            tag = usage_account_id(state["salt"], email)
+            entry = state["accounts"].get(tag, {})
+            now = time.time()
+            due = entry["attempted_at"] + USAGE_INTERVAL if entry else 0
+            if now < due and "summary" in entry:
+                return 200, entry["summary"]
+            delay = max(due, state.get("guard_until", 0)) - now
+            if delay <= 0:
+                state["accounts"][tag] = {"attempted_at": now}
+                save()
+                status, summary = request_usage(proxy, email)
+                if summary is not None:
+                    state["accounts"][tag]["summary"] = summary
+                    save()
+                return status, summary
+        time.sleep(delay)
+
+
 def fetch_usage(proxy: Proxy, email: str, tries: int = 6, wait: float = 60,
-                sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+                sleep: Callable[[float], None] = time.sleep,
+                read: Callable = request_usage) -> dict[str, Any]:
     """Read usage, backing off on 429/5xx. The usage endpoint rate-limits frequent polls."""
     status = None
     for attempt in range(1, tries + 1):
-        status, body = proxy.upstream(email, "GET", USAGE_URL)
+        status, summary = read(proxy, email)
         if status == 200:
-            return summarize_usage(body)
+            return summary
         if status not in RETRYABLE_STATUS or attempt == tries:
             break
         print(f"{now_iso()} usage HTTP {status}; retry {attempt}/{tries - 1} in {wait:g}s", file=sys.stderr, flush=True)
@@ -268,7 +333,8 @@ def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
             continue
         status, profile = proxy.upstream(email, "GET", PROFILE_URL)
         tier = (profile.get("organization") or {}).get("rate_limit_tier") if status == 200 else None
-        summary = fetch_usage(proxy, email)
+        summary = fetch_usage(
+            proxy, email, read=lambda client, identity: status_usage(client, identity, args.root))
         report.append({"account": email, "tier": tier, **summary})
         if not args.json:
             print(format_status(email, tier, summary))

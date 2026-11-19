@@ -31,7 +31,7 @@ QUOTA_HOSTS = {
 }
 CREDENTIALS = "/v8/management/credentials"
 COMPATIBILITY = "/v8/management/config/api-keys/openai-compatibility"
-CLAUDE_INTERVAL = 300
+CLAUDE_INTERVAL = claude.USAGE_INTERVAL
 WORKER_POLLING = "quota-polling"
 CONTAINER = "cli-proxy-api"
 HTTP_TIMEOUT = 8
@@ -88,8 +88,7 @@ def quota_window(name, period, percent, reset=None):
             "reset_at": iso(timestamp(reset)), "capped": used >= 100}
 
 
-def claude_windows(body):
-    summary = claude.summarize_usage(body)
+def claude_windows(body, summary):
     windows = [quota_window("weekly", "weekly", summary["weekly_percent"], summary["weekly_resets_at"])]
     for name, entry in summary["scoped"].items():
         scope = name.lower()
@@ -224,7 +223,7 @@ def quota_request(item):
     return {"auth_index": item["index"], "method": "GET", "url": url, "header": header}
 
 
-def fetch_windows(api, item, now):
+def fetch_windows(api, item, now, save_summary=None):
     result = obj(api.quota(quota_request(item)))
     status = result.get("status_code")
     if not isinstance(status, int) or not 200 <= status < 300:
@@ -236,7 +235,10 @@ def fetch_windows(api, item, now):
     provider = item["provider"]
     grants = None
     if provider == "claude":
-        windows, grants = claude_windows(body)
+        summary = claude.summarize_usage(body)
+        windows, grants = claude_windows(body, summary)
+        if save_summary is not None:
+            save_summary(summary)
     elif provider == "codex":
         windows = codex_windows(body, now)
     elif provider in {"kimi", "kimi-ai"}:
@@ -283,13 +285,15 @@ def account_id(salt, provider, identity):
     return hmac.new(bytes.fromhex(salt), (provider + "\0" + identity).encode(), "sha256").hexdigest()[:16]
 
 
-def quota_accounts(files, groups, salt):
+def quota_accounts(files, groups, salt, usage_salt=None):
     accounts = {}
     by_index = {item.get("auth_index"): item for item in files if isinstance(item.get("auth_index"), str)}
 
     def add(provider, index, identity, item, **details):
         tag = account_id(salt, provider, identity)
         entry = {"provider": provider, "account_id": tag, "index": index, "item": item, **details}
+        if provider == "claude" and usage_salt is not None:
+            entry["usage_id"] = claude.usage_account_id(usage_salt, identity)
         if tag not in accounts or accounts[tag]["item"].get("disabled") is True:
             accounts[tag] = entry
 
@@ -364,7 +368,7 @@ def local_cooldowns(item, now):
             for (scope, reason), retry in sorted(result.items())]
 
 
-def collect_account(api, account, now, visited, not_before, egress):
+def collect_account(api, account, now, visited, not_before, egress, status_snapshot=False):
     tag = account["account_id"]
     item = account["item"]
     provider = account["provider"]
@@ -378,10 +382,13 @@ def collect_account(api, account, now, visited, not_before, egress):
         result["status"] = "sign-in-required"
     elif tag in visited:
         result["status"] = "polled-on-m5"
+    elif provider == "claude" and not_before.get("_skip_claude"):
+        result["status"] = "quota-deferred"
     elif egress.get(target) == "down":
         result["status"] = "egress-down"
     else:
-        due = max(not_before.get(tag, 0), not_before.get("_all", 0))
+        usage_id = account.get("usage_id")
+        due = max(not_before.get(tag, 0), not_before.get(usage_id, 0), not_before.get("_all", 0))
         delay = max(0, due - time.time()) if provider == "claude" else 0
         if delay > 15:
             result["status"] = "quota-deferred"
@@ -389,8 +396,15 @@ def collect_account(api, account, now, visited, not_before, egress):
         if delay:
             time.sleep(delay)
         result["attempted_at"] = time.time()
+        if usage_id is not None:
+            result["usage_id"] = usage_id
+
+        def save_summary(summary):
+            result["usage_summary"] = summary
+
         try:
-            result["status"], result["windows"], result["grants"] = fetch_windows(api, account, now)
+            result["status"], result["windows"], result["grants"] = fetch_windows(
+                api, account, now, save_summary if status_snapshot and usage_id is not None else None)
         except Exception:
             result["status"] = "quota-unavailable"
     return result
@@ -459,14 +473,15 @@ def collect_host(host, salt, visited, not_before, progress=lambda report: None):
                 result["quota_errors"].append(field)
         except Exception:
             result["quota_errors"].append(field)
-    accounts = quota_accounts(files, groups, salt)
+    accounts = quota_accounts(files, groups, salt, not_before.get("_usage_salt"))
     additional = {account.get("zai_host") or QUOTA_HOSTS[account["provider"]]
                   for account in accounts.values()} - targets.keys()
     if additional:
         targets.update(probe_egress(sorted(additional)))
     progress(dict(result, quota_errors=["inventory-incomplete"], stage=WORKER_POLLING))
     with ThreadPoolExecutor(max_workers=6) as pool:
-        pending = [pool.submit(collect_account, api, account, now, visited, not_before, targets)
+        pending = [pool.submit(collect_account, api, account, now, visited, not_before, targets,
+                               host.get("claude_status_snapshot", False))
                    for account in accounts.values()]
         result["accounts"] = [job.result() for job in pending]
     return result
