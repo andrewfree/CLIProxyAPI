@@ -37,8 +37,9 @@ Rollback: the first-cutover rollback in FLEET.md, with `backup` set to the priva
 - Drill: [codex_cli_drill.mjs](codex_cli_drill.mjs) reads the profile's launch arguments without
   printing them and passes them on stdin to [codex_cli_drill.py](codex_cli_drill.py). (As run, it
   passed them as an argument; the committed copy uses stdin and reports a timeout or launch error
-  only by its type, so no message from the drill echoes them. They are still on the wrapper's own
-  command line while it runs.) The Python half swaps only the
+  only by its type, so no message from the drill echoes them. They are still on the wrapper's and
+  Codex's command lines while the drill runs; on a timeout the drill kills that whole process
+  group.) The Python half swaps only the
   `base_url` value for a closed loopback port and runs one `codex exec` through the shipped
   wrapper with the real Codex binary. Result: exit 0, reply marker present, decision
   `exec`, `fallback`, `fallback_healthy`. This replaced the runbook's temporary T3 profile copy,
@@ -89,8 +90,9 @@ show `rc=0`, then run the install block in FLEET.md again.
 
 - **Default model on `codex_cliproxy`.** A T3 session started at 18:02 with no model chosen ran
   `gpt-6.2-sol`. One started at 18:28, after Will gained the `camoff-astra/` models, ran
-  `camoff-astra/gpt-6.2-sol`, which routes only to the one prefixed credential. The Mac has shown
-  the same pattern for `codex_cliproxy_mac`; unit 0 found most Mac Codex rows used the prefix.
+  `camoff-astra/gpt-6.2-sol`, which routes only to the one prefixed credential. The Mac has likely shown
+  the same pattern for `codex_cliproxy_mac`: the removed `P6/camoff-astra` exception recorded that
+  unit 0 found 5,985 of 8,765 Mac Codex request rows used the prefix.
   Whether to keep the prefix on both hosts is Andrew's decision. Undo on Will with the same PATCH
   and `"prefix": ""`.
 - **Wrapper processes killed by a test cleanup.** At about 18:28 a `pkill -f` meant for a stub in

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Closed-port drill: run the shipped Codex wrapper with codex_cliproxy's real launch args,
 primary replaced by a closed loopback port. Prints only the reply marker and the decision."""
-import json, os, shlex, socket, subprocess, sys, tempfile
+import json, os, shlex, signal, socket, subprocess, sys, tempfile
 # The launch arguments arrive on stdin and are never printed by this script. They are still on the
-# wrapper's and Codex's command lines while the drill runs.
+# wrapper's and Codex's command lines while the drill runs; a timeout kills that process group.
 args_text, drill_dir = sys.stdin.read(), sys.argv[1]
 argv = shlex.split(args_text)
 key = "model_providers.cliproxy.base_url="
@@ -19,11 +19,21 @@ cmd = [os.path.expanduser("~/cliproxy-live/ops/codex_fallback_launcher.mjs"), *a
        "Reply with exactly the text CODEX_DRILL_OK and nothing else."]
 with tempfile.TemporaryDirectory() as work:
     try:
-        r = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=240, stdin=subprocess.DEVNULL)
-    except (subprocess.TimeoutExpired, OSError) as error:
-        # These exceptions carry the full command line, so report only their type.
+        # Its own session, so a timeout can stop the wrapper and the Codex child it starts.
+        proc = subprocess.Popen(cmd, cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, text=True, start_new_session=True)
+    except OSError as error:
+        print("drill did not start:", type(error).__name__)
+        sys.exit(1)
+    try:
+        out, err = proc.communicate(timeout=240)
+    except subprocess.TimeoutExpired as error:
+        # The exception carries the full command line, so report only its type.
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
         print("drill did not finish:", type(error).__name__)
         sys.exit(1)
+    r = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 print("exit", r.returncode, "| marker in reply:", "CODEX_DRILL_OK" in r.stdout)
 if r.returncode:
     print("stderr tail:", r.stderr[-400:].replace("\n", " "))

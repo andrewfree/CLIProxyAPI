@@ -39,7 +39,8 @@ secrets and logs.
    claude_cliproxy_mac (shared pool) -> launcher, pool mode ------------> Mac                        Z.ai Coding Plan
    3 named Claude profiles -----------> launcher, account prefix -------> Mac                        Cursor plugin
                                                                           Docker Desktop, arm64      NVIDIA
-   codex_cliproxy --------------------- (no launcher, one base_url) ----> Will  (tailnet name)
+   codex_cliproxy --------------------> codex_fallback_launcher.mjs ---> Will  (tailnet name);
+                                        picks a host at session start      Mac if Will fails at start
    codex_cliproxy_mac, codex_kimi_mac - (no launcher, one base_url) ----> Mac   127.0.0.1:8317
 
  Will, T3
@@ -48,7 +49,8 @@ secrets and logs.
  M1, T3
    codex_cliproxy --------------------- (no launcher) ------------------> Will  (tailnet address)
 
- Only the first arrow pair is automatic. Every other profile has one fixed host.
+ claude_cliproxy fails over per request and codex_cliproxy per session; every other profile has
+ one fixed host. On the Mac both launchers run from the ops bundle in ~/cliproxy-live/ops.
  The two proxies share no runtime state and neither is in the other's request path.
  CLIProxyBar (the Mac menu-bar quota app, not shown) still reaches Will by address (section 4).
 ```
@@ -395,8 +397,8 @@ and the check was a resolver comparison. With the raw address, a foreign network
 100.x range could receive the traffic in clear
 ([FLEET.md](FLEET.md#running-fleet), design question 3). Since the November 18 parity cleanup the
 Mac's `codex_cliproxy` uses the name too, for the same reason: its
-`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. With the optional
-Codex launcher enabled, a failed startup lookup can send a new Codex session to the Mac
+`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. With the Codex
+launcher enabled since November 18, a failed startup lookup sends a new Codex session to the Mac
 (section 4). M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw
 address.
 
