@@ -414,7 +414,11 @@ lists the monitor, its probe helper, the chart, the plist,
 bootstrap the LaunchAgent only after Andrew approves the live change. Its
 first run can text Andrew. The job uses the existing Text Me LaunchAgent's
 default recipient. The same block reinstalls or resumes the job; it boots out
-a loaded copy first.
+a loaded copy first. The job runs Apple's `/usr/bin/python3` (Python 3.9):
+under launchd, macOS Local Network privacy refuses SSH to Will from Homebrew's
+`python3` with `No route to host`, while Apple's interpreter is allowed. Keep the
+monitor's modules compatible with Python 3.9; `test_fleet_monitor.py` checks the
+syntax. Little Snitch on the Mac must also allow `ssh` started by launchd jobs.
 
 ```sh
 bundle="$HOME/cliproxy-live/ops"
@@ -434,7 +438,7 @@ rows and Text Me status match what is available. To collect manually with
 notifications disabled, pause the LaunchAgent first and run:
 
 ```sh
-CLIPROXY_ROOT="$HOME/cliproxy" /opt/homebrew/bin/python3 -B "$HOME/cliproxy-live/ops/fleet_monitor.py" --no-notify
+CLIPROXY_ROOT="$HOME/cliproxy" /usr/bin/python3 -B "$HOME/cliproxy-live/ops/fleet_monitor.py" --no-notify
 ```
 
 Pause with `launchctl bootout "gui/$(id -u)/com.rever.cliproxy-fleet-monitor"`.

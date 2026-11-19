@@ -648,7 +648,9 @@ with bounded TCP connects from inside their containers. The sockets send no
 TLS, HTTP or credentials. A healthy proxy with a failed upstream dial is
 `egress-down`. A failed proxy health check is `unreachable`. An incomplete
 egress check is `unknown`. Will's checks use noninteractive SSH and run
-against its local proxy and container. Hourly parity retains its own result,
+against its local proxy and container. The job runs Apple's `/usr/bin/python3`, because macOS
+Local Network privacy blocks SSH to Will from Homebrew's `python3` when launchd starts it.
+Hourly parity retains its own result,
 even when the accompanying health report shows an outage. This schedule
 makes no inference requests and does not change routing or configuration.
 

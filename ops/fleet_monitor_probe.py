@@ -60,7 +60,7 @@ def number(value):
 def timestamp(value):
     try:
         if isinstance(value, str) and "T" in value:
-            result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            result = fleetctl.parse_time(value)
             if result.tzinfo is None:
                 return None
         else:

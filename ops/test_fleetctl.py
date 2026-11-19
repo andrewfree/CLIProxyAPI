@@ -260,6 +260,18 @@ class FleetCTLTest(unittest.TestCase):
                     result, _, _ = fleet.config_snapshot(config, self.paths, NONCE)
                     self.assertNotEqual(original["shared"], result["shared"])
 
+    def test_go_nanosecond_times_parse_on_every_supported_python(self):
+        # The proxy emits RFC3339Nano with trailing zeros trimmed; the monitor runs on Python 3.9.
+        parsed = fleet.parse_time("2026-11-14T03:09:02.013444964Z")
+        self.assertEqual(parsed, datetime(2026, 11, 14, 3, 9, 2, 13444, tzinfo=timezone.utc))
+        self.assertEqual(fleet.parse_time("2026-11-14T03:09:02.5Z").microsecond, 500000)
+        self.assertEqual(fleet.parse_time("2026-11-14T03:09:02Z").tzinfo, timezone.utc)
+        self.assertEqual(fleet.parse_time("2026-11-14T03:09:02.123456789-08:00").utcoffset().total_seconds(), -28800)
+        item = dict(HEALTHY, unavailable=True, status="error", status_message="quota exhausted",
+                    next_retry_after="2099-01-01T00:00:00.123456789Z",
+                    cooldowns=[{"reason": "credential_quota", "retry_at": "2099-01-01T00:00:00.123456789Z"}])
+        self.assertEqual(fleet.credential_health(item, datetime(2026, 11, 18, tzinfo=timezone.utc)), "cooling")
+
     def test_registered_prefix_modes_and_ambiguous_models(self):
         self.assertEqual(fleet.registered_prefix({"m", "t3-route/m"}, False), "t3-route")
         self.assertEqual(fleet.registered_prefix({"t3-route/m", "t3-route/n"}, True), "t3-route")
