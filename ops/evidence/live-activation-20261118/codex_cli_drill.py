@@ -29,7 +29,10 @@ with tempfile.TemporaryDirectory() as work:
         out, err = proc.communicate(timeout=240)
     except subprocess.TimeoutExpired as error:
         # The exception carries the full command line, so report only its type.
-        os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass  # The group already exited; its traceback would print the command line.
         proc.communicate()
         print("drill did not finish:", type(error).__name__)
         sys.exit(1)
