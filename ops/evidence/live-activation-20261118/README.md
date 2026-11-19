@@ -101,6 +101,17 @@ Will alert. Z.ai quota read `quota-unavailable` with no error; that needs its ow
 Resume: allow SSH from launchd jobs to Will, rerun `ssh_probe_launchd.sh <file>` until both lines
 show `rc=0`, then run the install block in FLEET.md again.
 
+Follow-up at 19:03: after Andrew added a Little Snitch rule, the `/bin/sh` probe reached
+`will.local` (`rc=0`; the bare Tailscale address then failed only on key auth because
+`~/.ssh/config` has no entry for it). The resumed monitor still reported Will `unreachable`, and
+because its 17:56 sample counted as the first of two, it opened the Will alert and sent a false
+text. It was paused again at 19:03:30. A launchd job running `ssh` from Homebrew's
+`/opt/homebrew/bin/python3` failed with `No route to host`, the Local Network privacy signature
+from the November 7 Messenger Access case; a `/bin/sh` parent did not help, and Apple's
+`/usr/bin/python3` connected (`rc=0`). The monitor plist now uses `/usr/bin/python3`.
+`ssh_probe_launchd.sh <file>` now defaults to that chain ([ssh-probe.py](ssh-probe.py) under Apple's
+`python3`); pass `sh` as the second argument for the original `/bin/sh` probe.
+
 ## Side effects found afterwards
 
 - **Default model on `codex_cliproxy`.** A T3 session started at 18:02 with no model chosen ran

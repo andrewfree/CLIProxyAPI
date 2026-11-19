@@ -1,14 +1,16 @@
 #!/bin/zsh
-# As run: bootstrap a one-shot LaunchAgent that runs ssh-probe.sh, wait for its result, remove it.
-# Shows whether launchd jobs can reach Will over SSH (the monitor's path).
+# Bootstrap a one-shot LaunchAgent that probes SSH to Will, wait for its result, remove it.
+# Usage: ssh_probe_launchd.sh <out-file> [sh|python]. `python` (the default for the monitor) runs
+# ssh-probe.py with Apple's /usr/bin/python3, the monitor's own chain; `sh` runs ssh-probe.sh.
 set -u
-dir=${0:A:h}; out="$1"
+dir=${0:A:h}; out="$1"; mode="${2:-python}"
+if [ "$mode" = sh ]; then program=(/bin/sh "$dir/ssh-probe.sh" "$out"); else program=(/usr/bin/python3 -B "$dir/ssh-probe.py" "$out"); fi
 plist="$HOME/Library/LaunchAgents/com.rever.ssh-probe-tmp.plist"
 rm -f "$out"
-/usr/bin/python3 - "$plist" "$dir/ssh-probe.sh" "$out" <<'PY'
+/usr/bin/python3 - "$plist" "${program[@]}" <<'PY'
 import plistlib, sys
-plist, script, out = sys.argv[1:]
-plistlib.dump({"Label": "com.rever.ssh-probe-tmp", "ProgramArguments": ["/bin/sh", script, out], "RunAtLoad": True,
+plist, *program = sys.argv[1:]
+plistlib.dump({"Label": "com.rever.ssh-probe-tmp", "ProgramArguments": program, "RunAtLoad": True,
                "ProcessType": "Background",
                "EnvironmentVariables": {"PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"}},
               open(plist, "wb"))
