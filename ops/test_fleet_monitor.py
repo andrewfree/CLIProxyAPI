@@ -405,7 +405,15 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(alerts(clean), [])
         proxy_down = host_report(state="unreachable")
         self.assertEqual(alerts(proxy_down), [])
-        self.assertIn("Select the _mac profile", alerts(proxy_down)[0])
+        opening = alerts(proxy_down)[0]
+        self.assertIn("New codex_cliproxy sessions start on the Mac", opening)
+        self.assertNotIn("Select the _mac profile", opening)
+        self.assertEqual(alerts(clean), [])
+        self.assertEqual(alerts(clean), ["Will health checks recovered."])
+        # Egress loss leaves /healthz green, which the Codex wrapper cannot see.
+        egress_down = host_report(egress="down")
+        self.assertEqual(alerts(egress_down), [])
+        self.assertIn("Select the _mac profile for Codex-family", alerts(egress_down)[0])
 
     def test_short_cooldowns_share_one_episode_until_an_hour_quiet(self):
         state = {}
@@ -496,9 +504,9 @@ class MonitorTests(unittest.TestCase):
 
             messages = [call.args[0] for call in notify.call_args_list]
             self.assertEqual(len(messages), 3)
-            self.assertNotIn("Select the _mac profile", messages[0])
+            self.assertNotIn("New codex_cliproxy sessions start on the Mac", messages[0])
             for message in messages[1:]:
-                for text in ("Select the _mac profile", "92% used", "daily summary"):
+                for text in ("New codex_cliproxy sessions start on the Mac", "92% used", "daily summary"):
                     self.assertIn(text, message)
             self.assertEqual(state["last_notification"]["status"], "sent")
             self.assertNotIn("pending_alerts", state)

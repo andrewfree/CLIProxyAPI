@@ -261,9 +261,11 @@ def status_alerts(state, hosts, parity):
     egress = will["egress"].values()
     affected = ", ".join(name for name, value in sorted(will["egress"].items()) if value == "down")
     egress_down = (True if "down" in egress else False if egress and all(s == "ok" for s in egress) else None)
+    # The Codex wrapper checks only /healthz at session start, so it cannot see egress loss.
     fallback = "Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults."
     will_opening = ("Will is not reachable over SSH from the Mac." if will.get("ssh_unreachable")
-                    else f"Will proxy unreachable. {fallback}")
+                    else "Will proxy unreachable. New codex_cliproxy sessions start on the Mac, "
+                         "and claude_cliproxy fails over per request.")
     issues = [
         ("will-unreachable", unreachable(will), will_opening, "Will health checks recovered."),
         ("will-egress", egress_down if will["reachability"] == "ok" else None,
