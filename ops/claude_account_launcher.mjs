@@ -665,7 +665,12 @@ async function main() {
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => stop(signal));
 }
 
-if (launcherPath && fs.existsSync(launcherPath)
-    && fs.realpathSync(launcherSource) === fs.realpathSync(launcherPath)) {
+// The failover drill can delegate startup by setting argv[1] before importing the launcher.
+const isMain = import.meta.main || Boolean(launcherPath && fs.existsSync(launcherPath)
+    && fs.realpathSync(launcherSource) === fs.realpathSync(launcherPath));
+if (isMain) {
   main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+} else if (launcherPath && path.basename(launcherPath) === path.basename(launcherSource)) {
+  console.error("Claude account launcher was loaded but did not run as the main script.");
+  process.exitCode = 1;
 }

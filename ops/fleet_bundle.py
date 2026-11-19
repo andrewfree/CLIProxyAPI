@@ -18,6 +18,8 @@ import tempfile
 MANIFEST = "bundle-manifest.json"
 CURRENT = ".fleet-current"
 RELEASES = ".fleet-releases"
+BUNDLE_MARKER = "ops/fleet_bundle.py"
+LAUNCHER = "ops/claude_account_launcher.mjs"
 JOBS = {
     "com.rever.cliproxy-watchdog": "cliproxy_watchdog.py",
     "com.rever.cliproxy-log-archive": "archive_logs.py",
@@ -86,7 +88,39 @@ def export_bundle(repo, revision, *, require_clean=False):
         data, mode = blob(name)
         manifest["files"][name] = file_record(data, mode)
         contents[name] = base64.b64encode(data).decode()
+    require_bundle_launcher(names)
     return manifest, contents
+
+
+def require_bundle_launcher(names):
+    if BUNDLE_MARKER not in names or LAUNCHER not in names:
+        raise BundleError("Commit does not support the ops bundle launcher. Use the checkout paths for pre-bundle commits.")
+
+
+def smoke_launcher(stage):
+    # Reproduce the public file alias and pointer without moving the active pointer.
+    node = shutil.which("node")
+    if not node:
+        raise BundleError("Node.js is required on the destination to check the bundle launcher")
+    aliases = stage / "smoke"
+    aliases.mkdir()
+    (aliases / CURRENT).symlink_to("../ops")
+    name = Path(LAUNCHER).name
+    alias = aliases / name
+    alias.symlink_to(f"{CURRENT}/{name}")
+    marker = "bundle-launcher-smoke"
+    try:
+        result = subprocess.run(
+            [node, str(alias), marker], cwd=aliases, capture_output=True, timeout=10,
+            env={"CLIPROXY_CLAUDE_BINARY": "/bin/echo", "CLIPROXY_CLAUDE_ROUTE": "shared-pool",
+                 "CLIPROXY_BASE_URL": "http://127.0.0.1:1"},
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise BundleError("Staged bundle launcher smoke test could not run") from None
+    if result.returncode != 0 or result.stdout.strip() != marker.encode():
+        raise BundleError("Staged bundle launcher did not run the fake Claude binary")
+    shutil.rmtree(aliases)
 
 
 def read_regular(path):
@@ -177,9 +211,10 @@ def ship_to(root, manifest, contents, apply):
 
 
 def publish(root, manifest, contents, apply):
+    names = bundle_paths(list(manifest["files"]))
+    require_bundle_launcher(names)
     current = current_release(root)
     previous = active_manifest(root, current)
-    names = bundle_paths(list(manifest["files"]))
     managed = bundle_paths(list(set(names) | set(previous.get("files", {}))
                                 | set(previous.get("retained", []))))
     old_files = {name: observed_file(root, current, name) for name in sorted(managed)}
@@ -221,6 +256,7 @@ def publish(root, manifest, contents, apply):
             write_regular(candidate / relative_name(name), *entry)
         manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
         write_regular(candidate / MANIFEST, manifest_bytes, 0o644)
+        smoke_launcher(stage)
 
         rollback.mkdir(mode=0o700)
         for name, old in old_files.items():
@@ -275,6 +311,8 @@ def verify_bundle(host, manifest, launchers):
     current = current_release(root)
     installed = active_manifest(root, current)
     issues = []
+    if BUNDLE_MARKER not in manifest["files"]:
+        issues.append("P0/bundle-compatibility")
     if any(installed.get(key) != manifest[key] for key in ("commit", "files")):
         issues.append("P0/manifest")
     for name, expected in manifest["files"].items():

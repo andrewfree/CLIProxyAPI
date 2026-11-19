@@ -24,11 +24,15 @@ class FleetBundleTest(unittest.TestCase):
         self.repo.mkdir()
         self.destination = self.root / "live/ops"
         self.git("init", "--quiet")
-        names = ["ops/task", "ops/fleet/bundle.txt", "ops/nested/second"]
+        names = ["ops/task", "ops/fleet/bundle.txt", "ops/nested/second",
+                 bundle.BUNDLE_MARKER, bundle.LAUNCHER]
         self.write("ops/fleet/bundle.txt", "\n".join(names) + "\n")
         self.write("ops/nested/second", "old")
         self.write("ops/task", "same")
         self.write("ops/ignored-by-allowlist", "unshipped")
+        self.write(bundle.BUNDLE_MARKER, "# Bundle-aware commit")
+        launcher = Path(__file__).resolve().parent / Path(bundle.LAUNCHER).name
+        self.write(bundle.LAUNCHER, launcher.read_text(), mode=0o755)
         self.first = self.commit()
         self.write("ops/task", "same", mode=0o755)
         self.write("ops/nested/second", "new")
@@ -62,7 +66,9 @@ class FleetBundleTest(unittest.TestCase):
     def test_dry_run_uses_requested_commit_and_writes_nothing(self):
         report = self.ship(self.first[:8], apply=False)
         self.assertEqual(report["commit"], self.first)
-        self.assertEqual(report["added"], ["ops/fleet/bundle.txt", "ops/nested/second", "ops/task"])
+        self.assertEqual(report["added"], sorted([
+            "ops/fleet/bundle.txt", "ops/nested/second", "ops/task", bundle.BUNDLE_MARKER, bundle.LAUNCHER,
+        ]))
         self.assertFalse(self.destination.parent.exists())
 
     def test_cli_requires_apply_for_writes(self):
@@ -86,6 +92,50 @@ class FleetBundleTest(unittest.TestCase):
         with self.assertRaisesRegex(bundle.BundleError, "clean source"):
             self.ship(self.first)
         self.assertFalse(self.destination.parent.exists())
+
+    def test_pre_bundle_commit_is_rejected_by_ship_and_p0(self):
+        self.write("ops/fleet/hosts.json", json.dumps({"m5": {
+            "name": "m5", "ssh": None, "bundle_root": str(self.destination)
+        }}))
+        self.write("ops/fleet/bundle.txt", f"{bundle.LAUNCHER}\n")
+        commit = self.commit()
+        commands = [
+            ["ship", "--host", "m5", "--commit", commit, "--dry-run"],
+            ["ship", "--host", "m5", "--commit", commit, "--apply"],
+            ["check", "--host", "m5", "--bundle-commit", commit, "--launcher-paths", "-"],
+        ]
+        with patch.object(fleetctl, "OPS", self.repo / "ops"):
+            for args in commands:
+                with self.subTest(args=args), redirect_stdout(io.StringIO()) as output:
+                    self.assertNotEqual(fleetctl.main(args), 0)
+                    self.assertIn("does not support the ops bundle launcher", output.getvalue())
+        self.assertFalse(self.destination.parent.exists())
+
+    def test_launcher_smoke_failure_leaves_initial_files_and_active_release_intact(self):
+        self.destination.mkdir(parents=True)
+        launcher = self.destination / Path(bundle.LAUNCHER).name
+        launcher.write_text("original")
+        self.write(bundle.LAUNCHER, "// Exits successfully without launching Claude.", mode=0o755)
+        broken = self.commit()
+        pointer = self.destination / bundle.CURRENT
+
+        with self.assertRaisesRegex(bundle.BundleError, "did not run the fake Claude binary"):
+            self.ship(broken)
+        self.assertFalse(pointer.is_symlink())
+        self.assertFalse(launcher.is_symlink())
+        self.assertEqual(launcher.read_text(), "original")
+        self.assertEqual(list((self.destination / bundle.RELEASES).iterdir()), [])
+
+        self.ship(self.first)
+        active = os.readlink(pointer)
+        releases = set((self.destination / bundle.RELEASES).iterdir())
+        manifest = (self.destination / bundle.MANIFEST).read_bytes()
+        with self.assertRaisesRegex(bundle.BundleError, "did not run the fake Claude binary"):
+            self.ship(broken)
+        self.assertEqual(os.readlink(pointer), active)
+        self.assertEqual(set((self.destination / bundle.RELEASES).iterdir()), releases)
+        self.assertEqual((self.destination / bundle.MANIFEST).read_bytes(), manifest)
+        self.assertEqual(launcher.read_bytes(), (self.destination / active / launcher.name).read_bytes())
 
     def test_ships_committed_bytes_and_modes_and_retains_previous_files(self):
         self.destination.mkdir(parents=True)
@@ -166,9 +216,9 @@ class FleetBundleTest(unittest.TestCase):
     def test_p0_requires_hashes_and_configured_launch_paths(self):
         self.destination = self.root / "cliproxy-live/ops"
         ops = Path(__file__).resolve().parent
-        fixture_names = ["ops/fleet/bundle.txt", "ops/claude_account_launcher.mjs",
+        fixture_names = ["ops/fleet/bundle.txt", bundle.BUNDLE_MARKER, bundle.LAUNCHER,
                          "ops/cliproxy-codex-token", *("ops/" + name for name in bundle.JOBS.values())]
-        for name in fixture_names[1:]:
+        for name in fixture_names[3:]:
             self.write(name, "fixture " + name, mode=0o755)
         self.write(fixture_names[0], "\n".join(fixture_names) + "\n")
         commit = self.commit()
