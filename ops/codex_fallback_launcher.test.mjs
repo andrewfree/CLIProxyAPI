@@ -276,6 +276,38 @@ for (const [name, sibling] of [
   });
 }
 
+test("a shipped Mac bundle logs decisions under the instance root", async (t) => {
+  // A real home path, like /Users/rever; macOS's tmpdir sits behind the /var symlink.
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codex-bundle-home-")));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  // Same layout fleet_bundle.py publishes: alias -> .fleet-current -> .fleet-releases/<stamp>/ops.
+  const root = path.join(home, "cliproxy-live", "ops");
+  const release = path.join(root, ".fleet-releases", "20261118T000000Z-test", "ops");
+  fs.mkdirSync(release, { recursive: true });
+  for (const name of ["codex_fallback_launcher.mjs", "claude_account_launcher.mjs"]) {
+    fs.copyFileSync(path.join(path.dirname(launcher), name), path.join(release, name));
+    fs.chmodSync(path.join(release, name), 0o755);
+    fs.symlinkSync(path.join(".fleet-current", name), path.join(root, name));
+  }
+  fs.symlinkSync(path.relative(root, release), path.join(root, ".fleet-current"));
+  const binary = path.join(home, "fake-codex.cjs");
+  fs.writeFileSync(binary, fakeCodex, { mode: 0o700 });
+  const primary = await fakeHealth(t);
+  const fallback = await fakeHealth(t);
+  const args = t3Args(primary.url);
+  const child = spawn(path.join(root, "codex_fallback_launcher.mjs"), args, {
+    env: { PATH: process.env.PATH, HOME: home, CODEX_REAL_BINARY: binary, CLIPROXY_FALLBACK_URL: fallback.url },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  assert.deepEqual(await once(child, "close"), [37, null]);
+  assert.deepEqual(JSON.parse(stdout).args, args);
+  assertDecision(path.join(home, "cliproxy", "ops", "runtime", "fleet", "codex-failover.jsonl"),
+    "primary", "primary_healthy");
+  assert.equal(fs.existsSync(path.join(release, "runtime")), false);
+});
+
 test("ambiguous base_url overrides bypass probing and keep argv", async (t) => {
   const primary = await fakeHealth(t);
   const fallback = await fakeHealth(t);

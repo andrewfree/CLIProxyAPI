@@ -316,7 +316,9 @@ Tailscale Serve can remain in place during an application rollback. To remove on
    checkout update and T3 profile change. Check that both hosts accept the
    profile's existing client key and serve the model IDs used by the profile.
 2. From the approved Mac checkout, run the local closed-port test and print
-   the executable's absolute path for T3 Settings.
+   the executable's absolute path for T3 Settings. After the Mac bundle
+   cutover, use the shipped copy, `$HOME/cliproxy-live/ops/codex_fallback_launcher.mjs`.
+   It writes its decision log under the instance root, not inside the bundle.
 
    ```sh
    node --test --test-name-pattern='connection refusal' ops/codex_fallback_launcher.test.mjs

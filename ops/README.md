@@ -251,7 +251,7 @@ On the Mac, enable session-start failover for the Will-primary
 
 | Profile field | Value |
 | --- | --- |
-| `config.binaryPath` | Absolute path to `ops/codex_fallback_launcher.mjs` in the approved Mac checkout |
+| `config.binaryPath` | `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs` after the Mac bundle cutover, otherwise the absolute path in the approved Mac checkout |
 | Profile environment `CLIPROXY_FALLBACK_URL` | `http://127.0.0.1:8317` |
 | Profile environment `CODEX_REAL_BINARY` | `/opt/homebrew/bin/codex` |
 
@@ -275,8 +275,9 @@ and logs independently. This includes sessions, provider status probes,
 and `exec` and `mcp` helpers. The launcher skips both probing and logging
 when the fallback variable is absent or the invocation has no config
 overrides, as with `--version`. Each decision appends one JSON line to
-`ops/runtime/fleet/codex-failover.jsonl` under the launcher's checkout, or
-to the file selected by `CLIPROXY_CODEX_FAILOVER_LOG`. Records contain the
+`ops/runtime/fleet/codex-failover.jsonl` under the instance root (the
+launcher's checkout, or `/Users/rever/cliproxy` when it runs from the Mac
+bundle), or to the file selected by `CLIPROXY_CODEX_FAILOVER_LOG`. Records contain the
 timestamp, process ID, subcommand (`app-server`, `exec`, `mcp`, or `none`
 when there is no recognized subcommand), selected route, and reason.
 The log omits URLs, hostnames, and credentials. If the launcher cannot
