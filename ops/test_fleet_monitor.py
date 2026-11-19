@@ -556,6 +556,14 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(plist["ProgramArguments"],
                          ["/usr/bin/python3", "-B", "/Users/rever/cliproxy-live/ops/fleet_monitor.py"])
 
+    def test_go_nanosecond_cooldown_is_kept(self):
+        # Go emits up to nine fractional digits; Python 3.9 parses them only through parse_time.
+        now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+        item = {"cooldowns": [{"reason": "credential_quota", "scope": "credential",
+                               "retry_at": "2099-01-01T00:00:00.123456789Z"}]}
+        self.assertTrue(probe.local_cooldowns(item, now))
+        self.assertEqual(probe.timestamp("2099-01-01T00:00:00.5Z").microsecond, 500000)
+
     def test_monitor_modules_stay_compatible_with_apple_python_39(self):
         # /usr/bin/python3 is 3.9: no newer syntax, and no `X | Y` annotations evaluated at runtime.
         for name in ("fleet_monitor", "fleet_monitor_probe", "fleet_quota_chart", "fleetctl",
@@ -567,7 +575,9 @@ class MonitorTests(unittest.TestCase):
             for node in ast.walk(tree):
                 notes = []
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    notes = [a.annotation for a in node.args.args + node.args.kwonlyargs if a.annotation]
+                    every = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                    every += [a for a in (node.args.vararg, node.args.kwarg) if a]
+                    notes = [a.annotation for a in every if a.annotation]
                     notes += [node.returns] if node.returns else []
                 elif isinstance(node, ast.AnnAssign):
                     notes = [node.annotation]

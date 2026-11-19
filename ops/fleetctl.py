@@ -301,6 +301,17 @@ def model_restrictions_leave_route(item, ids, prefix, config):
     return bool(served - restricted - {""})
 
 
+# Go's RFC3339Nano trims trailing zeros and can carry up to nine fractional digits.
+TIME_FRACTION = re.compile(r"\.(\d+)(?=(?:[+-]\d\d:\d\d)?$)")
+
+
+def parse_time(value):
+    """Parse an RFC 3339 time from the proxy, also on Python 3.9, whose fromisoformat
+    accepts neither a trailing Z nor fractional seconds other than 3 or 6 digits."""
+    text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    return datetime.fromisoformat(TIME_FRACTION.sub(lambda m: "." + (m.group(1) + "000000")[:6], text))
+
+
 def credential_health(item, now, *, partial_model_restrictions=False):
     if item["disabled"] or item["status"] == "disabled":
         return "disabled"
@@ -308,7 +319,7 @@ def credential_health(item, now, *, partial_model_restrictions=False):
     if item.get("requires_sign_in") or HARD_CREDENTIAL_ERROR.search(message):
         return "error"
     expires = item.get("access_token_expires_at")
-    if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) <= now:
+    if expires and parse_time(expires) <= now:
         return "error"
     cooldowns = item.get("cooldowns") or []
     if any(row["reason"] in HARD_CREDENTIAL_REASONS for row in cooldowns):
@@ -319,11 +330,11 @@ def credential_health(item, now, *, partial_model_restrictions=False):
         return "ok"
     retry = item.get("next_retry_after")
     if item["unavailable"] and retry:
-        deadline = datetime.fromisoformat(retry.replace("Z", "+00:00"))
+        deadline = parse_time(retry)
         # Passive quota observations do not establish which failure set this timer.
         if deadline > now and (message in COOLDOWN_MESSAGES or any(
             row["reason"] in COOLDOWN_REASONS
-            and datetime.fromisoformat(row["retry_at"].replace("Z", "+00:00")) == deadline
+            and parse_time(row["retry_at"]) == deadline
             for row in cooldowns
         )):
             return "cooling"
