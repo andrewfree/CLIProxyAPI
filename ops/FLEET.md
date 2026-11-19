@@ -174,19 +174,27 @@ Tailscale Serve can remain in place during an application rollback. To remove on
 ## Health and quota monitor
 
 One job on the Mac checks both proxies and does a TCP connect from inside each
-container to the provider hosts every 300 seconds. It compares parity hourly
-and reads the Claude, Codex, Kimi and Z.ai quotas through the supported usage
-endpoints. It sends no inference requests. Open CLIProxyBar for a live glance.
+container to the provider hosts every 300 seconds. It reads Codex, Kimi and
+Z.ai quota each tick, Claude quota every third tick (about 900 seconds), and
+compares parity hourly. It uses the supported usage endpoints and sends no
+inference requests. Open CLIProxyBar for a live glance.
 Its Will entry still uses Will's raw address.
 
 The monitor sends a text when Will becomes unreachable, Will's egress fails,
-the Mac proxy goes down, or parity drifts. It texts on recovery from these
-conditions and when an account crosses 90% of a known weekly or monthly
-quota or becomes capped. Transitions in one tick share a text. The first tick
-at or after 09:00 Mac local time sends the day's summary, including quota
-resets and outages observed since the last summary. If the Mac was asleep,
+the Mac proxy goes down, or parity drifts. Opening and closing these alerts
+takes two consecutive matching samples. An unknown result breaks the streak,
+and parity counts only when a new comparison runs. An SSH-only Will failure
+reports lost SSH access from the Mac. A failed proxy health probe or egress
+probe can advise switching profiles. The monitor also texts when an account
+crosses 90% of a known weekly or monthly quota, becomes capped, or enters a
+proxy quota cooldown without a reported cap. The cooldown alert re-arms an
+hour after the latest observed cooldown ends. Transitions in one tick share
+a text. The first tick at or after 09:00 Mac local time sends the day's
+summary, including quota resets and outages observed since the last summary. If the Mac was asleep,
 the next tick catches up that day's summary. Z.ai's window codes stay opaque.
-The summary includes those readings and any published reset timestamps.
+The summary includes those readings and any published reset timestamps. On
+a tick that defers Claude, it can include a Claude reading from the previous
+15 minutes, with its observation time.
 
 ### Install or resume on the Mac
 
@@ -218,18 +226,27 @@ CLIPROXY_ROOT="$HOME/cliproxy" /opt/homebrew/bin/python3 -B "$HOME/cliproxy-live
 ```
 
 Pause with `launchctl bootout "gui/$(id -u)/com.rever.cliproxy-fleet-monitor"`.
-Resume by bootstrapping the installed plist again. Pause the job if you run
-the Claude usage tool in watch mode, and allow at least 300 seconds between
-reads of the same Claude account. Keep `monitor-state.json` with the history. It preserves account labels, provider poll timing and
-notification state across launches.
+Resume by bootstrapping the installed plist again. On the Mac, the monitor
+and `claude_usage_resets.py status` share a private per-account usage cache
+and lock under `ops/runtime/claude-resets/` for the same instance root. Status
+uses a snapshot less than 300 seconds old when one is available and waits
+when an attempt is too recent for another read. A Will-only read reserves the
+interval on the Mac, where the cache has no status snapshot for that read.
+Pause the monitor before using `watch`, and allow at least 300 seconds between
+usage reads of the same account. Claim checks and retries use their own read
+path. Keep `monitor-state.json`
+with the history to preserve account labels, poll cadence and alert state.
 
 For a different notifier, set `CLIPROXY_FLEET_NOTIFY_COMMAND` in the installed
 plist's `EnvironmentVariables` before bootstrapping. Use an absolute executable
 path and optional quoted arguments. The command receives the text on stdin
-and returns zero upon acceptance. If delivery is unconfirmed, the monitor
-records that in `health.json` and logs it to
-`~/Library/Logs/cliproxy-fleet-monitor.log`. It does not automatically resend
-that transition because Text Me provides no idempotency receipt.
+and returns zero upon acceptance. If Text Me confirms failure or the
+connection cannot be opened, the monitor retries pending alerts and the
+day's summary on the next tick. Outcomes after an interrupted write or
+response are recorded as unconfirmed and consumed to avoid duplicate texts.
+A nonzero exit from a custom notifier is also unconfirmed. Delivery status
+is in `health.json`, and failures are logged to
+`~/Library/Logs/cliproxy-fleet-monitor.log`.
 
 ### Read the reports or chart the history
 
@@ -237,7 +254,7 @@ that transition because Text Me provides no idempotency receipt.
 runtime="$HOME/cliproxy/ops/runtime/fleet"
 python3 -m json.tool "$runtime/health.json"
 python3 -m json.tool "$runtime/latest.json"
-tail -n 20 "$runtime/quota-history.jsonl"
+tail -n 20 "$runtime/quota-history-$(date -u +%Y-%m).jsonl"
 python3 "$HOME/cliproxy-live/ops/fleet_quota_chart.py" --days 14
 ```
 
@@ -247,8 +264,12 @@ health. The JSONL history has one row per known account per tick, with all
 observed quota windows nested under `windows`. Each window records percent
 used, reset and cap state. Each row identifies the source host and any proxy
 cooldowns by host. A row with unavailable quota has an empty window list.
-The chart defaults to seven days and writes `quota-chart.html` beside the
-history. Use `--account` to select a label or provider, `--window` to select a
+History rotates at the start of each UTC month into
+`quota-history-YYYY-MM.jsonl`. Monthly files are retained until you remove
+them. The chart defaults to seven days, opens only the monthly files that
+overlap the requested range, and writes `quota-chart.html` beside the history.
+Use `--history` with an explicit filename to chart an older flat JSONL file.
+Use `--account` to select a label or provider, `--window` to select a
 window, and `--output` to choose a file.
 
 ## Operations on November 18, 2026

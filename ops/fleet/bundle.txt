@@ -11,3 +11,8 @@ ops/fleet/hosts.json
 ops/fleet/paths.json
 ops/instances/will/config-policy.json
 ops/verify_fleet_instance.py
+ops/fleet_monitor.py
+ops/fleet_monitor_probe.py
+ops/fleet_quota_chart.py
+ops/claude_usage_resets.py
+ops/com.rever.cliproxy-fleet-monitor.plist
