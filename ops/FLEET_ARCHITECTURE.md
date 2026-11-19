@@ -641,24 +641,31 @@ even when the accompanying health report shows an outage. This schedule
 makes no inference requests and does not change routing or configuration.
 
 The monitor also collects read-only quota data through management API
-credential substitution. It uses the same Claude usage contract as the
-reset tool, reads the Codex, Kimi and Z.ai usage endpoints, and records
-Claude's scoped caps and reset-grant counts. For Z.ai compatibility keys,
+credential substitution. It reads Codex, Kimi and Z.ai every tick and
+Claude every third tick, about every 15 minutes. It uses the same Claude
+usage endpoint as the reset tool and records scoped caps and reset-grant
+counts. For Z.ai compatibility keys,
 only a known HTTPS provider origin authorizes a quota request. The Mac is
 preferred for shared accounts. Will supplies accounts the Mac did not poll,
 as well as Will's independent cooldowns. Shared accounts are matched with
 stable private account tags. Where OAuth account metadata is missing, the
-credential index is the identity fallback. Each Claude account's poll timing
-is persisted and a failed read is not retried within the tick.
+credential index is the identity fallback. The monitor keeps its polling
+deadlines in `monitor-state.json`, independently of the reset tool. A 429
+backs off only the affected account for at least 20 minutes. An uncertain
+Will probe extends only Will's guard. Each account gets at most one usage
+request per tick.
 
-`health.json`, `latest.json` and `quota-history.jsonl` live in the Mac's
-private runtime directory. The history uses route labels when available and
-pseudonyms otherwise. It records percentages, timestamps and cap states
-without raw account identities or upstream bodies. Alerts track observable
-state transitions across ticks, and the daily summary includes outages
-observed between summaries. The Text Me service sends to its configured
-recipient. The [runbook](FLEET.md#health-and-quota-monitor) covers activation,
-pause, and private charts generated from the JSONL history.
+`health.json`, `latest.json` and the monthly `quota-history-YYYY-MM.jsonl`
+files live in the Mac's private runtime directory. The history uses route
+labels when available and pseudonyms otherwise. It records percentages,
+timestamps and cap states without raw account identities or upstream bodies.
+Health and parity alerts open or close after two consecutive matching
+samples. An unknown result breaks the streak. Quota alerts fire on
+observed transitions and remember active caps across deferred ticks. The
+daily summary includes outages observed between summaries. The Text Me
+service sends to its configured recipient. The
+[runbook](FLEET.md#health-and-quota-monitor) covers activation, pause, and
+private charts generated from the JSONL history.
 
 ## 3. Problem, fix, location, evidence
 

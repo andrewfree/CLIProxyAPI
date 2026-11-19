@@ -187,14 +187,15 @@ and parity counts only when a new comparison runs. An SSH-only Will failure
 reports lost SSH access from the Mac. A failed proxy health probe or egress
 probe can advise switching profiles. The monitor also texts when an account
 crosses 90% of a known weekly or monthly quota, becomes capped, or enters a
-proxy quota cooldown without a reported cap. The cooldown alert re-arms an
-hour after the latest observed cooldown ends. Transitions in one tick share
+proxy quota cooldown without a known active cap. The monitor remembers caps
+across ticks that defer Claude. The cooldown alert re-arms an hour after the
+latest observed cooldown ends. Transitions in one tick share
 a text. The first tick at or after 09:00 Mac local time sends the day's
 summary, including quota resets and outages observed since the last summary. If the Mac was asleep,
 the next tick catches up that day's summary. Z.ai's window codes stay opaque.
 The summary includes those readings and any published reset timestamps. On
-a tick that defers Claude, it can include a Claude reading from the previous
-15 minutes, with its observation time.
+a tick that defers Claude, it can include a Claude reading less than 35 minutes
+old, with its observation time.
 
 ### Install or resume on the Mac
 
@@ -226,16 +227,14 @@ CLIPROXY_ROOT="$HOME/cliproxy" /opt/homebrew/bin/python3 -B "$HOME/cliproxy-live
 ```
 
 Pause with `launchctl bootout "gui/$(id -u)/com.rever.cliproxy-fleet-monitor"`.
-Resume by bootstrapping the installed plist again. On the Mac, the monitor
-and `claude_usage_resets.py status` share a private per-account usage cache
-and lock under `ops/runtime/claude-resets/` for the same instance root. Status
-uses a snapshot less than 300 seconds old when one is available and waits
-when an attempt is too recent for another read. A Will-only read reserves the
-interval on the Mac, where the cache has no status snapshot for that read.
-Pause the monitor before using `watch`, and allow at least 300 seconds between
-usage reads of the same account. Claim checks and retries use their own read
-path. Keep `monitor-state.json`
-with the history to preserve account labels, poll cadence and alert state.
+Resume by bootstrapping the installed plist again. For routine Claude usage
+checks, prefer the snapshot in `ops/runtime/fleet/quota-history-YYYY-MM.jsonl`.
+The monitor tracks its own read deadlines in `monitor-state.json`. A 429
+defers that account for at least 20 minutes, and a Will SSH failure leaves
+Mac polling available. The reset tool reads usage independently of the
+monitor. Pause the monitor before using `watch`, and allow at least 300 seconds
+between usage reads of the same account. Keep `monitor-state.json` with the
+history to preserve account labels, polling deadlines and alert state.
 
 For a different notifier, set `CLIPROXY_FLEET_NOTIFY_COMMAND` in the installed
 plist's `EnvironmentVariables` before bootstrapping. Use an absolute executable
