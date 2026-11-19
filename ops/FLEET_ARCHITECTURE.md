@@ -144,8 +144,8 @@ Three details of the parity design matter when you change it:
   and 8).
 - **Every difference needs a dated exception.** [fleet/exceptions.json](fleet/exceptions.json)
   holds one entry, debug logging, dated November 18 with `review_by` December 2. Two more for
-  the `camoff-astra` prefix on the Mac were removed that evening once Will served the same
-  prefix. Six more were seeded that day, for NVIDIA on the Mac only,
+  the `camoff-astra` prefix on the Mac were removed that evening, and the prefix was then removed
+  from both hosts because no request used it. Six more were seeded that day, for NVIDIA on the Mac only,
   the quota plugin on Will only and the extra `kimi-ai` credential on Will. They were removed the
   same day once those differences were gone
   ([FLEET.md](FLEET.md#operations-on-november-18-2026), parity cleanup). None is on a Claude row.
@@ -754,7 +754,7 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
 - **Each host learns a cap separately.** Cooldown state is not shared, so a capped account costs
   about one wasted call per host per window ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
 - **One dated exception** (debug logging), due for review by December 2, 2026 (section 2.1).
-  The two `camoff-astra` exceptions were removed once Will served the same prefix.
+  The two `camoff-astra` exceptions are gone; the prefix itself was removed from both hosts.
 - **Will uses the flat legacy YAML layout** until the layout migration (design unit 7). The loaded
   view makes the two layouts comparable in the meantime.
 - **Old client keys overlap** until 2026-11-19 10:30 UTC, so sessions launched with an old key
