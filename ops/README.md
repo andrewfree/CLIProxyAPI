@@ -361,8 +361,10 @@ logs from the instance checkout.
 cd /Users/rever/cliproxy
 launchctl print gui/$(id -u)/com.rever.cliproxy-watchdog
 launchctl print gui/$(id -u)/com.rever.cliproxy-log-archive
+launchctl print gui/$(id -u)/com.rever.cliproxy-fleet-monitor
 tail -n 100 ops/runtime/watchdog.log
 tail -n 100 ops/runtime/archive.log
+tail -n 100 ~/Library/Logs/cliproxy-fleet-monitor.log
 ```
 
 Run the infrastructure checks without recovery actions or auth gating:

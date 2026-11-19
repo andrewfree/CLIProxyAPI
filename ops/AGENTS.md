@@ -21,7 +21,8 @@ and covers the Go server. Keep fork-only operational rules here.
   approved one is refused. Report the refusal instead.
 - Poll usage no faster than every 300 seconds. Shorter intervals hit HTTP 429.
   The fleet monitor also reads each Claude account about every 15 minutes,
-  so pause it before a `watch` and resume it afterwards.
+  so pause it before a `watch` and resume it afterwards
+  ([Install or resume on the Mac](FLEET.md#install-or-resume-on-the-mac)).
 - The monitor's `ops/runtime/fleet/quota-history-YYYY-MM.jsonl` is for history
   and trend questions only. Quote a row's `captured_at` time with it. A row can
   be 15 or more minutes old and has no grant IDs.

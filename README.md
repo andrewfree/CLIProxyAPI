@@ -161,7 +161,7 @@ CLIProxy's delete-based size ceiling is disabled. Closed GPT, Anthropic, and oth
 
 ### Codex failover
 
-On the Mac, T3's `codex_cliproxy` profile has used the local proxy when Will fails its startup health check since November 18, 2026. [The Codex profile settings](ops/README.md#codex-failover) hold its launcher settings and rollback. Each session keeps its selected host for the lifetime of its Codex process.
+Since November 18, 2026, T3's `codex_cliproxy` profile on the Mac has used the local proxy when Will fails its startup health check. [The Codex profile settings](ops/README.md#codex-failover) list its launcher settings and link the rollback. Each session keeps its selected host for the lifetime of its Codex process.
 
 ## Usage Statistics
 

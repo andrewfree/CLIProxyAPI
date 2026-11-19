@@ -1,6 +1,6 @@
 # Affinity did not demonstrate a reproducible cache benefit
 
-Superseded on November 18, 2026: session affinity is enabled on both hosts (Mac 00:15:41 and Will 01:59:46 Pacific). See the last section.
+Superseded on November 18, 2026: session affinity is enabled on both hosts (Mac 00:15:41 and Will 01:59:46 Pacific). See the last section; switch times are in [the activation record](evidence/cache-affinity-20261118/README.md).
 
 The operating decision is to restore round robin on the Mac fallback and Will primary, retaining routing drift checks. This follows the criterion frozen before the comparison. It is a conservative policy choice for Will, where the comparison was not run.
 

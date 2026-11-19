@@ -26,9 +26,9 @@ with `shasum -a 256 <file>`.
    10:30 UTC. That task runs the private runtime copy of `remove_keys.py` with a revoke spec that
    holds only key hashes. It had not run when this record was committed. The copy here holds the
    bytes of the runtime copy on November 18.
-5. On 2026-11-19 the task removed the old keys: on Will at 10:30 UTC by the in-place edit, and on
-   the Mac at 10:39 UTC through `PUT /v8/management/config/access/api-keys`, because the Mac's
-   container did not reload the in-place edit. Check: the new key returned 200 and both old keys
+5. On 2026-11-19 the task removed the old keys on Will at 10:30 UTC by the in-place edit. On the
+   Mac its in-place edit did not load; the file was restored, and at 10:39 UTC the session applied
+   the removal with `PUT /v8/management/config/access/api-keys` at Andrew's choice. Check: the new key returned 200 and both old keys
    401 on both hosts, and the instance verifiers and `fleetctl parity` were clean
    ([FLEET.md](../../FLEET.md#operations-on-november-19-2026)).
 

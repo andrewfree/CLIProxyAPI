@@ -352,7 +352,7 @@ Re-read in this revision (V): the installed LaunchAgent paths and intervals; the
 - How `orchestrator_capabilities` decides eligibility, and how the three named T3 profiles are edited (A; unit 0).
 - The notification route for the health job. A `com.rever.text-me` LaunchAgent exists on the Mac (V, name only); its interface was not read (A; unit 5).
 - Cursor bridge behaviour on reload beyond `FLEET.md:35`, restart-only settings, cold-restart registration order (unconfirmed).
-- A host-side in-place write reaches the watcher through the Docker Desktop mount on the Mac (A; the last Mac change used the management API, `GLM_ROUTING.md:34` V). Unit 1 states what to do if it does not.
+- A host-side in-place write reaches the watcher through the Docker Desktop mount on the Mac (A; the last Mac change used the management API, `GLM_ROUTING.md:34` V). Unit 1 states what to do if it does not. (November 19: did not hold; see FLEET.md.)
 - The registration-order bug is an upstream issue. Reporting it to `router-for-me/CLIProxyAPI` is a third-party contribution needing separate approval; none is proposed.
 
 ## 14. Decision log

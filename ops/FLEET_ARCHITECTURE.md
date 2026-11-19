@@ -594,7 +594,8 @@ Sessions that predate the repoint retain their original launcher until they end.
 renaming it breaks the mount's link to the inode, so every config change is one in-place write
 that preserves the inode and mode 600, followed by a check of the loaded values
 ([GLM_ROUTING.md](GLM_ROUTING.md), [evidence/cache-affinity-20261118/README.md](evidence/cache-affinity-20261118/README.md)).
-Never restore an old full config over later edits; remove only the lines you added.
+Never restore an old full config over later edits; remove only the lines you added. On the Mac,
+host-side edits do not load at the moment (section 4).
 
 **Why OAuth files are never synchronized.** Claude refresh tokens rotate. Two servers sharing one
 token file would invalidate each other, so each host logs in separately to the same accounts
@@ -615,12 +616,14 @@ a 1,024 MB cap with no archive, which is why the log cap is a host-specific path
 ([FLEET.md](FLEET.md#operations-on-november-18-2026)) and provider keys (session record) into
 their own transcripts.
 
-**The response, all on November 18:**
+**The response, on November 18 and 19:**
 
 - Two new client keys were added at the top of both hosts' key lists and every client moved to
-  them. The two old keys stayed accepted until a scheduled task removed them on 2026-11-19 at the
-  end of the 24-hour overlap. The repository records no reason for this overlap. Its effect is that sessions already
-  running keep working, because a running session keeps the key it launched with.
+  them. The two old keys stayed accepted for 24 hours. On 2026-11-19 a scheduled task removed them
+  on Will; on the Mac its edit did not load, and the keys were removed through the v8 management
+  API at Andrew's choice ([FLEET.md](FLEET.md#operations-on-november-19-2026)). The repository records no reason for this
+  overlap. Its effect was that sessions already running kept working, because a running session
+  keeps the key it launched with.
 - The Z.ai Coding Plan key was replaced on both hosts and the old one deleted.
 - The NVIDIA key (then Mac only) was rotated and the old one deleted. The new key expires on
   2027-11-18. Later that day the NVIDIA provider was added to Will as well.
@@ -719,7 +722,8 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
 **Not automatic:**
 
 - **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances. Its
-  Z.ai row reads the credit windows since a local parser fix on November 19.
+  Z.ai rows read the credit windows through a local, unpublished parser fix (November 19), which an
+  upstream update would drop.
   The monitor supplies fleet quota history, alerts and summaries. The Mac's `codex_cliproxy`
   moved to the tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
   CLIProxyBar's Will entry still reaches Will at its raw tailnet IP address, so the section 2.6
@@ -734,11 +738,15 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
-- **Host-side config edits on the Mac do not load.** Since the November 18 container recreate,
-  Docker Desktop's bind mount has not delivered in-place edits of the Mac's `config.yaml` to the
-  proxy's file watcher, so a host-side edit changes the file but not the running config. Confirm
-  a Mac edit with a `config file changed, reloading` log line and a live check, and if none
-  appears, apply it through `/v8/management/config` (FLEET.md, November 19).
+- **Host-side config edits on the Mac do not load.** On November 19, in-place edits of the Mac's
+  `config.yaml` changed the host file but not the running config; the container logged no reload,
+  and a second write never reached it. When this started is not known. Confirm a Mac edit with a
+  `config file changed, reloading` log line and a live check within 30 s. If none appears, write
+  once more with a comment change; if that does not load either, write the original bytes back and
+  ask Andrew. With his approval, apply the change through the v8 management API (for example
+  `PUT /v8/management/config/access/api-keys`), which edits the container's copy of the file and
+  saves it over the host file, so never use it while an unloaded host edit is still on disk
+  ([FLEET.md](FLEET.md#operations-on-november-19-2026)).
 - **The monitor reports, it does not fail over.** The Mac LaunchAgent runs from the bundle every
   five minutes on Apple's `/usr/bin/python3`, because macOS Local Network privacy blocked SSH to
   Will from Homebrew's Python under launchd ([FLEET.md](FLEET.md#install-or-resume-on-the-mac)). It texts Andrew when
@@ -834,7 +842,7 @@ text).
 **Config.**
 
 - One in-place write that keeps the inode and mode 600; then verify the loaded values, not the
-  file.
+  file. On the Mac, host-side edits do not load at the moment (section 4).
 - Remove only your own lines on rollback.
 - A reload reconfigures plugins and can close Cursor bridges.
 
@@ -853,7 +861,8 @@ text).
 **Compose and container settings.**
 
 - They take effect at a recreate, and a recreate drops every stream on that host.
-- On the Mac the watchdog runs `docker compose up` by itself only while the Compose inputs and the
-  running container match the activation receipt; otherwise it starts the existing container
+- On the Mac the watchdog runs `docker compose up` by itself only while the Compose files, resolved
+  image and service config hash match the activation receipt, which is recorded only after the
+  running container was checked against them; otherwise it starts the existing container
   (`ops/cliproxy_watchdog.py`, `guarded_compose_up`). A Compose change pulled into the checkout
   waits for an activation, but a hand-run `docker compose up` in the instance root applies it.
