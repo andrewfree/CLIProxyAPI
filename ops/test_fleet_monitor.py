@@ -135,7 +135,7 @@ for target do printf '%s ok\n' "$target"; done
             host = {**HOSTS["will"], "port": service.server_port, "instance_root": directory}
             worker_args = [sys.executable, "-I", "-B", "-"]
             try:
-                program = monitor.remote_program(json.dumps([host, SALT, [], {"_usage_salt": SALT}]))
+                program = monitor.remote_program(json.dumps([host, SALT, [], {}]))
                 worker = subprocess.run(worker_args, input=program, env=env, capture_output=True,
                                         text=True, timeout=8, check=False)
                 self.assertEqual(worker.returncode, 0, worker.stderr)
@@ -153,8 +153,6 @@ for target do printf '%s ok\n' "$target"; done
                                  {"session", "weekly", "weekly-fable"})
                 self.assertEqual(accounts["claude"]["label"], "t3-demo")
                 self.assertEqual(accounts["claude"]["grants"]["resets_left"], 1)
-                self.assertEqual(accounts["claude"]["usage_id"], probe.claude.usage_account_id(SALT, FILES[0]["email"]))
-                self.assertNotIn("usage_summary", accounts["claude"])
                 by_window = {w["window"]: w for w in accounts["kimi"]["windows"]}
                 self.assertEqual(by_window["session"]["used_percent"], 22)
                 self.assertEqual(by_window["monthly-total"]["reset_at"], LATER)
@@ -279,52 +277,69 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(latest["status"], "drift")
             self.assertEqual(latest["health"]["will"]["status"], "ok")
 
-    def test_monitor_and_status_share_attempts_and_local_snapshot(self):
-        claude = probe.claude
-        start = NOW.timestamp()
-        identity = FILES[0]["email"]
-        other = "other-fixture-account"
-        remote = "will-fixture-account"
-        summary = claude.summarize_usage(FIXTURES["claude-index"])
+    def test_claude_429_backs_off_only_that_account_across_hosts(self):
+        files = [FILES[0], dict(FILES[0], auth_index="other-index", email=None)]
+        accounts = list(probe.quota_accounts(files, [], SALT).values())
+        limited, other = (account["account_id"] for account in accounts)
+        requests = []
+
+        class FakeAPI:
+            def quota(self, request):
+                index = request["auth_index"]
+                requests.append(index)
+                if index == "claude-index" and requests.count(index) == 1:
+                    return {"status_code": 429}
+                return {"status_code": 200, "body": FIXTURES["claude-index"]}
+
+        def collect(host, salt, visited, due):
+            members = accounts if host["name"] == "m5" else accounts[:1]
+            return host_report(probe.collect_account(FakeAPI(), account, clock(), visited, due, {})
+                               for account in members)
+
         with (tempfile.TemporaryDirectory() as directory,
-              patch.object(monitor, "now_utc", return_value=NOW),
-              patch.object(claude.time, "time", return_value=start),
-              patch.object(claude, "request_usage", return_value=(200, summary)) as read):
+              patch.object(monitor, "now_utc") as clock,
+              patch.object(probe.time, "time", side_effect=lambda: clock().timestamp()),
+              patch.object(probe, "route_label", return_value="t3-demo"),
+              patch.object(monitor, "run_host", side_effect=collect),
+              patch.object(monitor, "run_parity", return_value={"status": "equal"})):
             root = Path(directory)
-            self.assertEqual(claude.status_usage(None, identity, root), (200, summary))
-            read.assert_called_once()
+            for offset in range(0, 1801, 300):
+                clock.return_value = NOW + timedelta(seconds=offset)
+                monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=True)
 
-            def collect(hosts, salt, due):
-                usage_tag = claude.usage_account_id(due["_usage_salt"], identity)
-                self.assertEqual(due[usage_tag], start + probe.CLAUDE_INTERVAL)
-                local_tag = claude.usage_account_id(due["_usage_salt"], other)
-                remote_tag = claude.usage_account_id(due["_usage_salt"], remote)
-                local = dict(sample(), usage_id=local_tag, usage_summary=summary)
-                will = dict(sample(), usage_id=remote_tag)
-                return {"m5": host_report([local]), "will": host_report([will])}, start
+            self.assertEqual(requests, ["claude-index", "other-index", "other-index",
+                                        "claude-index", "other-index"])
+            history = [json.loads(line) for line in (root / "quota-history-2026-11.jsonl").read_text().splitlines()]
+            self.assertEqual([row["status"] for row in history if row["account_id"] == limited][::3],
+                             ["quota-rate-limited", "quota-deferred", "ok"])
+            self.assertEqual([row["status"] for row in history if row["account_id"] == other][::3],
+                             ["ok", "ok", "ok"])
+            self.assertFalse((root / "ops/runtime/claude-resets").exists())
 
-            with patch.object(monitor, "collect_hosts", side_effect=collect):
-                monitor.collect_with_claude(root, HOSTS, {"salt": SALT}, start)
-            read.reset_mock()
-            self.assertEqual(claude.status_usage(None, other, root), (200, summary))
-            read.assert_not_called()
-            with claude.locked_usage(root) as (usage, _):
-                self.assertEqual(usage["accounts"][claude.usage_account_id(usage["salt"], remote)],
-                                 {"attempted_at": start})
+    def test_will_ssh_failure_does_not_guard_mac_claude_reads(self):
+        account = next(iter(probe.quota_accounts(FILES[:1], [], SALT).values()))
 
-    def test_uncertain_will_worker_keeps_larger_guard(self):
-        start = NOW.timestamp()
-        for dispatch_delay in (10, 120):
-            with (self.subTest(dispatch_delay=dispatch_delay), tempfile.TemporaryDirectory() as directory,
-                  patch.object(monitor, "now_utc", return_value=NOW),
-                  patch.object(monitor, "collect_hosts",
-                               return_value=({"m5": host_report(), "will": dict(host_report(), uncertain=True)},
-                                             start + dispatch_delay))):
-                root = Path(directory)
-                monitor.collect_with_claude(root, HOSTS, {"salt": SALT}, start)
-                with probe.claude.locked_usage(root) as (usage, _):
-                    self.assertEqual(usage["guard_until"], start + probe.CLAUDE_INTERVAL + max(
-                        2 * monitor.HOST_TIMEOUT + 10, dispatch_delay + monitor.HOST_TIMEOUT))
+        def collect(host, salt, visited, due):
+            if host["name"] == "will":
+                return monitor.host_output("", 255, host_report(state="unreachable"), host["ssh"])
+            return host_report([probe.collect_account(None, account, clock(), visited, due, {})])
+
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(monitor, "now_utc") as clock,
+              patch.object(probe.time, "time", side_effect=lambda: clock().timestamp()),
+              patch.object(probe, "route_label", return_value="t3-demo"),
+              patch.object(probe, "fetch_windows", return_value=("ok", sample()["windows"], None)) as fetch,
+              patch.object(monitor, "run_host", side_effect=collect),
+              patch.object(monitor, "run_parity", return_value={"status": "equal"})):
+            root = Path(directory)
+            # Rapid manual ticks exercise the guard before Will's reservation expires.
+            for offset in range(0, 721, 120):
+                clock.return_value = NOW + timedelta(seconds=offset)
+                monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=True)
+            self.assertEqual(fetch.call_count, 3)
+            state = monitor.read_json(root / "monitor-state.json", {})
+            self.assertEqual(set(state["claude_host_guards"]), {"will"})
+            self.assertGreater(state["claude_host_guards"]["will"], clock().timestamp())
 
     def test_health_hysteresis_and_ssh_only_wording(self):
         state = {}
@@ -363,6 +378,25 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(sum(len(alerts(minute, True)) for minute in (0, 5, 10, 15)), 1)
         self.assertEqual(alerts(25, False), [])
         self.assertEqual(alerts(77, True)[0].split(" until ")[0], "claude t3-demo in proxy quota cooldown")
+
+    def test_deferred_claude_tick_suppresses_cooldown_text_for_known_cap(self):
+        capped = sample(percent=100)
+        cooldown = {"scope": "credential", "reason": "quota", "until": SOON}
+        deferred = dict(sample(status="quota-deferred"), cooldowns=[cooldown])
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(monitor, "run_host") as runs,
+              patch.object(monitor, "run_parity", return_value={"status": "equal"}),
+              patch.object(monitor, "notify_message", return_value=monitor.TEXT_SENT) as notify):
+            root = Path(directory)
+            monitor.write_json(root / "monitor-state.json", {"salt": SALT, "summary_day": "2026-11-18"})
+            for tick, reading in enumerate((capped, deferred, deferred, capped)):
+                runs.side_effect = [host_report([reading]), host_report()]
+                with patch.object(monitor, "now_utc", return_value=NOW + timedelta(minutes=5 * tick)):
+                    monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
+
+            notify.assert_called_once()
+            self.assertIn("weekly capped", notify.call_args.args[0])
+            self.assertNotIn("proxy quota cooldown", notify.call_args.args[0])
 
     def test_no_notification_or_transition_claim_in_dry_run(self):
         with (tempfile.TemporaryDirectory() as directory,
@@ -433,12 +467,12 @@ class MonitorTests(unittest.TestCase):
         reading = dict(sample(percent=92), captured_at=probe.iso(NOW))
         monitor.summary_records(state, [reading], NOW)
         deferred = sample(status="quota-deferred")
-        records = monitor.summary_records(state, [deferred], NOW + timedelta(minutes=5))
+        records = monitor.summary_records(state, [deferred], NOW + timedelta(seconds=900))
         summary = monitor.daily_message("fixture day", records, {}, {}, [])
         self.assertIn("weekly 92%", summary)
         self.assertIn("as of ", summary)
         self.assertEqual(deferred["windows"], [])
-        records = monitor.summary_records(state, [deferred], NOW + timedelta(minutes=15))
+        records = monitor.summary_records(state, [deferred], NOW + timedelta(minutes=35))
         self.assertEqual(records, [deferred])
 
     def test_ambiguous_notification_is_not_resent(self):
@@ -510,7 +544,7 @@ class MonitorTests(unittest.TestCase):
     def test_portable_launch_agent_contract(self):
         plist = plistlib.loads((monitor.OPS / "com.rever.cliproxy-fleet-monitor.plist").read_bytes())
         self.assertEqual(plist["Label"], "com.rever.cliproxy-fleet-monitor")
-        self.assertEqual(plist["StartInterval"], 300)
+        self.assertEqual(plist["StartInterval"], probe.TICK_INTERVAL)
         self.assertTrue(plist["RunAtLoad"])
         self.assertNotIn("KeepAlive", plist)
         self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], "/Users/rever/cliproxy")

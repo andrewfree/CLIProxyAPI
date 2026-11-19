@@ -21,6 +21,10 @@ The tool reads `GET https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip
 This request is read-only. The claude-cli `User-Agent`, `x-app: cli`, and
 `anthropic-beta: oauth-2025-04-20` headers are required to get the `cedar_ember` block.
 
+The fleet monitor also reads Claude usage about every 15 minutes and records
+it in `ops/runtime/fleet/quota-history-YYYY-MM.jsonl`, so prefer that snapshot
+for routine checks and pause the monitor before a `watch`.
+
 - `limits` holds `weekly_all`, the weekly total. It also holds one
   `weekly_scoped` entry per capped model. In November 2026 Fable was the only
   capped model.

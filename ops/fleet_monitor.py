@@ -17,9 +17,8 @@ import sys
 import tempfile
 
 if __package__:
-    from . import claude_usage_resets as claude, fleet_monitor_probe as probes, fleetctl
+    from . import fleet_monitor_probe as probes, fleetctl
 else:
-    import claude_usage_resets as claude
     import fleet_monitor_probe as probes
     import fleetctl
 
@@ -29,8 +28,9 @@ PARITY_TIMEOUT = 105
 TEXT_TIMEOUT = 12
 PARITY_INTERVAL = 3600
 DAILY_AT = local_time(9)
-CLAUDE_EVERY_TICKS = 3
-CLAUDE_SUMMARY_MAX_AGE = timedelta(minutes=15)
+CLAUDE_MIN_INTERVAL = 300
+CLAUDE_RATE_LIMIT_BACKOFF = 1200
+CLAUDE_SUMMARY_MAX_AGE = timedelta(minutes=35)
 COOLDOWN_QUIET = timedelta(hours=1)
 TEXT_PORT = 8787
 TEXT_SENT, TEXT_NOT_SENT, TEXT_UNCONFIRMED = 0, 20, 21
@@ -111,7 +111,6 @@ def run_host(host, salt, visited, not_before):
     if not fleetctl.valid_ssh_host(name, destination):
         return fallback
     endpoint = {name: host[name] for name in ("port", "instance_root")}
-    endpoint["claude_status_snapshot"] = destination is None
     payload = json.dumps([endpoint, salt, sorted(visited), not_before], allow_nan=False)
     if destination is None:
         argv = [sys.executable, "-B", str(OPS / "fleet_monitor.py"), "--worker"]
@@ -326,8 +325,12 @@ def quota_alerts(state, records, now):
         observed_until = probes.timestamp(deadline)
         last_cooldown = probes.timestamp(cooldown.get("until"))
         if observed_until is not None and observed_until > now:
-            if ((last_cooldown is None or now - last_cooldown >= COOLDOWN_QUIET)
-                    and not any(window["capped"] for window in row["windows"])):
+            reported_cap = any(
+                window.get("capped")
+                and ((reset := probes.timestamp(window.get("reset_at"))) is None or reset > now)
+                for window in account.values()
+            )
+            if not reported_cap and (last_cooldown is None or now - last_cooldown >= COOLDOWN_QUIET):
                 alerts.append(f"{name} in proxy quota cooldown until {display_time(deadline)}.")
             cooldown["until"] = probes.iso(max(last_cooldown or now, observed_until))
     return alerts
@@ -387,47 +390,44 @@ def daily_message(day, records, hosts, parity, seen_outages):
     return "\n".join(lines)
 
 
-def collect_hosts(hosts, salt, not_before):
-    mac = run_host(hosts["m5"], salt, set(), not_before)
+def collect_hosts(hosts, salt, not_before, host_guards=None):
+    host_guards = host_guards or {}
+    mac = run_host(hosts["m5"], salt, set(), dict(not_before, _all=host_guards.get("m5", 0)))
     visited = {row["account_id"] for row in mac["accounts"] if row["attempted_at"] is not None}
-    if mac.get("uncertain") and not not_before.get("_skip_claude"):
-        not_before["_all"] = max(not_before["_all"], now_utc().timestamp() + probes.CLAUDE_INTERVAL)
-    will_dispatched = now_utc().timestamp()
-    will = run_host(hosts["will"], salt, visited, not_before)
-    return {"m5": mac, "will": will}, will_dispatched
+    will_due = dict(not_before, _all=host_guards.get("will", 0))
+    if mac.get("uncertain"):
+        # An interrupted Mac worker may already have polled shared accounts.
+        will_due["_skip_claude"] = True
+    will = run_host(hosts["will"], salt, visited, will_due)
+    return {"m5": mac, "will": will}
 
 
-def collect_with_claude(root, hosts, state, tick_start):
-    interval = probes.CLAUDE_INTERVAL
-    with claude.locked_usage(root) as (usage, save):
-        now = now_utc().timestamp()
-        guard = max(usage.get("guard_until", 0), state.get("claude_guard_until", 0))
-        # Reserve before dispatch in case the monitor exits without worker results.
-        reserve = max(guard, max(tick_start, now) + 2 * HOST_TIMEOUT + 10 + interval)
-        usage["guard_until"] = reserve
-        save()
-        accounts = usage["accounts"]
-        not_before = {tag: attempt + interval for tag, attempt in state.get("claude_attempts", {}).items()}
-        not_before.update({tag: entry["attempted_at"] + interval for tag, entry in accounts.items()})
-        not_before.update(_all=guard, _usage_salt=usage["salt"])
-        observed, will_dispatched = collect_hosts(hosts, state["salt"], not_before)
-        guard = not_before["_all"]
-        if observed["will"].get("uncertain"):
-            guard = max(guard, reserve, will_dispatched + HOST_TIMEOUT + interval)
-        usage["guard_until"] = guard if guard > now else 0
+def collect_with_claude(hosts, state, state_file):
+    now = now_utc().timestamp()
+    account_due = {tag: attempt + CLAUDE_MIN_INTERVAL
+                   for tag, attempt in state.get("claude_attempts", {}).items()}
+    account_due.update(state.get("claude_not_before", {}))
+    host_guards = state.get("claude_host_guards", {})
+    # Both workers have deadlines. Reserve through those deadlines in case the
+    # monitor exits before it learns which accounts they attempted.
+    reserve = now + 2 * HOST_TIMEOUT + 10 + CLAUDE_MIN_INTERVAL
+    reserved = {name: max(host_guards.get(name, 0), reserve) for name in hosts}
+    state["claude_host_guards"] = reserved
+    write_json(state_file, state)
+    observed = collect_hosts(hosts, state["salt"], account_due, host_guards)
 
-        for report in observed.values():
-            for row in report["accounts"]:
-                if "usage_id" in row:
-                    entry = {"attempted_at": row["attempted_at"]}
-                    if "usage_summary" in row:
-                        entry["summary"] = row["usage_summary"]
-                    accounts[row["usage_id"]] = entry
-        usage["accounts"] = {tag: entry for tag, entry in accounts.items()
-                             if entry["attempted_at"] + interval > now}
-        save()
+    for name, report in observed.items():
+        host_guards[name] = reserved[name] if report.get("uncertain") else host_guards.get(name, 0)
+        for row in report["accounts"]:
+            if row["provider"] == "claude" and row["attempted_at"] is not None:
+                interval = (CLAUDE_RATE_LIMIT_BACKOFF if row["status"] == "quota-rate-limited"
+                            else CLAUDE_MIN_INTERVAL)
+                account_due[row["account_id"]] = row["attempted_at"] + interval
+    state["claude_host_guards"] = {name: due for name, due in host_guards.items() if due > now}
+    state["claude_not_before"] = {tag: due for tag, due in account_due.items() if due > now}
     state.pop("claude_attempts", None)
     state.pop("claude_guard_until", None)
+    write_json(state_file, state)
     return observed
 
 
@@ -446,10 +446,10 @@ def tick(root, hosts, runtime, command, no_notify):
     with ThreadPoolExecutor(max_workers=1) as pool:
         parity = pool.submit(run_parity) if parity_due else None
         if claude_tick == 0:
-            observed = collect_with_claude(root, hosts, state, now.timestamp())
+            observed = collect_with_claude(hosts, state, state_file)
         else:
-            observed, _ = collect_hosts(hosts, state["salt"], {"_skip_claude": True})
-    state["claude_tick"] = (claude_tick + 1) % CLAUDE_EVERY_TICKS
+            observed = collect_hosts(hosts, state["salt"], {"_skip_claude": True})
+    state["claude_tick"] = (claude_tick + 1) % probes.CLAUDE_EVERY_TICKS
 
     records, state["inventory"] = quota_records(observed, state.get("inventory", {}), captured_at)
     daily_records = summary_records(state, records, now)
