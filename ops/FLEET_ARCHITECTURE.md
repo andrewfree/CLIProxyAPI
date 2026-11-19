@@ -628,6 +628,38 @@ M1's Codex and OpenCode key files); in `~/.config/nvidia/api.env` and CodexBar o
 mode-0600 files under `ops/runtime/` ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
 Nothing tracked by git holds one.
 
+### 2.10 Health and quota monitoring
+
+Once Andrew activates the LaunchAgent, the Mac runs it from the shipped
+bundle. Each five-minute tick reads both instances' loopback `/healthz` and checks provider egress
+with bounded TCP connects from inside their containers. The sockets send no
+TLS, HTTP or credentials. A healthy proxy with a failed upstream dial is
+`egress-down`. A failed proxy health check is `unreachable`. An incomplete
+egress check is `unknown`. Will's checks use noninteractive SSH and run
+against its local proxy and container. Hourly parity retains its own result,
+even when the accompanying health report shows an outage. This schedule
+makes no inference requests and does not change routing or configuration.
+
+The monitor also collects read-only quota data through management API
+credential substitution. It uses the same Claude usage contract as the
+reset tool, reads the Codex, Kimi and Z.ai usage endpoints, and records
+Claude's scoped caps and reset-grant counts. For Z.ai compatibility keys,
+only a known HTTPS provider origin authorizes a quota request. The Mac is
+preferred for shared accounts. Will supplies accounts the Mac did not poll,
+as well as Will's independent cooldowns. Shared accounts are matched with
+stable private account tags. Where OAuth account metadata is missing, the
+credential index is the identity fallback. Each Claude account's poll timing
+is persisted and a failed read is not retried within the tick.
+
+`health.json`, `latest.json` and `quota-history.jsonl` live in the Mac's
+private runtime directory. The history uses route labels when available and
+pseudonyms otherwise. It records percentages, timestamps and cap states
+without raw account identities or upstream bodies. Alerts track observable
+state transitions across ticks, and the daily summary includes outages
+observed between summaries. The Text Me service sends to its configured
+recipient. The [runbook](FLEET.md#health-and-quota-monitor) covers activation,
+pause, and private charts generated from the JSONL history.
+
 ## 3. Problem, fix, location, evidence
 
 | Problem | Fix | Where it lives | Evidence |
@@ -644,7 +676,7 @@ Nothing tracked by git holds one.
 | A dropped SYN made one Claude dial wait about 133 to 135 s | `net.ipv4.tcp_syn_retries: 2`, live since the November 18 recreate | Both Compose files; Will's policy and verifier | PR #13; [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Z.ai answered `glm-5.2` with GLM-5.3, and Will's Cursor `glm-5.2` entry returned 503 `auth_not_found` | Client ID `glm-5.2` maps to upstream `glm-5.3` on `zai-coding-plan` | Host `config.yaml` on both hosts | [GLM_ROUTING.md](GLM_ROUTING.md#glm-52-maps-to-glm-53) |
 | Only the Mac served the NVIDIA models | NVIDIA provider and its three aliases added to Will | Will `config.yaml` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
-| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; unit 5 is planned for quota statistics | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; the monitor collects quota history after activation | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Will's extra `kimi-ai` login looked like extra Kimi capacity | Removed: its usage counters matched the `kimi` login, so both share one quota | Will `auths/`; private backup in Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026); [KIMI_ROUTING.md](KIMI_ROUTING.md) |
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
 | A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
@@ -662,8 +694,9 @@ Nothing tracked by git holds one.
   exact one today: the Mac also serves the `camoff-astra` prefix (dated exceptions, section 2.1),
   which waits for Andrew's OAuth login on Will. The design's optional wrapper (unit 10) is not
   built.
-- **CLIProxyBar's Will entry uses Will's raw address.** The Mac's `codex_cliproxy` moved to the
-  tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
+- **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances.
+  The monitor supplies fleet quota history, alerts and summaries. The Mac's `codex_cliproxy`
+  moved to the tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
   CLIProxyBar's Will entry still reaches Will at its raw tailnet IP address, so the section 2.6
   reason for the name applies to it too: with Tailscale stopped on another network, it would send
   its requests in clear to whatever holds that address. Moving it to the name is a separate change
@@ -676,12 +709,10 @@ Nothing tracked by git holds one.
   to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
-- **Health notification.** The design's scheduled health and parity job (unit 5) is not built, so
-  nothing tells Andrew when Will's egress is down. `fleetctl health` cannot tell either, because
-  `/healthz` stays green when only egress is down. Signs of an egress outage are `egress_hold`
-  lines in `ops/runtime/fleet/failover.jsonl` on the Mac and dial-error 5xx answers from Will.
-  For a host that is down or drifted, run `fleetctl health` and `parity` by hand. Unit 5 is also
-  where quota statistics are planned to come from, since the quota plugin was removed from Will.
+- **Monitor activation.** Andrew approves and installs the Mac LaunchAgent after the
+  bundle ships. Before activation, use `fleetctl health` and `parity` by hand. With only egress down,
+  `/healthz` can stay green. Look for `egress_hold` lines in
+  `ops/runtime/fleet/failover.jsonl` on the Mac or dial-error 5xx answers from Will.
 - **Shipping ops files.** `fleetctl ship` is deferred. The Mac runs from its checkout and Will
   from a copied tree (section 2.8).
 

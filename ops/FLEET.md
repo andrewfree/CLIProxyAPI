@@ -48,9 +48,9 @@ alias attributes, so parity cannot account for those overrides.
 
 The read-only checks cover the management API contract. Use the existing
 instance verifiers for Docker image and Compose checks. The bundle manifest
-lists files for the later shipping step. Shipping, bundle activation receipts,
-in-container egress checks, and scheduled health notifications follow in
-separate units.
+lists files for the shipping step. The Mac's scheduled monitor adds
+[in-container egress and quota checks](#health-and-quota-monitor) after its
+bundle and LaunchAgent are activated.
 
 Operational differences recorded on November 18, 2026, for review by December 2, 2026:
 
@@ -171,6 +171,86 @@ The following rollback record applies only to the October 15 fleet.3 deployment.
 
 Tailscale Serve can remain in place during an application rollback. To remove only the new private route, use `sudo tailscale serve --tcp=8317 off` on Will. Do not reset Serve: HTTPS 443 belongs to T3. Revert T3 routes through `server.updateSettings` or the app settings, preserving secrets in the app's secret store.
 
+## Health and quota monitor
+
+One job on the Mac checks both proxies and does a TCP connect from inside each
+container to the provider hosts every 300 seconds. It compares parity hourly
+and reads the Claude, Codex, Kimi and Z.ai quotas through the supported usage
+endpoints. It sends no inference requests. Open CLIProxyBar for a live glance.
+Its Will entry still uses Will's raw address.
+
+The monitor sends a text when Will becomes unreachable, Will's egress fails,
+the Mac proxy goes down, or parity drifts. It texts on recovery from these
+conditions and when an account crosses 90% of a known weekly or monthly
+quota or becomes capped. Transitions in one tick share a text. The first tick
+at or after 09:00 Mac local time sends the day's summary, including quota
+resets and outages observed since the last summary. If the Mac was asleep,
+the next tick catches up that day's summary. Z.ai's window codes stay opaque.
+The summary includes those readings and any published reset timestamps.
+
+### Install or resume on the Mac
+
+After review, ship the approved bundle to `~/cliproxy-live`. Unit 2b's bundle
+must include the monitor, its probe helper, the chart, the plist,
+`claude_usage_resets.py`, and the existing `fleetctl.py` contract inputs.
+Install and bootstrap the LaunchAgent only after Andrew approves the live
+change. Its first run can text Andrew. The job uses the existing Text Me
+LaunchAgent's default recipient.
+
+```sh
+bundle="$HOME/cliproxy-live/ops"
+agent="$HOME/Library/LaunchAgents/com.rever.cliproxy-fleet-monitor.plist"
+domain="gui/$(id -u)"
+plutil -lint "$bundle/com.rever.cliproxy-fleet-monitor.plist"
+curl --noproxy '*' --fail --silent --show-error --max-time 5 http://127.0.0.1:8787/health
+install -m 644 "$bundle/com.rever.cliproxy-fleet-monitor.plist" "$agent"
+launchctl bootstrap "$domain" "$agent"
+launchctl print "$domain/com.rever.cliproxy-fleet-monitor"
+```
+
+After the first run, read the three output files below. Confirm that both
+hosts have a result when run by launchd, and that the per-provider account
+rows and Text Me status match what is available. To collect manually with
+notifications disabled, pause the LaunchAgent first and run:
+
+```sh
+CLIPROXY_ROOT="$HOME/cliproxy" /opt/homebrew/bin/python3 -B "$HOME/cliproxy-live/ops/fleet_monitor.py" --no-notify
+```
+
+Pause with `launchctl bootout "gui/$(id -u)/com.rever.cliproxy-fleet-monitor"`.
+Resume by bootstrapping the installed plist again. Pause the job if you run
+the Claude usage tool in watch mode, and allow at least 300 seconds between
+reads of the same Claude account. Keep `monitor-state.json` with the history. It preserves account labels, provider poll timing and
+notification state across launches.
+
+For a different notifier, set `CLIPROXY_FLEET_NOTIFY_COMMAND` in the installed
+plist's `EnvironmentVariables` before bootstrapping. Use an absolute executable
+path and optional quoted arguments. The command receives the text on stdin
+and returns zero upon acceptance. If delivery is unconfirmed, the monitor
+records that in `health.json` and logs it to
+`~/Library/Logs/cliproxy-fleet-monitor.log`. It does not automatically resend
+that transition because Text Me provides no idempotency receipt.
+
+### Read the reports or chart the history
+
+```sh
+runtime="$HOME/cliproxy/ops/runtime/fleet"
+python3 -m json.tool "$runtime/health.json"
+python3 -m json.tool "$runtime/latest.json"
+tail -n 20 "$runtime/quota-history.jsonl"
+python3 "$HOME/cliproxy-live/ops/fleet_quota_chart.py" --days 14
+```
+
+`health.json` has the last tick's reachability and per-destination egress
+results. `latest.json` has the last hourly parity comparison and that tick's
+health. The JSONL history has one row per known account per tick, with all
+observed quota windows nested under `windows`. Each window records percent
+used, reset and cap state. Each row identifies the source host and any proxy
+cooldowns by host. A row with unavailable quota has an empty window list.
+The chart defaults to seven days and writes `quota-chart.html` beside the
+history. Use `--account` to select a label or provider, `--window` to select a
+window, and `--output` to choose a file.
+
 ## Operations on November 18, 2026
 
 These changes are live but are not part of a release. Of the changes below, only the parity cleanup touched the release manifest, to update its config fingerprint pins.
@@ -199,8 +279,8 @@ These changes are live but are not part of a release. Of the changes below, only
   - **Codex by name.** The Mac's `codex_cliproxy` ("CLIProxy pool · W") now sets `model_providers.cliproxy.base_url` to `http://will.<tailnet>.ts.net:8317/v1` in its launch args, in place of `http://100.98.74.67:8317/v1`. No other field changed. The reason is the one for `claude_cliproxy` ([Running fleet](#running-fleet)). Check: a new session's `codex app-server` carried the name, and Will logged its `/v1/responses` requests. M1 and CLIProxyBar's Will entry still use the raw address.
   - **NVIDIA on Will.** The NVIDIA provider (static key) and its three aliases (`nvidia-nemotron-3-ultra`, `nvidia-nemotron-3.5-lightning`, `nvidia-minimax-m3.1-flash`) were added to Will's legacy-layout config (`openai-compatibility`, `api-key-entries`). Check: one test request per alias on Will returned 200 from the expected upstream model; the responses' `model` fields were `nvidia/nemotron-3-ultra-550b-a55b`, `nvidia/nemotron-3.5-lightning-30b-a3b` and `minimaxai/minimax-m3.1-flash`.
   - **`glm-5.2` maps to `glm-5.3`.** Z.ai's model list for the GLM Coding Plan still names `glm-5.2`, but Z.ai redirects `glm-5.2` and `glm-5.1` requests to GLM-5.3 on its side ([Z.ai](https://docs.z.ai/devpack/latest-model)). A direct `glm-5.2` alias answered correctly, but every reply named `glm-5.3`, and the Cursor plugin's `glm-5.2` entry on Will returned 503 `auth_not_found` (`providers=cursor`). At Andrew's request both hosts now map client ID `glm-5.2` to upstream `glm-5.3` on `zai-coding-plan`, so the request CLIProxy sends names the model that answers. Check: `/v1/models` lists `glm-5.2` owned by `zai-coding-plan` on both hosts. On the Mac, the request log of one `glm-5.2` request showed `glm-5.2` in `=== REQUEST BODY ===` and `glm-5.3` in `=== API REQUEST ===`. Will's stale Cursor registration (parity `P9/glm-5.2`) cleared after the container recreate. See [the GLM routing guide](GLM_ROUTING.md#glm-52-maps-to-glm-53).
-  - **Quota plugin removed from Will.** `cliproxybar-quota` was written by Andrew's sessions on 2026-10-13 in his local CLIProxyBar branch (`~/cliproxybar`, upstream `darfink/cliproxybar`). It reads quota only for Grok browser and xAI accounts, which neither host has. It was disabled with `PATCH /v0/management/plugins/cliproxybar-quota/enabled` and `{"enabled":false}`, its config lines were removed, and its library was moved to a private backup on Will under `ops/runtime/parity-20261118/plugin-backup`. Quota statistics will come from the planned unit 5 health job instead (alerts, quota history, a daily summary, charts on request); CLIProxyBar stays for live glances.
+  - **Quota plugin removed from Will.** `cliproxybar-quota` was written by Andrew's sessions on 2026-10-13 in his local CLIProxyBar branch (`~/cliproxybar`, upstream `darfink/cliproxybar`). It reads quota only for Grok browser and xAI accounts, which neither host has. It was disabled with `PATCH /v0/management/plugins/cliproxybar-quota/enabled` and `{"enabled":false}`, its config lines were removed, and its library was moved to a private backup on Will under `ops/runtime/parity-20261118/plugin-backup`. The [fleet monitor](#health-and-quota-monitor) supplies alerts, quota history, a daily summary and charts once activated. CLIProxyBar stays for live glances.
   - **`kimi-ai` login removed from Will.** The management `api-call` `GET /coding/v1/usages` returned identical counters for the `kimi` login (`api.kimi.com`) and the `kimi-ai` login (`api.kimi.ai`): the same 5-hour reset time to the microsecond and the same monthly use (97.36% on November 18, resetting November 22). They share one Kimi quota, so `kimi-ai` added no capacity. Its auth file was moved to a private backup on Will under `ops/runtime/parity-20261118/auth-backup`. Check: Kimi on Will answered with the single `kimi` login afterwards (a `kimi-k3-256k` request returned 200 with the exact reply), and `fleetctl parity` no longer reports `P6/kimi-ai`. See [the Kimi routing recipe](KIMI_ROUTING.md).
   - **Containers recreated** on unchanged images: the Mac at 23:18:46Z and Will at 23:19:06Z (15:18 to 15:19 Pacific). Check: `net.ipv4.tcp_syn_retries` reads back as 2 inside each container, and Will's `verify_live.py` reports ok with no `container_sysctls_drift`.
   - **Parity.** [exceptions.json](fleet/exceptions.json) now holds three entries: `P2/debug`, `P6/camoff-astra` and `P8/camoff-astra`. The six for NVIDIA (`P2`, `P5`, `P8`), the quota plugin (`P2`, `P10`) and `kimi-ai` (`P6`) were removed because they matched nothing. The `config_fingerprint` pins in [fleet-release.json](fleet-release.json) now hold shared digest `9213320e...` and Mac observed digest `fcd1d0b4...`. Check: `fleetctl parity` reports `equal` with no drift. The fleetctl tests now load a frozen copy of the nine exceptions seeded on November 18 ([test_fleetctl_exceptions.json](test_fleetctl_exceptions.json)), which matches their synthetic fleet, instead of the live file.
-  - **Still open:** `camoff-astra` on Will (needs Andrew's OAuth login), the unit 5 health and quota job, the unit 2b Mac bundle, unit 10 Codex automatic fallback, and the raw-address entries on M1 and in CLIProxyBar.
+  - **Still open:** `camoff-astra` on Will (needs Andrew's OAuth login), live activation of the unit 5 monitor and the unit 2b Mac bundle, unit 10 Codex automatic fallback, and the raw-address entries on M1 and in CLIProxyBar.
