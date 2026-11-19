@@ -251,7 +251,7 @@ On the Mac, enable session-start failover for the Will-primary
 
 | Profile field | Value |
 | --- | --- |
-| `config.binaryPath` | `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs` after the Mac bundle cutover, otherwise the absolute path in the approved Mac checkout |
+| `config.binaryPath` | `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs` (enable only after the Mac bundle cutover) |
 | Profile environment `CLIPROXY_FALLBACK_URL` | `http://127.0.0.1:8317` |
 | Profile environment `CODEX_REAL_BINARY` | `/opt/homebrew/bin/codex` |
 

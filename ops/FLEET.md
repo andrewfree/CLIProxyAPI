@@ -78,9 +78,10 @@ the instance root for Compose, the host's logs, and private runtime state.
 
 1. Preview the exact commit and record the five current T3 launcher paths.
    Stop if either command fails or the paths differ from the expected checkout
-   launcher. In T3 Settings, also write down `codex_cliproxy`'s
-   `config.binaryPath` for the rollback. The helper reports only the Claude
-   profiles.
+   launcher. In T3 Settings, also check that `codex_cliproxy`'s
+   `config.binaryPath` is still `/opt/homebrew/bin/codex`. Codex failover is
+   enabled only after this cutover, from the bundle, so stop if the profile
+   already points at a checkout launcher.
 
    ```sh
    commit=$(git rev-parse HEAD)
@@ -122,12 +123,7 @@ the instance root for Compose, the host's logs, and private runtime state.
    helper uses `server.updateSettings` to change `config.binaryPath` and
    checks the saved profile settings. It writes private redacted before and
    after snapshots and prints the five path strings. The shipped token helper
-   replaces the locally edited copy so P0 can verify its checksum. The helper
-   moves only the Claude profiles. If step 1 found `codex_cliproxy` on the
-   checkout's `codex_fallback_launcher.mjs`, change its `config.binaryPath` to
-   `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs` in T3 Settings
-   now, so the Codex launcher and its probe module also stop running from the
-   checkout.
+   replaces the locally edited copy so P0 can verify its checksum.
 
    ```sh
    /bin/zsh ops/install_watchdog.sh "$bundle"
@@ -143,11 +139,7 @@ the instance root for Compose, the host's logs, and private runtime state.
    check the watchdog log for a normal cycle and the archiver
    log for its usual status. Start one new `claude_cliproxy_mac` session
    and one new named Claude session and verify that each can answer
-   `count_tokens` through its intended route. If step 3 changed
-   `codex_cliproxy`, start one new session on it too and check that the
-   newest `"subcommand":"app-server"` line in
-   `ops/runtime/fleet/codex-failover.jsonl` under the instance root has
-   `"selected":"primary"`. In a scratch worktree, a
+   `count_tokens` through its intended route. In a scratch worktree, a
    local edit to a shipped script should leave the deployed hash unchanged.
    Keep the interim live-change rule until sessions using the old launcher
    have ended. The token and P0 checks run in a subshell, so a failure stops
@@ -187,8 +179,6 @@ rm -f ops/runtime/watchdog.pause
 
 **First cutover rollback.** Use the private `backup` from step 2. Restore the
 T3 paths, reinstall the saved checkout plists, and restore the token helper.
-If step 3 changed `codex_cliproxy`, set its `config.binaryPath` back to the
-path noted in step 1.
 
 ```sh
 rollback_settings=$(mktemp -d "$backup/t3-rollback.XXXXXXXX")
@@ -325,27 +315,22 @@ Tailscale Serve can remain in place during an application rollback. To remove on
 
 ### Enable or roll back Codex failover
 
-1. After review and CI, obtain Andrew's live promote phrase for the T3
-   profile change. If the launcher is not on the Mac yet, the phrase also
-   covers the ship or checkout update that delivers it. Check that both hosts
-   accept the profile's existing client key and serve the model IDs used by
-   the profile.
-2. Run the local closed-port test from a Mac checkout at the commit T3 will
-   run, then choose the executable path for T3 Settings:
-   - While the bundle cutover is in effect (not rolled back), use
-     `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs`. The
-     printed checkout and shipped commits must match.
-   - Otherwise use the printed checkout path.
+Enable it only after the [Mac bundle cutover](#mac-ops-bundle-cutover)
+has passed, so T3 runs the launcher from the bundle and never from the
+checkout. The T3 path is
+`/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs`. The launcher
+writes its decision log under the instance root, not inside the bundle.
 
-   Either way the launcher writes its decision log under the instance root,
-   not inside the bundle.
+1. After review and CI, obtain Andrew's live promote phrase for the T3
+   profile change. Check that both hosts accept the profile's existing client
+   key and serve the model IDs used by the profile.
+2. From a Mac checkout at the shipped commit, run the local closed-port
+   test. The two printed commits must match.
 
    ```sh
-   node --test --test-name-pattern='connection refusal' ops/codex_fallback_launcher.test.mjs
-   printf '%s/ops/codex_fallback_launcher.mjs\n' "$(pwd -P)"
+   jq -r '"shipped  " + .commit' "$HOME/cliproxy-live/ops/bundle-manifest.json"
    printf 'checkout %s\n' "$(git rev-parse HEAD)"
-   python3 -c 'import json, pathlib; print("shipped ", json.loads((pathlib.Path.home() / "cliproxy-live/ops/bundle-manifest.json").read_text())["commit"])' 2>/dev/null ||
-     printf '%s\n' 'shipped  none (no bundle)'
+   node --test --test-name-pattern='connection refusal' ops/codex_fallback_launcher.test.mjs
    ```
 
 3. Use those [profile settings](README.md#codex-failover) on a temporary
