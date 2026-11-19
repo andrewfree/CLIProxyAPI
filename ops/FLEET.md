@@ -62,18 +62,22 @@ Operational differences recorded on November 18, 2026, for review by December 2,
   during prechecks (unit 0).
 
 The Mac cutover ran on November 18, 2026, at commit `9273f727`. Since then a
-checkout edit reaches no job or new T3 session; ship a reviewed commit instead.
-T3 sessions started before 17:54 Pacific that day keep the checkout launcher
-until they end, so until then updating the Claude launcher in the Mac's primary
-checkout is still a live change. Compose configuration in the primary checkout
-is always live and requires Andrew's promote phrase. Edit
-those files in a worktree. Activate the Mac first, then Will. If verification
-fails, roll back the host just changed. A host that already passed requires
-Andrew's instruction to roll back.
+checkout edit reaches no job or new T3 session. These are live changes that
+require Andrew's promote phrase: a Mac `fleetctl ship --apply`, reinstalling a
+LaunchAgent or the token helper from the bundle, changing a T3 profile's launch
+settings, and any Compose configuration in the primary checkout. T3 sessions
+started before 17:54 Pacific that day keep the checkout launcher until they
+end, so until then updating the Claude launcher in the primary checkout is a
+live change too. Edit ops files and Compose configuration in a worktree.
+Activate the Mac first, then Will. If verification fails, roll back the host
+just changed. A host that already passed requires Andrew's instruction to roll
+back.
 
 ## Mac ops bundle cutover
 
-Unit 2b is prepared for Andrew's live approval. Run from a clean worktree at
+The first cutover ran on November 18, 2026 (see the
+[activation record](evidence/live-activation-20261118/README.md)). These steps
+stay as the record and as the procedure for a first cutover. Run from a clean worktree at
 the reviewed, merged unit 2b commit. Wait for Andrew's `promote fleet <id>`
 phrase before publishing, installing, or repointing profiles. Coordinate a
 window for the two LaunchAgents and new Claude CLIProxy sessions. Existing
@@ -290,7 +294,7 @@ T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the sha
 
 `ops/claude_account_launcher.mjs` supports explicit `shared-pool` mode through `CLIPROXY_CLAUDE_ROUTE`. This mode forwards unprefixed Claude model IDs to the existing credential selector. Named profiles keep their account prefixes. `ops/configure_claude_pool.mjs` provisions pool profiles through the running T3 settings API and stores keys in its secret store. The [routing receipt](evidence/claude-pool-routing-20261103.json) records tests, deployed artifact hashes, and runtime-check limits. This host-side integration does not change the fleet's server images or manifest.
 
-`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. The Mac's `codex_cliproxy` can opt into session-start failover using the procedure below. The `_mac` profiles, named Claude profiles and Will's own `claude_cliproxy` use fixed hosts. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
+`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. The Mac's `codex_cliproxy` has used session-start failover from the bundle since November 18 (procedure and rollback below). The `_mac` profiles, named Claude profiles and Will's own `claude_cliproxy` use fixed hosts. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
 
 For exact-model discovery and an authorized T3 task, follow [the Kimi CLIProxy routing recipe](KIMI_ROUTING.md).
 

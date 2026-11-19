@@ -141,8 +141,9 @@ Three details of the parity design matter when you change it:
   tags made with a nonce that exists for one run ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 4
   and 8).
 - **Every difference needs a dated exception.** [fleet/exceptions.json](fleet/exceptions.json)
-  holds three entries dated November 18 with `review_by` December 2: debug logging, and two for
-  the `camoff-astra` prefix on the Mac. Six more were seeded that day, for NVIDIA on the Mac only,
+  holds one entry, debug logging, dated November 18 with `review_by` December 2. Two more for
+  the `camoff-astra` prefix on the Mac were removed that evening once Will served the same
+  prefix. Six more were seeded that day, for NVIDIA on the Mac only,
   the quota plugin on Will only and the extra `kimi-ai` credential on Will. They were removed the
   same day once those differences were gone
   ([FLEET.md](FLEET.md#operations-on-november-18-2026), parity cleanup). None is on a Claude row.
@@ -583,9 +584,9 @@ files, and `.env`, then checks the hashes and resolved image against the
 activation receipt. A mismatch falls back to starting the existing container
 by name. An expiring pause lets an approved activation temporarily suppress
 all repairs. See the [cutover and rollback](FLEET.md#mac-ops-bundle-cutover).
-Until Andrew approves and verifies cutover, the interim live-change rule in
-[FLEET.md](FLEET.md#fleet-contract) applies. Sessions that predate the repoint
-retain their original launcher until they end.
+Andrew approved the cutover and it was verified on November 18. The live-change
+rule in [FLEET.md](FLEET.md#fleet-contract) now gates ships and reinstalls.
+Sessions that predate the repoint retain their original launcher until they end.
 
 **Why config is edited in place.** `config.yaml` is bind-mounted as a single file. Replacing or
 renaming it breaks the mount's link to the inode, so every config change is one in-place write
@@ -708,8 +709,8 @@ the Mac's `codex_cliproxy` checks Will at startup and selects the Mac automatica
 fails its health check and the Mac passes. If both fail, it starts with the Will URL. The
 launcher reuses the three-second `/healthz` probe from section 2.6. A healthy `/healthz`
 cannot reveal an upstream egress outage. Codex CLI keeps one `base_url` per process, so an
-existing session stays on its selected host. Until Andrew enables the launcher, switching is
-manual. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to the Mac.
+existing session stays on its selected host. Andrew enabled the launcher on November 18, from
+the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to the Mac.
 
 **Not automatic:**
 
@@ -795,8 +796,9 @@ text).
 
 **The launcher.**
 
-- It serves every Claude CLIProxy profile on both machines, and on the Mac it runs from the
-  checkout. Treat any edit as a live change.
+- It serves every Claude CLIProxy profile on both machines. On the Mac it runs from the bundle,
+  so a change goes live only through an approved ship. Sessions started before the November 18
+  cutover still run the checkout copy until they end.
 - Without `CLIPROXY_FALLBACK_URL`, behaviour must not change: no timers, no probes.
 - Never retry or move a request to another account. Never let a named route cross hosts.
 - Never replay a message that may already be generating. Only pre-connect failures and dial-error
