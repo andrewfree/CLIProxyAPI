@@ -197,6 +197,75 @@ class ClaimTest(unittest.TestCase):
                              False, min_fable_percent=percent)
         self.assertEqual(proxy.calls, [])
 
+    def with_weekly_reset(self, resets_at, weekly=100):
+        body = usage_body(weekly=weekly)
+        body["limits"][0]["resets_at"] = resets_at
+        return body
+
+    def full_claim(self, proxy, **guards):
+        return resets.claim(proxy, EMAIL, "full-reset-2611", self.state, self.receipt,
+                            False, sleep=lambda _: None, **guards)
+
+    def test_weekly_guard_refuses_below_threshold_and_accepts_100(self):
+        proxy = FakeProxy([(200, usage_body(weekly=99))])
+        with self.assertRaisesRegex(resets.ResetError, "Weekly usage 99% is below required 100%"):
+            self.full_claim(proxy, min_weekly_percent=100)
+        self.assertEqual(proxy.posts(), [])
+
+        proxy = FakeProxy([(200, usage_body(weekly=100)), (200, usage_body(weekly=0))])
+        receipt = self.full_claim(proxy, min_weekly_percent=100)
+        self.assertEqual(len(proxy.posts()), 1)
+        self.assertEqual(receipt["min_weekly_percent"], 100)
+
+    def test_reset_window_pin_absorbs_jitter_seen_on_2026_11_18(self):
+        # The pin was whole-second; fresh reads reported these fractional drifts.
+        for reported in ("2026-11-25T02:00:00.932191+00:00", "2026-11-25T02:00:01.002000+00:00",
+                         "2026-11-24T18:00:00-08:00"):
+            proxy = FakeProxy([(200, self.with_weekly_reset(reported)), (200, usage_body(weekly=0))])
+            with self.subTest(reported=reported):
+                receipt = self.full_claim(proxy, min_weekly_percent=100, weekly_resets_at="2026-11-25T02:00:00Z")
+                self.assertEqual(len(proxy.posts()), 1)
+                self.assertEqual(receipt["weekly_resets_at_pin"],
+                                 {"pinned": "2026-11-25T02:00:00Z", "tolerance_seconds": 120.0})
+
+    def test_reset_window_pin_refuses_another_week_or_missing_time(self):
+        cases = {"next week": ("2026-12-02T02:00:00+00:00", "from pinned"),
+                 "past tolerance": ("2026-11-25T02:02:00.500+00:00", "from pinned"),
+                 "missing": (None, "no weekly reset time"),
+                 "naive": ("2026-11-25T02:00:00", "no UTC offset"),
+                 "garbage": ("soon", "not ISO 8601")}
+        for name, (reported, message) in cases.items():
+            proxy = FakeProxy([(200, self.with_weekly_reset(reported))])
+            with self.subTest(name), self.assertRaisesRegex(resets.ResetError, message):
+                self.full_claim(proxy, weekly_resets_at="2026-11-25T02:00:00Z")
+            self.assertEqual(proxy.posts(), [])
+            self.assertFalse(self.receipt.exists())
+
+    def test_bad_pin_or_tolerance_fails_before_network(self):
+        cases = [({"weekly_resets_at": "2026-11-25"}, "no UTC offset"),
+                 ({"weekly_resets_at": "tomorrow"}, "not ISO 8601"),
+                 ({"reset_tolerance": -1}, "reset tolerance"),
+                 ({"reset_tolerance": 86400}, "reset tolerance"),
+                 ({"reset_tolerance": float("nan")}, "reset tolerance"),
+                 ({"min_weekly_percent": 101}, "between 0 and 100")]
+        for guards, message in cases:
+            proxy = FakeProxy([])
+            with self.subTest(guards=guards), self.assertRaisesRegex(resets.ResetError, message):
+                self.full_claim(proxy, **guards)
+            self.assertEqual(proxy.calls, [])
+
+
+class TimestampTest(unittest.TestCase):
+    def test_now_iso_keeps_subsecond_precision_and_offset(self):
+        fixed = resets.datetime.datetime(2026, 11, 19, 5, 49, 2, 431626, tzinfo=resets.datetime.timezone.utc)
+        with mock.patch.object(resets.datetime, "datetime", wraps=resets.datetime.datetime) as clock:
+            clock.now.return_value = fixed
+            stamp = resets.now_iso()
+        self.assertIn(":02.431626", stamp)
+        self.assertEqual(resets.parse_iso(stamp), fixed)
+        # A capture taken after a fractional start must not compare as earlier than it.
+        self.assertGreaterEqual(resets.parse_iso(stamp), resets.parse_iso("2026-11-19T05:49:02.431626Z"))
+
 
 class CliGuardTest(unittest.TestCase):
     def test_claim_requires_yes_or_dry_run(self):
@@ -236,6 +305,17 @@ class CliGuardTest(unittest.TestCase):
             self.assertIn("not the ops bundle", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
             self.assertEqual(sorted(path.name for path in release.rglob("*")), ["claude_usage_resets.py", "ops"])
+
+    def test_cli_weekly_guards_reach_claim(self):
+        proxy = FakeProxy([(200, usage_body(weekly=100))])
+        code, spy, _ = self.run_claim_cli(proxy, ["--dry-run", "--min-weekly-percent", "100",
+                                                  "--weekly-resets-at", "2026-11-18T02:00:00Z",
+                                                  "--reset-tolerance", "5"])
+        self.assertEqual(code, 0)
+        self.assertEqual(spy.call_args.kwargs["min_weekly_percent"], 100)
+        self.assertEqual(spy.call_args.kwargs["weekly_resets_at"], "2026-11-18T02:00:00Z")
+        self.assertEqual(spy.call_args.kwargs["reset_tolerance"], 5.0)
+        self.assertEqual(proxy.posts(), [])
 
     def test_cli_without_min_fable_percent_passes_none(self):
         proxy = FakeProxy([(200, usage_body(fable=98))])
