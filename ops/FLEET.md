@@ -91,7 +91,9 @@ the instance root for Compose, the host's logs, and private runtime state.
    publish the bundle, and check that the current container matches the
    Compose inputs before recording them. If the receipt command refuses,
    investigate the mismatch before continuing. This cutover needs no
-   container recreate.
+   container recreate. The destination needs Node.js on its PATH so ship
+   can start the staged launcher alias with a fake Claude binary before
+   publishing.
 
    ```sh
    backup=$(mktemp -d "$instance/ops/runtime/mac-bundle-cutover.XXXXXXXX")
@@ -115,17 +117,22 @@ the instance root for Compose, the host's logs, and private runtime state.
 
 3. Reinstall both LaunchAgents and update the five T3 profiles. The T3
    helper uses `server.updateSettings` to change `config.binaryPath` and
-   checks the saved profile settings. It prints only the five path strings.
-   Install the shipped token helper so its checksum can be included in P0.
+   checks the saved profile settings. It writes private redacted before and
+   after snapshots and prints the five path strings. The shipped token helper
+   replaces the locally edited copy so P0 can verify its checksum.
 
    ```sh
    /bin/zsh ops/install_watchdog.sh "$bundle"
    /usr/bin/install -m 0700 "$bundle/cliproxy-codex-token" "$HOME/.local/bin/cliproxy-codex-token"
-   node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --apply
+   node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" \
+     --apply --backup-dir "$backup/t3-apply"
    ```
 
-4. Confirm both loaded jobs show the bundled scripts in their arguments,
-   then verify P0. Check the watchdog log for a normal cycle and the archiver
+4. Confirm both loaded jobs show the bundled scripts in their arguments.
+   Check that the installed token helper exits successfully and returns
+   nonempty output, measuring its length without displaying the token.
+   The cutover receipt records the helper replacement. Verify P0, then
+   check the watchdog log for a normal cycle and the archiver
    log for its usual status. Start one new `claude_cliproxy_mac` session
    and one new named Claude session and verify that each can answer
    `count_tokens` through its intended route. In a scratch worktree, a
@@ -138,6 +145,13 @@ the instance root for Compose, the host's logs, and private runtime state.
      launchctl print "gui/$(id -u)/$label"
    done
    set -o pipefail
+   if ! token_length=$("$HOME/.local/bin/cliproxy-codex-token" | wc -c) ||
+     [ "$token_length" -le 0 ]; then
+     printf '%s\n' 'Installed Codex token helper failed to return a token.' >&2
+     exit 1
+   fi
+   printf 'Replaced the installed Codex token helper with the shipped copy from %s. Token check passed.\n' \
+     "$commit" > "$backup/token-helper-replacement.txt"
    node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report |
      python3 ops/fleetctl.py check --host m5 --bundle-commit "$commit" --launcher-paths -
    ```
@@ -160,16 +174,24 @@ rm -f ops/runtime/watchdog.pause
 T3 paths, reinstall the saved checkout plists, and restore the token helper.
 
 ```sh
-node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --rollback
+rollback_settings=$(mktemp -d "$backup/t3-rollback.XXXXXXXX")
+node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" \
+  --rollback --backup-dir "$rollback_settings"
 /bin/zsh ops/install_watchdog.sh "$backup"
 /usr/bin/install -m 0700 "$backup/cliproxy-codex-token" "$HOME/.local/bin/cliproxy-codex-token"
 node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report
 ```
 
 Check the loaded jobs again. The saved settings take effect for new T3
-sessions. To roll back a later bundle ship, use the recorded previous commit
-with `ship --host m5 --commit <previous-shipped-sha> --apply`, then rerun P0
-against that SHA. A ship publishes the tracked allowlist and
+sessions. Use this checkout-path rollback for commits from before unit 2b.
+To roll back a later bundle ship, use a previously shipped bundle-aware
+commit with `ship --host m5 --commit <previous-shipped-sha> --apply`. Ship
+refuses pre-bundle commits.
+
+After a later ship or bundle rollback, reinstall the token helper and
+LaunchAgents from the bundle using step 3 whenever their tracked files
+changed. They are installed as copies. Rerun the step 4 checks against the
+shipped SHA. A ship publishes the tracked allowlist and
 `bundle-manifest.json` together. Previous copies of managed files go under
 `~/cliproxy-live/prev/<timestamp>/`. An identical retry reports unchanged.
 

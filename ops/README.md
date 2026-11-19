@@ -52,6 +52,12 @@ temporary configuration session. It preserves existing profiles and labels
 the native login explicitly. An existing pool profile can be updated by
 running the command again with a new backup directory.
 
+On the Mac, new profiles use the launcher under the M5 `bundle_root` in
+[`fleet/hosts.json`](fleet/hosts.json). Follow the
+[Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) before creating a Mac
+pool profile. A rerun keeps the profile's saved absolute launcher path.
+On Will, new profiles use the launcher next to the configuration script.
+
 ```sh
 node ops/configure_claude_pool.mjs \
   --base-dir <T3-base-directory> \
@@ -256,7 +262,9 @@ Recovery is deliberately narrow:
   are repeated immediately before `docker desktop stop --force --timeout 30`
   and `docker desktop start --detach`. Recovery polls the socket for up to two
   minutes.
-- Healthy engine but dead CLIProxy port: `docker compose up -d --no-deps cli-proxy-api` from `/Users/rever/cliproxy`.
+- Healthy engine but dead CLIProxy port: try guarded Compose repair from the
+  instance root. If the activation receipt is missing or the inputs have
+  changed, try starting the existing container.
 - Total container DNS failure twice in a row: restart only `cli-proxy-api`.
   Persistent DNS failure is logged for investigation. CLI execution errors
   and timeouts are reported separately and do not justify a container or
@@ -278,10 +286,12 @@ recovers the local Desktop installation. A socket override must point to the
 same engine used by the configured Docker CLI. The September 7 false-restart
 diagnosis and validation are recorded in `RECOVERY-2026-09-07.md`.
 
-`CLIPROXY_COMPOSE_PULL_POLICY` optionally adds `--pull` to the watchdog's
-Compose repair command. The M5 launchd job sets it to `never` because that host
-uses a local image override; leave it unset on hosts that recover a registry
-image from the Compose file.
+The Mac's Compose guard requires the running container and Compose inputs
+to match the approved activation receipt before running `compose up`. The
+[Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) covers recording
+that receipt and using `ops/runtime/watchdog.pause` before an approved Compose
+activation. The pause suppresses repairs for up to 30 minutes while checks
+continue. Remove the pause file after checking the refreshed receipt.
 
 Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watchdog actions.
 
@@ -289,9 +299,13 @@ Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watch
 
 ## Install and inspect
 
+Follow the [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) to
+ship a reviewed bundle and install its LaunchAgents. The installer checks both
+script paths before touching either job. Inspect the installed jobs and their
+logs from the instance checkout.
+
 ```bash
 cd /Users/rever/cliproxy
-./ops/install_watchdog.sh
 launchctl print gui/$(id -u)/com.rever.cliproxy-watchdog
 launchctl print gui/$(id -u)/com.rever.cliproxy-log-archive
 tail -n 100 ops/runtime/watchdog.log
@@ -445,7 +459,7 @@ The durable archive is:
 /Volumes/Innie/backups/llm-logs/cliproxy/m5/live/
 ```
 
-Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free; the T9 drive was skipped because it had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, change the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR, then reinstall the plist into `~/Library/LaunchAgents/` and reload the agent.
+Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free. The T9 drive had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, update the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR. Ship the reviewed commit and reinstall the LaunchAgents from the bundle using the [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover).
 
 Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`; `SHA256SUMS` is append-only evidence for archived content. The local copy is pruned only after content verification. If the archive drive is unavailable, local files accumulate and `ops/runtime/archive.log` records the failure. `main.log` itself is never pruned while active and rolls at 10 MB; its closed rotations then follow the same archive path.
 
