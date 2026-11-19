@@ -35,7 +35,9 @@ TICK_INTERVAL = 300  # The LaunchAgent's StartInterval.
 CLAUDE_EVERY_TICKS = 3
 WORKER_POLLING = "quota-polling"
 CONTAINER = "cli-proxy-api"
-HTTP_TIMEOUT = 8
+# Kimi's usage endpoint answered in about 10.5 s on 2026-11-19. A worker polls at
+# most two accounts after a Claude wait of up to 15 s, inside Will's 63 s deadline.
+HTTP_TIMEOUT = 20
 
 
 def obj(value):
@@ -182,22 +184,27 @@ def kimi_reset(entry, now):
     return None
 
 
+# The Coding Plan reports CREDIT_LIMIT windows since November 2026. Their
+# percentage is the share used, as for the older types.
+ZAI_PREFIXES = {"TOKENS_LIMIT": "tokens", "TIME_LIMIT": "mcp", "CREDIT_LIMIT": "credits"}
+
+
 def zai_windows(body):
     payload = obj(body["data"]) if "data" in body else body
     occurrences = Counter()
     windows = []
     for entry in rows(payload.get("limits")):
         kind = entry.get("type")
-        if kind not in ("TOKENS_LIMIT", "TIME_LIMIT"):
+        if kind not in ZAI_PREFIXES:
             continue
         used = entry.get("percentage")
-        if used is None and kind == "TIME_LIMIT":
+        if used is None and kind != "TOKENS_LIMIT":
             count, limit = number(entry.get("currentValue")), number(entry.get("usage"))
             if count is not None and limit is not None and 0 <= count <= limit and limit > 0:
                 used = count / limit * 100
         units = (number(entry.get("unit")), number(entry.get("number")))
         identity = hashlib.sha256(repr(units).encode()).hexdigest()[:8]
-        key = ("tokens" if kind == "TOKENS_LIMIT" else "mcp") + "-" + identity
+        key = ZAI_PREFIXES[kind] + "-" + identity
         occurrences[key] += 1
         name = key if occurrences[key] == 1 else f"{key}-{occurrences[key]}"
         # CLIProxyBar treats the numeric duration codes as opaque.

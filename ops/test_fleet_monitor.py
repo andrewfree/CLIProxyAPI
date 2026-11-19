@@ -207,6 +207,45 @@ for target do printf '%s ok\n' "$target"; done
             self.assertIsNone(probe.zai_destination(url), url)
         self.assertEqual(probe.zai_destination("https://open.bigmodel.cn:443/api/v4"), "open.bigmodel.cn")
 
+    def test_zai_credit_limits_from_current_coding_plan_reply(self):
+        # Shape of the Coding Plan reply observed on 2026-11-19, with synthetic numbers.
+        reset = datetime.fromisoformat(SOON).timestamp() * 1000
+        body = {"code": 200, "msg": "Operation successful", "success": True, "data": {"level": "lite", "limits": [
+            {"type": "CREDIT_LIMIT", "unit": 3, "number": 5, "usage": 2000, "currentValue": 395,
+             "remaining": 1605, "percentage": 19, "nextResetTime": reset},
+            {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000, "currentValue": 482,
+             "remaining": 9518, "nextResetTime": reset}]}}
+        api = type("FakeAPI", (), {"quota": lambda self, request: {"status_code": 200, "body": json.dumps(body)}})()
+        item = {"provider": "zai", "index": "zai-index", "zai_host": "api.z.ai"}
+        status, windows, _ = probe.fetch_windows(api, item, NOW)
+        self.assertEqual(status, "ok")
+        self.assertEqual([window["used_percent"] for window in windows], [19, 4.82])
+        self.assertEqual(len({window["window"] for window in windows}), 2)
+        self.assertTrue(all(window["window"].startswith("credits-") for window in windows))
+        self.assertEqual({window["reset_at"] for window in windows}, {SOON})
+
+    def test_kimi_reply_with_only_a_five_hour_limit_is_still_read(self):
+        # Kimi stopped returning its weekly and monthly entries on 2026-11-19.
+        body = {"limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                            "detail": {"limit": "100", "remaining": "100", "resetTime": SOON}}],
+                "usages": {"limit_5h": {"used_ratio": 0}}}
+        api = type("FakeAPI", (), {"quota": lambda self, request: {"status_code": 200, "body": json.dumps(body)}})()
+        status, windows, _ = probe.fetch_windows(api, {"provider": "kimi", "index": "kimi-index"}, NOW)
+        self.assertEqual(status, "ok")
+        self.assertEqual([(window["window"], window["used_percent"]) for window in windows], [("session", 0)])
+
+    def test_quota_reads_wait_for_slow_kimi_within_the_remote_deadline(self):
+        # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19. A worker polls at most two
+        # accounts after a Claude wait of up to 15 s, and Will's worker ends at 63 s.
+        self.assertGreaterEqual(probe.HTTP_TIMEOUT, 15)
+        self.assertLess(15 + 2 * probe.HTTP_TIMEOUT, 63)
+        response = type("Response", (), {"status": 200, "read": lambda self, *size: b"{}"})()
+        with (patch.object(probe.http.client, "HTTPConnection") as connection,
+              patch.object(probe.QuotaAPI, "management_key", return_value="fixture-management-key")):
+            connection.return_value.getresponse.return_value = response
+            self.assertEqual(probe.QuotaAPI(1, Path("/nonexistent/.env")).quota({}), {})
+        self.assertEqual(connection.call_args.kwargs["timeout"], probe.HTTP_TIMEOUT)
+
     def test_claude_waits_until_due_and_skips_if_too_early(self):
         account = next(row for row in probe.quota_accounts(FILES, [], SALT).values() if row["provider"] == "claude")
         with (patch.object(probe, "route_label", return_value="t3-demo"),
