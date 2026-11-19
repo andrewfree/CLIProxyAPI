@@ -123,13 +123,21 @@ async function selectHost(args, { overrides, subcommand }, fallbackValue) {
 
   const { urlToHttpOptions } = await import("node:url");
   const controller = new AbortController();
-  const [primaryHealthy, fallbackHealthy] = await Promise.all([
-    probeHealth(urlToHttpOptions(primary)).then((healthy) => {
-      if (healthy) controller.abort();
-      return healthy;
-    }),
-    probeHealth(urlToHttpOptions(fallback), undefined, controller.signal),
-  ]);
+  let primaryHealthy, fallbackHealthy;
+  try {
+    [primaryHealthy, fallbackHealthy] = await Promise.all([
+      probeHealth(urlToHttpOptions(primary)).then((healthy) => {
+        if (healthy) controller.abort();
+        return healthy;
+      }),
+      probeHealth(urlToHttpOptions(fallback), undefined, controller.signal),
+    ]);
+  } catch {
+    // A probe that throws or rejects must not prevent Codex from starting either.
+    controller.abort();
+    await logDecision(subcommand, "primary", "invalid_configuration");
+    return;
+  }
   if (primaryHealthy) {
     await logDecision(subcommand, "primary", "primary_healthy");
   } else if (fallbackHealthy) {

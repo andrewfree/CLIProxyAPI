@@ -261,6 +261,8 @@ test("passthrough works with no sibling launcher", async (t) => {
 for (const [name, sibling] of [
   ["missing", null],
   ["broken", "export const = ;"],
+  ["throwing", "export function probeHealth() { throw new TypeError('probe drift'); }"],
+  ["rejecting", "export async function probeHealth() { throw new Error('probe drift'); }"],
 ]) {
   test(`an opted-in launch with a ${name} sibling keeps the original args`, async (t) => {
     const primary = await fakeHealth(t);
