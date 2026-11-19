@@ -81,7 +81,7 @@ the instance root for Compose, the host's logs, and private runtime state.
    launcher. In T3 Settings, also check that `codex_cliproxy`'s
    `config.binaryPath` is still `/opt/homebrew/bin/codex`. Codex failover is
    enabled only after this cutover, from the bundle, so stop if the profile
-   already points at a checkout launcher.
+   has any other value.
 
    ```sh
    commit=$(git rev-parse HEAD)
