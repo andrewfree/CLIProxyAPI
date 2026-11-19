@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { poolProviders } from "./configure_claude_pool.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { defaultPoolLauncher, poolProviders } from "./configure_claude_pool.mjs";
 
 const options = {
   id: "claude_cliproxy", label: "Claude - CLIProxy pool (Will primary)",
@@ -38,6 +41,22 @@ test("reapplying configuration is idempotent and preserves a custom direct label
   first.claudeAgent.displayName = "My direct subscription";
   const second = poolProviders(first, options);
   assert.deepEqual(second, first);
+});
+
+test("a new Mac pool defaults to the fleet bundle and a rerun preserves the installed launcher", () => {
+  const hosts = JSON.parse(fs.readFileSync(new URL("./fleet/hosts.json", import.meta.url), "utf8"));
+  const launcher = defaultPoolLauncher("darwin");
+  assert.equal(launcher, path.join(hosts.m5.bundle_root, "claude_account_launcher.mjs"));
+  const fromCheckout = defaultPoolLauncher("linux");
+  assert.equal(fromCheckout, fileURLToPath(new URL("./claude_account_launcher.mjs", import.meta.url)));
+
+  const fromBundle = poolProviders(existing, { ...options, launcher });
+  assert.equal(fromBundle.claude_cliproxy.config.binaryPath, launcher);
+  const rerun = poolProviders(fromBundle, { ...options, launcher: fromCheckout });
+  assert.equal(rerun.claude_cliproxy.config.binaryPath, launcher);
+
+  const preCutover = poolProviders(existing, options);
+  assert.equal(poolProviders(preCutover, { ...options, launcher }).claude_cliproxy.config.binaryPath, options.launcher);
 });
 
 test("the pool keeps its own launch arguments, so Claude in Chrome stays on the direct profile", () => {
