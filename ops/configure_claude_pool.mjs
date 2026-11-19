@@ -7,8 +7,7 @@ import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // A copy of T3 settings in which every sensitive variable and every ANTHROPIC_API_KEY has its value
-// replaced, in case T3 failed to flag or redact one. Both tools take the key again on every run, and
-// set_pool_fallback.mjs changes no other variable, so a restore loses nothing it needs.
+// replaced, in case T3 failed to flag or redact one.
 export function withoutSecrets(settings) {
   const copy = structuredClone(settings);
   for (const instance of Object.values(copy?.providerInstances ?? {})) {
@@ -20,6 +19,14 @@ export function withoutSecrets(settings) {
   }
   return copy;
 }
+
+export function defaultPoolLauncher(platform = process.platform) {
+  if (platform !== "darwin") return fileURLToPath(new URL("./claude_account_launcher.mjs", import.meta.url));
+  const hosts = JSON.parse(fs.readFileSync(new URL("./fleet/hosts.json", import.meta.url), "utf8"));
+  return path.join(hosts.m5.bundle_root, "claude_account_launcher.mjs");
+}
+
+class LauncherUnavailable extends Error {}
 
 export function httpOrigin(value, name) {
   const origin = new URL(value);
@@ -53,7 +60,11 @@ export function poolProviders(providers, { id, label, upstream, fallback, launch
     claudeAgent: { ...direct, displayName: direct.displayName || "Claude - Direct login" },
     [id]: {
       driver: "claudeAgent", displayName: label, enabled: true,
-      config: { ...direct.config, binaryPath: launcher, launchArgs },
+      config: {
+        ...direct.config,
+        binaryPath: path.isAbsolute(previous?.config?.binaryPath ?? "") ? previous.config.binaryPath : launcher,
+        launchArgs,
+      },
       environment: [
         { name: "CLIPROXY_CLAUDE_ROUTE", value: "shared-pool", sensitive: false },
         { name: "CLIPROXY_ACCOUNT_PREFIX", value: "", sensitive: false },
@@ -141,8 +152,13 @@ async function main() {
     const { settings } = await client.rpc("server.getConfig");
     const providers = poolProviders(settings.providerInstances, {
       id: values["profile-id"], label: values.label, upstream: values.upstream, fallback: values.fallback,
-      launcher: fileURLToPath(new URL("./claude_account_launcher.mjs", import.meta.url)), binary: values["claude-binary"], apiKey,
+      launcher: defaultPoolLauncher(), binary: values["claude-binary"], apiKey,
     });
+    try {
+      fs.accessSync(providers[values["profile-id"]].config.binaryPath, fs.constants.X_OK);
+    } catch {
+      throw new LauncherUnavailable("The selected Claude launcher is missing or not executable.");
+    }
     fs.writeFileSync(path.join(values["backup-dir"], "settings-before.json"), JSON.stringify(withoutSecrets(settings), null, 2), { flag: "wx", mode: 0o600 });
     await client.rpc("server.updateSettings", { patch: { providerInstances: providers } });
     const { settings: after } = await client.rpc("server.getConfig");
@@ -157,5 +173,9 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(() => { console.error("Claude pool configuration failed. Check the arguments and private backup directory; no secret values are printed."); process.exitCode = 1; });
+  main().catch((error) => {
+    console.error(error instanceof LauncherUnavailable ? error.message
+      : "Claude pool configuration failed. Check the arguments and private backup directory; no secret values are printed.");
+    process.exitCode = 1;
+  });
 }

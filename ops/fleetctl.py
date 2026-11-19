@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only CLIProxy fleet probes. Public reports contain no account or key tags."""
+"""Check the CLIProxy fleet and ship versioned ops bundles."""
 
 import argparse
 from collections import Counter
@@ -761,12 +761,26 @@ def report(command, snapshots, exceptions, today):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("check", help="check tracked pins and policy without network access")
+    check = commands.add_parser("check", help="check tracked pins or verify a shipped bundle (P0)")
+    check.add_argument("--host", choices=FLEET_HOSTS)
+    check.add_argument("--bundle-commit", help="verify the bundle and installed paths against this SHA")
+    check.add_argument("--launcher-paths", help="path-only JSON array from T3; use - for stdin")
+    ship = commands.add_parser("ship", help="stage and publish a committed ops bundle")
+    ship.add_argument("--host", choices=FLEET_HOSTS, required=True)
+    ship.add_argument("--commit", help="source commit SHA (default HEAD)")
+    mode = ship.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="report changes (default)")
+    mode.add_argument("--apply", action="store_true", help="write the bundle to the selected host")
     commands.add_parser("parity", help="compare both hosts, using SSH for Will")
     for command in ("fingerprint", "health"):
         action = commands.add_parser(command)
         action.add_argument("--host", choices=FLEET_HOSTS, required=command == "fingerprint")
     args = parser.parse_args(argv)
+    if args.command == "check" and (args.host or args.bundle_commit or args.launcher_paths):
+        if not (args.host and args.bundle_commit and args.launcher_paths):
+            check.error("P0 requires --host, --bundle-commit, and --launcher-paths")
+    if args.command == "ship" or (args.command == "check" and args.bundle_commit):
+        return bundle_command(args)
     try:
         hosts = read_json(OPS / "fleet/hosts.json")
         paths = read_json(OPS / "fleet/paths.json")
@@ -794,6 +808,34 @@ def main(argv=None):
         code = 2
     print(serialized)
     return code
+
+
+def bundle_command(args):
+    # Imported here so the existing parity worker remains standalone over SSH.
+    if __package__:
+        from . import fleet_bundle as bundle
+    else:
+        import fleet_bundle as bundle
+    try:
+        host = read_json(OPS / "fleet/hosts.json")[args.host]
+        if host["name"] != args.host or not valid_ssh_host(args.host, host["ssh"]):
+            raise bundle.BundleError("Invalid bundle host")
+        if args.command == "ship":
+            manifest, contents = bundle.export_bundle(OPS.parent, args.commit, require_clean=True)
+            output = bundle.on_host(host, bundle.ship_to, host["bundle_root"],
+                                    manifest, contents, args.apply)
+        else:
+            manifest, _ = bundle.export_bundle(OPS.parent, args.bundle_commit)
+            launchers = (json.load(sys.stdin) if args.launcher_paths == "-"
+                         else read_json(Path(args.launcher_paths)))
+            output = bundle.on_host(host, bundle.verify_bundle, host, manifest,
+                                    launchers)
+    except bundle.BundleError as error:
+        output = {"status": "error", "error": str(error)}
+    except (OSError, ValueError, KeyError, TypeError):
+        output = {"status": "error", "error": "Could not read or verify bundle inputs"}
+    print(json.dumps(output, indent=2, sort_keys=True))
+    return {"error": 2, "drift": 1}.get(output["status"], 0)
 
 
 if __name__ == "__main__" and sys.argv[1:] != ["--worker"]:

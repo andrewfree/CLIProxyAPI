@@ -6,10 +6,57 @@ import path from "node:path";
 import fs from "node:fs";
 import http from "node:http";
 import { once } from "node:events";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const launcher = fileURLToPath(new URL("./claude_account_launcher.mjs", import.meta.url));
+
+test("the launcher reaches Claude in every direct and symlinked start mode", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-alias-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.symlinkSync(path.dirname(launcher), path.join(dir, ".fleet-current"));
+  const alias = path.join(dir, path.basename(launcher));
+  fs.symlinkSync(path.join(".fleet-current", path.basename(launcher)), alias);
+  const renamed = path.join(dir, "renamed-launcher.mjs");
+  fs.symlinkSync(alias, renamed);
+  const wrapper = `process.argv[1] = ${JSON.stringify(alias)};
+await import(${JSON.stringify(pathToFileURL(launcher).href)});`;
+  for (const [command, args] of [
+    [launcher, []],
+    [process.execPath, [launcher]],
+    [alias, []],
+    [process.execPath, [alias]],
+    [process.execPath, ["--preserve-symlinks-main", alias]],
+    [process.execPath, ["--preserve-symlinks", "--preserve-symlinks-main", renamed]],
+    [process.execPath, ["--input-type=module", "-e", wrapper, "wrapper.mjs"]],
+  ]) {
+    const result = spawnSync(command, [...args, "fixture-launched"], {
+      env: {
+        PATH: path.dirname(process.execPath),
+        CLIPROXY_CLAUDE_BINARY: "/bin/echo",
+        CLIPROXY_CLAUDE_ROUTE: "shared-pool",
+        CLIPROXY_BASE_URL: "http://127.0.0.1:1",
+      },
+      encoding: "utf8", timeout: 5000,
+    });
+    assert.equal(result.status, 0, `${command} ${args.join(" ")}: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), "fixture-launched");
+  }
+});
+
+test("an imported launcher reports a mismatch when invoked under its name", (t) => {
+  // Run from an empty directory so the bare name never resolves to the real launcher.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-import-"));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const source = `await import(${JSON.stringify(pathToFileURL(launcher).href)})`;
+  const run = (name) => spawnSync(process.execPath, ["--input-type=module", "-e", source, name], {
+    cwd, env: {}, encoding: "utf8", timeout: 5000,
+  });
+  assert.equal(run("borrower.mjs").status, 0);
+  const mismatch = run(path.basename(launcher));
+  assert.equal(mismatch.status, 1);
+  assert.match(mismatch.stderr, /did not run as the main script/);
+});
 
 const stubSource = `
 const mode = process.argv[2];

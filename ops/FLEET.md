@@ -47,10 +47,11 @@ unrestricted upstream model remains. The management API omits per-credential
 alias attributes, so parity cannot account for those overrides.
 
 The read-only checks cover the management API contract. Use the existing
-instance verifiers for Docker image and Compose checks. The bundle manifest
-lists files for the shipping step. The Mac's scheduled monitor adds
-[in-container egress and quota checks](#health-and-quota-monitor) after its
-bundle and LaunchAgent are activated.
+instance verifiers for Docker image and Compose checks. The bundle can be
+shipped separately from the proxy. The Mac cutover below adds the P0 check
+for deployed files and configured launch paths. The Mac's scheduled monitor
+adds [in-container egress and quota checks](#health-and-quota-monitor) after
+the cutover and its own LaunchAgent are activated.
 
 Operational differences recorded on November 18, 2026, for review by December 2, 2026:
 
@@ -61,15 +62,157 @@ Operational differences recorded on November 18, 2026, for review by December 2,
   during prechecks (unit 0).
 
 Until bundle cutover, updating the watchdog, log archiver, Claude launcher,
-their plists, or Compose configuration in the Mac's primary checkout is a
-live change and requires Andrew's promote phrase. Edit those files in a
-worktree. Activate the Mac first, then Will. If verification fails, roll back
-the host just changed. A host that already passed requires Andrew's
-instruction to roll back.
+Codex fallback launcher, their plists, or Compose configuration in the Mac's
+primary checkout is a live change and requires Andrew's promote phrase. Edit
+those files in a worktree. Activate the Mac first, then Will. If verification
+fails, roll back the host just changed. A host that already passed requires
+Andrew's instruction to roll back.
+
+## Mac ops bundle cutover
+
+Unit 2b is prepared for Andrew's live approval. Run from a clean worktree at
+the reviewed, merged unit 2b commit. Wait for Andrew's `promote fleet <id>`
+phrase before publishing, installing, or repointing profiles. Coordinate a
+window for the two LaunchAgents and new Claude CLIProxy sessions. Existing
+sessions keep the launcher they started with. The primary checkout remains
+the instance root for Compose, the host's logs, and private runtime state.
+
+1. Preview the exact commit and record the five current T3 launcher paths.
+   Stop if either command fails or the paths differ from the expected checkout
+   launcher. In T3 Settings, also check that `codex_cliproxy`'s
+   `config.binaryPath` is still `/opt/homebrew/bin/codex`. Codex failover is
+   enabled only after this cutover, from the bundle, so stop if the profile
+   has any other value.
+
+   ```sh
+   commit=$(git rev-parse HEAD)
+   instance=/Users/rever/cliproxy
+   bundle="$HOME/cliproxy-live/ops"
+   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --dry-run
+   node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report
+   ```
+
+2. After approval, save the installed plists and token helper for rollback,
+   publish the bundle, and check that the current container matches the
+   Compose inputs before recording them. If the receipt command refuses,
+   investigate the mismatch before continuing. This cutover needs no
+   container recreate. The destination needs Node.js on its PATH so ship
+   can start the staged launcher alias with a fake Claude binary before
+   publishing.
+
+   ```sh
+   backup=$(mktemp -d "$instance/ops/runtime/mac-bundle-cutover.XXXXXXXX")
+   for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
+     cp -p "$HOME/Library/LaunchAgents/$label.plist" "$backup/$label.plist"
+   done
+   cp -p "$HOME/.local/bin/cliproxy-codex-token" "$backup/cliproxy-codex-token"
+   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+   (cd "$instance" && CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 \
+     "$bundle/cliproxy_watchdog.py" --record-compose-activation --verbose)
+   ```
+
+   Keep the printed ship receipt and the value of `backup`. The activation
+   receipt is `ops/runtime/fleet/compose-activation.json` under the instance
+   root. It records the Compose file hashes, resolved image, and service
+   config hash. For later approved activations, refresh it after the new
+   container is running and verified. A missing or mismatched receipt blocks
+   `compose up`. The watchdog logs the refusal and tries `docker start` on
+   the existing named container. Running the bundled watchdog from any
+   directory other than the instance root blocks the repair outright.
+
+3. Reinstall both LaunchAgents and update the five T3 profiles. The T3
+   helper uses `server.updateSettings` to change `config.binaryPath` and
+   checks the saved profile settings. It writes private redacted before and
+   after snapshots and prints the five path strings. The shipped token helper
+   replaces the locally edited copy so P0 can verify its checksum.
+
+   ```sh
+   /bin/zsh ops/install_watchdog.sh "$bundle"
+   /usr/bin/install -m 0700 "$bundle/cliproxy-codex-token" "$HOME/.local/bin/cliproxy-codex-token"
+   node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" \
+     --apply --backup-dir "$backup/t3-apply"
+   ```
+
+4. Confirm both loaded jobs show the bundled scripts in their arguments.
+   Check that the installed token helper exits successfully and returns
+   nonempty output, measuring its length without displaying the token.
+   The cutover receipt records the helper replacement. Verify P0, then
+   check the watchdog log for a normal cycle and the archiver
+   log for its usual status. Start one new `claude_cliproxy_mac` session
+   and one new named Claude session and verify that each can answer
+   `count_tokens` through its intended route. In a scratch worktree, a
+   local edit to a shipped script should leave the deployed hash unchanged.
+   Keep the interim live-change rule until sessions using the old launcher
+   have ended. The token and P0 checks run in a subshell, so a failure stops
+   only that block and leaves `commit` and `backup` set for the rollback.
+
+   ```sh
+   for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
+     launchctl print "gui/$(id -u)/$label"
+   done
+   (
+     set -o pipefail
+     if ! token_length=$("$HOME/.local/bin/cliproxy-codex-token" | wc -c) ||
+       [ "$token_length" -le 0 ]; then
+       printf '%s\n' 'Installed Codex token helper failed to return a token. Stop and roll back.' >&2
+       exit 1
+     fi
+     printf 'Replaced the installed Codex token helper with the shipped copy from %s. Token check passed.\n' \
+       "$commit" > "$backup/token-helper-replacement.txt"
+     node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report |
+       python3 ops/fleetctl.py check --host m5 --bundle-commit "$commit" --launcher-paths -
+   )
+   ```
+
+For a later Compose activation, run these from the instance root immediately
+before and after the approved operation. Confirm an in-flight watchdog repair
+has finished before changing Compose inputs. The watchdog keeps observing and
+logs the pause once per cycle. The pause expires after 30 minutes using its
+modification time. Remove the file when the activation and receipt check finish.
+
+```sh
+touch ops/runtime/watchdog.pause
+# Run the approved activation and confirm the new container.
+CLIPROXY_ROOT="$PWD" /opt/homebrew/bin/python3 \
+  "$HOME/cliproxy-live/ops/cliproxy_watchdog.py" --record-compose-activation --verbose
+rm -f ops/runtime/watchdog.pause
+```
+
+**First cutover rollback.** Use the private `backup` from step 2. Restore the
+T3 paths, reinstall the saved checkout plists, and restore the token helper.
+
+```sh
+rollback_settings=$(mktemp -d "$backup/t3-rollback.XXXXXXXX")
+node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" \
+  --rollback --backup-dir "$rollback_settings"
+/bin/zsh ops/install_watchdog.sh "$backup"
+/usr/bin/install -m 0700 "$backup/cliproxy-codex-token" "$HOME/.local/bin/cliproxy-codex-token"
+node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report
+```
+
+Check the loaded jobs again. The saved settings take effect for new T3
+sessions. Use this checkout-path rollback for commits from before unit 2b.
+To roll back a later bundle ship, use a previously shipped bundle-aware
+commit with `ship --host m5 --commit <previous-shipped-sha> --apply`. Ship
+refuses pre-bundle commits.
+
+After a later ship or bundle rollback, reinstall the token helper and
+LaunchAgents from the bundle using step 3 whenever their tracked files
+changed. They are installed as copies. Rerun the step 4 checks against the
+shipped SHA. A ship publishes the tracked allowlist and
+`bundle-manifest.json` together. Previous copies of managed files go under
+`~/cliproxy-live/prev/<timestamp>/`. An identical retry reports unchanged.
+
+The CLI can stage and publish on Will through its configured SSH destination.
+Will's first ship is unit 2c. It needs its own approval and verification.
+Coordinate a window without new Will launcher starts while the first ship
+converts legacy managed files to bundle aliases. Subsequent ships switch the
+active generation with one rename. Will's private `ops/runtime/` and other
+unmanaged files stay in place.
 
 ## Running fleet
 
-Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`. The Mac's `claude_cliproxy` and `codex_cliproxy` profiles reach Will by its tailnet name, `http://will.<tailnet>.ts.net:8317` (with `/v1` for Codex). Public resolvers answer NXDOMAIN for that name, so with Tailscale stopped the lookup should fail at once, instead of sending traffic and the client key to whatever holds Will's tailnet address on another network. The Claude launcher then fails over; Codex has no fallback, so its request fails. M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw address.
+Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`. The Mac's `claude_cliproxy` and `codex_cliproxy` profiles reach Will by its tailnet name, `http://will.<tailnet>.ts.net:8317` (with `/v1` for Codex). Public resolvers answer NXDOMAIN for that name, so with Tailscale stopped the lookup should fail at once, instead of sending traffic and the client key to whatever holds Will's tailnet address on another network. The Claude launcher then fails over. Once enabled, the Codex launcher can select the Mac at session start after that failed lookup. M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw address.
 
 `fleet-release.json` pins one application source commit, one Cursor plugin version, and the exact platform image and plugin hashes. Both images are built from the same commit. ARM64 runs on the Mac's Docker VM; AMD64 runs on Will. Compose uses immutable local image IDs with `pull_policy: never`, so a restart cannot silently select a new release. The two Compose files and owner contracts must be changed together for the next release.
 
@@ -139,7 +282,7 @@ T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the sha
 
 `ops/claude_account_launcher.mjs` supports explicit `shared-pool` mode through `CLIPROXY_CLAUDE_ROUTE`. This mode forwards unprefixed Claude model IDs to the existing credential selector. Named profiles keep their account prefixes. `ops/configure_claude_pool.mjs` provisions pool profiles through the running T3 settings API and stores keys in its secret store. The [routing receipt](evidence/claude-pool-routing-20261103.json) records tests, deployed artifact hashes, and runtime-check limits. This host-side integration does not change the fleet's server images or manifest.
 
-`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). Every other profile keeps a fixed host and never fails over: `claude_cliproxy_mac`, the three named Claude profiles, the Codex-family profiles and Will's own `claude_cliproxy`. Where a profile for the other host exists, switching to it is manual. A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. New sessions use the selected endpoint; an already running client keeps its launch environment. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
+`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. The Mac's `codex_cliproxy` can opt into session-start failover using the procedure below. The `_mac` profiles, named Claude profiles and Will's own `claude_cliproxy` use fixed hosts. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
 
 For exact-model discovery and an authorized T3 task, follow [the Kimi CLIProxy routing recipe](KIMI_ROUTING.md).
 
@@ -170,6 +313,56 @@ The previous fleet.1 source is `d4fa77254e2922a834f6f97ddac0d7a88249b9ad`, based
 The following rollback record applies only to the October 15 fleet.3 deployment. First preserve the failed runtime configuration in a new private directory, stop only the proxy, and restore the backed-up Compose, `.env`, configuration and deployment metadata on that host. Restore the Mac's backed-up `docker-compose.override.yml` too. Both hosts had `.env` files before fleet.3; their image selections must be restored. Use the receipt to distinguish pre-existing files from metadata added during this deployment, and move added metadata into the failed-release backup. Recreate with `docker compose up -d --no-deps --pull never --no-build cli-proxy-api`, then run the restored verifier and a real client request. Preserve newly refreshed OAuth files. The retained Mac image is `sha256:1914227451c32a2e19cc3c1919c8e53fe48507dc2a09a2f0f1d76563bdae361e`. The retained Will image is `sha256:cff34aadce0684523ca94d7829be961954ce1bebfba7c8c3fb847c50b7281e0a`.
 
 Tailscale Serve can remain in place during an application rollback. To remove only the new private route, use `sudo tailscale serve --tcp=8317 off` on Will. Do not reset Serve: HTTPS 443 belongs to T3. Revert T3 routes through `server.updateSettings` or the app settings, preserving secrets in the app's secret store.
+
+### Enable or roll back Codex failover
+
+Enable it only after the [Mac bundle cutover](#mac-ops-bundle-cutover)
+has passed, so T3 runs the launcher from the bundle and never from the
+checkout. The T3 path is
+`/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs`. The launcher
+writes its decision log under the instance root, not inside the bundle.
+
+1. After review and CI, obtain Andrew's live promote phrase for the T3
+   profile change. Check that both hosts accept the profile's existing client
+   key and serve the model IDs used by the profile.
+2. From a Mac checkout at the shipped commit, run the local closed-port
+   test. The two printed commits must match.
+
+   ```sh
+   jq -r '"shipped  " + .commit' "$HOME/cliproxy-live/ops/bundle-manifest.json"
+   printf 'checkout %s\n' "$(git rev-parse HEAD)"
+   node --test --test-name-pattern='connection refusal' ops/codex_fallback_launcher.test.mjs
+   ```
+
+3. Use those [profile settings](README.md#codex-failover) on a temporary
+   copy of `codex_cliproxy` for a closed-port T3 drill. Generate a closed
+   loopback URL and a separate decision log:
+
+   ```sh
+   node -e 'const s = require("node:net").createServer(); s.listen(0, "127.0.0.1", () => { const {port} = s.address(); s.close(() => console.log("http://127.0.0.1:" + port + "/v1")); });'
+   codex_drill_dir=$(mktemp -d)
+   printf '%s/codex-failover.jsonl\n' "$codex_drill_dir"
+   ```
+
+   Replace only the copy's primary `base_url` value with the printed
+   loopback URL and set its `CLIPROXY_CODEX_FAILOVER_LOG` to the printed file.
+   Note the time, start a new session on the copy, and check that the approved
+   smoke request completes through the Mac. Run
+   `cat "$codex_drill_dir/codex-failover.jsonl"` and match the decision by
+   `"subcommand":"app-server"` and the `ts` for that session start. Check that
+   the matching line has `"selected":"fallback"` and `"reason":"fallback_healthy"`.
+   End that session and remove the temporary profile.
+4. Apply the [profile settings](README.md#codex-failover) to
+   `codex_cliproxy` in T3 Settings, with its original Will launch arguments.
+   Note the time and start a fresh session while Will is healthy. In
+   `ops/runtime/fleet/codex-failover.jsonl`, match `"subcommand":"app-server"`
+   and the `ts` for that session start. Check that the matching line has
+   `"selected":"primary"` and `"reason":"primary_healthy"`.
+
+To roll back, restore `config.binaryPath` to `/opt/homebrew/bin/codex` and
+remove `CLIPROXY_FALLBACK_URL` and `CODEX_REAL_BINARY` from that profile's
+environment. Save the profile and use a fresh session. A session already
+running stays on the host it started with until its Codex process exits.
 
 ## Health and quota monitor
 

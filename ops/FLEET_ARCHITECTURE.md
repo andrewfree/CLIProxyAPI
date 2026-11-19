@@ -364,7 +364,7 @@ listed in [README.md](README.md#host-failover-for-the-shared-pool); this section
 | D. The Mac server proxies to Will | Needs a Go change and adds a second hop to every request. |
 | **E. Harden the launcher, for one profile** | **Chosen.** No new service, no Go change, and the launcher already sits in the request path of each session. |
 
-**Only `claude_cliproxy` on the Mac fails over.** The launcher refuses `CLIPROXY_FALLBACK_URL` on
+**For Claude, only `claude_cliproxy` on the Mac fails over.** The launcher refuses `CLIPROXY_FALLBACK_URL` on
 a named account route, because a pinned account must never move to another host. Named routes
 never cross hosts, so failover cannot reach an account mismatch even if the hosts drift
 ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 6 and 14). The `_mac` profiles are already local and
@@ -394,9 +394,10 @@ and the check was a resolver comparison. With the raw address, a foreign network
 100.x range could receive the traffic in clear
 ([FLEET.md](FLEET.md#running-fleet), design question 3). Since the November 18 parity cleanup the
 Mac's `codex_cliproxy` uses the name too, for the same reason: its
-`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. It has no
-launcher, so a failed lookup fails the request instead of failing over. M1 and the Will entry in
-CLIProxyBar (the Mac menu-bar quota app) still use the raw address (section 4).
+`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. With the optional
+Codex launcher enabled, a failed startup lookup can send a new Codex session to the Mac
+(section 4). M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw
+address.
 
 The name does not help on a network whose resolver answers every name, as some captive portals do:
 a session already running would send requests, with the client key, in clear to that address, and
@@ -560,23 +561,31 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 
 | Location | What it is | Consequence |
 | --- | --- | --- |
-| `/Users/rever/cliproxy` on the Mac | A git checkout, and also the deployed location. T3 runs the launcher from it through `config.binaryPath`; the LaunchAgents run the watchdog and archiver from it; Compose reads `docker-compose.yml` there. | A pull, a branch checkout or an uncommitted edit in that tree changes what runs. |
-| `~/cliproxy` on Will | A hand-copied subset of the tree, not a git checkout. | Files are replaced by copying, with the previous versions backed up under `ops/runtime/`. Hashes are the only link to a commit. |
-| `ops/runtime/` on each host | Private state, ignored by git (`.gitignore`): backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it; copy a receipt into `ops/evidence/` only after checking it. |
-| `ops/evidence/` | Sanitized, tracked records of activations and measurements, and the as-run scripts of each operation, byte-identical to what ran (for example `evidence/key-rotation-20261118/`). | This is where "why do we believe this" lives. Maintained tools that a runbook tells you to run live directly in `ops/` with tests. |
-| `config.yaml`, `.env`, `auths/` | Per host, never tracked, never copied between hosts. | The server's secrets; client-side copies are listed in section 2.9. |
+| `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. The installed jobs and T3 still use its checkout paths until cutover. | Until cutover, a pull, checkout, or uncommitted edit can change the next job run or new T3 session. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root. After cutover it supplies the two LaunchAgents, the five T3 Claude launcher paths and, once enabled, the Codex fallback launcher. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
+| `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
+| `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
+| `config.yaml`, `.env`, `auths/` | Per-host secrets. | Keep them on the instance that owns them. |
 | `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 18. | See below. |
 
-**Why the Mac's checkout is a risk (design unit 2b).** On the Mac the working tree is the deployed
-location, so a pull, a branch checkout or an uncommitted edit in that tree is a deploy, before any
-approval: a launcher change reaches the next new T3 session, and a watchdog or archiver change
-runs within 120 or 300 seconds ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 2 and 9). A merge on
-GitHub changes nothing on the Mac until it is pulled. The design's answer is to run
-both hosts from a shipped bundle at a recorded commit, outside the checkout. That is unit 2b, and
-it is not done. Until it is, the interim rule in [FLEET.md](FLEET.md#fleet-contract) applies:
-changing the watchdog, the log archiver, the Claude launcher, their plists or the Compose file in
-the Mac's primary checkout is a live change and needs Andrew's promote phrase. Edit those files
-only in a worktree.
+The checkout used to provide both the ops code and its working data. A checkout
+edit could reach launchd within 120 or 300 seconds, or T3 on the next session.
+Unit 2b moves the code into a shipped bundle. A ship reads exact Git blobs and
+the allowlist from the chosen commit, records hashes and modes, and switches
+the managed paths and manifest together by renaming a generation pointer.
+Separate generations let the Will bundle share an `ops/` directory with private
+state. The previous managed files have a dated backup beside the bundle root.
+
+The Mac's Compose files still live in the instance root. Before a bundled
+watchdog repair can run `compose up`, it specifies that root, the Compose
+files, and `.env`, then checks the hashes and resolved image against the
+activation receipt. A mismatch falls back to starting the existing container
+by name. An expiring pause lets an approved activation temporarily suppress
+all repairs. See the [cutover and rollback](FLEET.md#mac-ops-bundle-cutover).
+Until Andrew approves and verifies cutover, the interim live-change rule in
+[FLEET.md](FLEET.md#fleet-contract) applies. Sessions that predate the repoint
+retain their original launcher until they end.
 
 **Why config is edited in place.** `config.yaml` is bind-mounted as a single file. Replacing or
 renaming it breaks the mount's link to the inode, so every config change is one in-place write
@@ -693,14 +702,16 @@ private charts generated from the JSONL history.
 
 ## 4. What is still manual or accepted
 
+**Codex session-start failover.** With the [Codex launcher enabled](README.md#codex-failover),
+the Mac's `codex_cliproxy` checks Will at startup and selects the Mac automatically if Will
+fails its health check and the Mac passes. If both fail, it starts with the Will URL. The
+launcher reuses the three-second `/healthz` probe from section 2.6. A healthy `/healthz`
+cannot reveal an upstream egress outage. Codex CLI keeps one `base_url` per process, so an
+existing session stays on its selected host. Until Andrew enables the launcher, switching is
+manual. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to the Mac.
+
 **Not automatic:**
 
-- **Codex-family profiles** (`codex_cliproxy`, `codex_cliproxy_mac`, `codex_kimi_mac`). Codex CLI
-  has one `base_url`, and no launcher sits in front of it. When Will is unreachable, selecting the
-  `_mac` profile is a manual action. Parity keeps that profile a close substitute, but not an
-  exact one today: the Mac also serves the `camoff-astra` prefix (dated exceptions, section 2.1),
-  which waits for Andrew's OAuth login on Will. The design's optional wrapper (unit 10) is not
-  built.
 - **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances.
   The monitor supplies fleet quota history, alerts and summaries. The Mac's `codex_cliproxy`
   moved to the tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
@@ -720,8 +731,8 @@ private charts generated from the JSONL history.
   bundle ships. Before activation, use `fleetctl health` and `parity` by hand. With only egress down,
   `/healthz` can stay green. Look for `egress_hold` lines in
   `ops/runtime/fleet/failover.jsonl` on the Mac or dial-error 5xx answers from Will.
-- **Shipping ops files.** `fleetctl ship` is deferred. The Mac runs from its checkout and Will
-  from a copied tree (section 2.8).
+- **Bundle activation.** The Mac cutover and Will's first ship await live approval.
+  The cutover includes a P0 check of the installed paths and checksums (section 2.8).
 
 **Accepted:**
 
