@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+from types import SimpleNamespace
 import stat
 import subprocess
 import sys
@@ -257,6 +258,18 @@ for target do printf '%s ok\n' "$target"; done
         self.assertEqual([(w["window"], w["used_percent"], w["reset_at"]) for w in windows],
                          [("session", 25, SOON)])
 
+    def test_zai_used_share_handles_counts_negatives_and_stale_counts(self):
+        def used(**entry):
+            windows = probe.zai_windows({"limits": [dict(type="CREDIT_LIMIT", unit=6, number=1, **entry)]})
+            return windows[0]["used_percent"] if windows and windows[0] else None
+        # The reported current value can exceed usage minus remaining; the larger one counts.
+        self.assertEqual(used(usage=1000, remaining=900, currentValue=150), 15)
+        # A negative reading is dropped instead of reading as an idle 0%.
+        self.assertIsNone(used(percentage=-3))
+        self.assertIsNone(used(usage=100, currentValue=-1))
+        # Stale counts never hide a cap the provider reports.
+        self.assertEqual(used(usage=100, currentValue=0, remaining=100, percentage=100), 100)
+
     def test_quota_reads_wait_for_slow_kimi_and_stop_at_the_poll_deadline(self):
         # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19.
         self.assertGreaterEqual(probe.HTTP_TIMEOUT, 15)
@@ -278,6 +291,46 @@ for target do printf '%s ok\n' "$target"; done
             connection.return_value.getresponse.return_value = response
             self.assertEqual(probe.QuotaAPI(1, Path("/nonexistent/.env")).quota({}, 7), {})
         self.assertEqual(connection.call_args.kwargs["timeout"], 7)
+
+    def test_claude_wait_counts_against_the_poll_deadline(self):
+        account = next(row for row in probe.quota_accounts(FILES, [], SALT).values() if row["provider"] == "claude")
+        clock = SimpleNamespace(time=lambda: 100.0, monotonic=lambda: 100.0, sleep=lambda seconds: None)
+        with (patch.object(probe, "time", clock),
+              patch.object(probe, "route_label", return_value="t3-demo") as label,
+              patch.object(probe, "fetch_windows", return_value=("ok", [], None)) as fetch):
+            # A 10 s Claude wait leaves 0.5 s before the deadline: defer without reading.
+            self.assertEqual(probe.collect_account(None, account, NOW, (), {"_all": 110}, {}, deadline=110.5)["status"],
+                             "quota-deferred")
+            fetch.assert_not_called()
+            probe.collect_account(None, account, NOW, (), {"_all": 110}, {}, deadline=112)
+            self.assertEqual(fetch.call_args.args[3], 2)
+            # An account that starts after the deadline also skips the label lookup.
+            label.reset_mock()
+            late = probe.collect_account(None, account, NOW, (), {}, {}, deadline=99)
+            label.assert_not_called()
+            self.assertEqual((late["label"], late["status"]), ("account-" + account["account_id"][:8], "quota-deferred"))
+
+    def test_collect_host_gives_every_account_the_same_poll_deadline(self):
+        seen = []
+
+        class FakeAPI:
+            def __init__(self, port, env):
+                pass
+
+            def management_key(self):
+                return "fixture-management-key"
+
+            def get(self, route):
+                return ({"files": FILES} if route == probe.CREDENTIALS else GROUPS), 200
+
+        clock = SimpleNamespace(time=lambda: 100.0, monotonic=lambda: 1000.0, sleep=lambda seconds: None)
+        with (patch.object(probe, "time", clock), patch.object(probe, "QuotaAPI", FakeAPI),
+              patch.object(probe.fleetctl, "collect", return_value={"status": "ok"}),
+              patch.object(probe, "probe_egress", side_effect=lambda targets: dict.fromkeys(targets, "ok")),
+              patch.object(probe, "collect_account", side_effect=lambda *args: seen.append(args[-1]) or {})):
+            probe.collect_host({"port": 1, "instance_root": "/nonexistent"}, SALT, set(), {})
+        self.assertEqual(len(seen), len(probe.quota_accounts(FILES, GROUPS, SALT)))
+        self.assertEqual(set(seen), {1000.0 + probe.POLL_DEADLINE})
 
     def test_claude_waits_until_due_and_skips_if_too_early(self):
         account = next(row for row in probe.quota_accounts(FILES, [], SALT).values() if row["provider"] == "claude")
@@ -449,6 +502,12 @@ class MonitorTests(unittest.TestCase):
         egress_down = host_report(egress="down")
         self.assertEqual(alerts(egress_down), [])
         self.assertIn("Select the _mac profile for Codex-family", alerts(egress_down)[0])
+
+    def test_will_down_text_promises_the_mac_only_when_the_mac_is_healthy(self):
+        state = {}
+        mac_unknown = {"m5": host_report(state="unknown"), "will": host_report(state="unreachable")}
+        self.assertEqual(monitor.status_alerts(state, mac_unknown, None), [])
+        self.assertEqual(monitor.status_alerts(state, mac_unknown, None), ["Will proxy unreachable."])
 
     def test_will_down_text_drops_the_mac_fallback_when_the_mac_is_down_too(self):
         state = {}

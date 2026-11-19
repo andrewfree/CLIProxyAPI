@@ -266,8 +266,8 @@ def status_alerts(state, hosts, parity):
     fallback = "Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults."
     if will.get("ssh_unreachable"):
         will_opening = "Will is not reachable over SSH from the Mac."
-    elif unreachable(mac):
-        will_opening = "Will proxy unreachable."  # With both down, the wrapper stays on Will.
+    elif unreachable(mac) is not False:
+        will_opening = "Will proxy unreachable."  # The wrapper moves only to a healthy Mac.
     else:
         # The wrapper picks a host only when a Codex session starts.
         will_opening = ("Will proxy unreachable. New codex_cliproxy sessions start on the Mac; restart open "

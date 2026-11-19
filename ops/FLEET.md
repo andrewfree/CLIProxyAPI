@@ -399,14 +399,18 @@ host only at session start. A Will egress failure leaves `/healthz` green, so
 that text advises selecting the `_mac` profile for Codex-family. The monitor also texts when an account
 crosses 90% of a known weekly or monthly quota, becomes capped, or enters a
 proxy quota cooldown without a known active cap. The monitor remembers caps
-across ticks that defer Claude. The cooldown alert re-arms an hour after the
+across deferred readings. The cooldown alert re-arms an hour after the
 latest observed cooldown ends. Transitions in one tick share
 a text. The first tick at or after 09:00 Mac local time sends the day's
 summary, including quota resets and outages observed since the last summary. If the Mac was asleep,
 the next tick catches up that day's summary. Z.ai windows are named by type
 and length (`credits-5h`, `credits-1w`, `mcp-monthly`) using the unit codes in
-CodexBar's Z.ai plugin, so a weekly Z.ai window warns at 90%; unknown codes
-keep an opaque name and alert only when capped.
+CodexBar's Z.ai plugin, so a weekly Z.ai window warns at 90%. Unknown codes keep
+an opaque name, and windows of unknown length or between a day and a week alert
+only when capped. Each host's quota reads stop 55 seconds after its collection
+starts, inside Will's 63-second limit. Accounts not read by then show
+`quota-deferred` and keep their remembered caps, and Will polls any account the
+Mac deferred.
 The summary includes those readings and any published reset timestamps. On
 a tick that defers Claude, it can include a Claude reading less than 35 minutes
 old, with its observation time.

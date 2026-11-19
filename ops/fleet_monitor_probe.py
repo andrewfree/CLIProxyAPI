@@ -195,18 +195,20 @@ ZAI_UNITS = {1: (1440, "d"), 3: (60, "h"), 5: (1, "min"), 6: (10080, "w")}
 
 def zai_used(entry):
     usage, current = number(entry.get("usage")), number(entry.get("currentValue"))
-    remaining = number(entry.get("remaining"))
-    used = None
+    remaining, percent = number(entry.get("remaining")), number(entry.get("percentage"))
+    if any(value is not None and value < 0 for value in (current, percent)):
+        return None  # A negative reading is malformed, not an idle window.
+    shares = [] if percent is None else [percent]
     if usage is not None and usage > 0:
         if remaining is not None:
             used = max(usage - remaining, usage - remaining if current is None else current)
-        elif current is not None:
+        else:
             used = current
-    if used is not None:
-        return min(max(used, 0), usage) / usage * 100
-    percent = number(entry.get("percentage"))
-    # Charges can land after a request ends, so a reading can pass 100%.
-    return None if percent is None else min(max(percent, 0), 100)
+        if used is not None:
+            shares.append(max(used, 0) / usage * 100)
+    # Charges can land after a request ends, so a reading can pass 100%. Take the
+    # larger share so stale counts never hide a reported cap.
+    return min(max(shares), 100) if shares else None
 
 
 def zai_window(kind, entry):
@@ -282,7 +284,7 @@ def fetch_windows(api, item, now, timeout=HTTP_TIMEOUT):
         if window:
             kept = unique.setdefault(window["window"], window)
             # Kimi can put a window's reset only in its second, count-based reading.
-            if kept["reset_at"] is None:
+            if kept["reset_at"] is None and provider in {"kimi", "kimi-ai"}:
                 kept["reset_at"] = window["reset_at"]
     return ("ok" if unique else "quota-unavailable"), list(unique.values()), grants
 
@@ -406,7 +408,10 @@ def collect_account(api, account, now, visited, not_before, egress, deadline=Non
     item = account["item"]
     provider = account["provider"]
     target = account.get("zai_host") or QUOTA_HOSTS[provider]
-    result = {"provider": provider, "account_id": tag, "label": route_label(api, account),
+    late = deadline is not None and deadline - time.monotonic() < 1
+    # Past the deadline, skip the label lookup too; the account is deferred below.
+    label = "account-" + tag[:8] if late else route_label(api, account)
+    result = {"provider": provider, "account_id": tag, "label": label,
               "cooldowns": local_cooldowns(item, now), "windows": [], "grants": None,
               "attempted_at": None}
     if item.get("disabled") is True or item.get("status") == "disabled":
