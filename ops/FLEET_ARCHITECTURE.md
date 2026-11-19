@@ -618,8 +618,8 @@ their own transcripts.
 **The response, all on November 18:**
 
 - Two new client keys were added at the top of both hosts' key lists and every client moved to
-  them. The two old keys stay accepted until a scheduled task removes them on 2026-11-19 at 10:30
-  UTC. The repository records no reason for this overlap. Its effect is that sessions already
+  them. The two old keys stayed accepted until a scheduled task removed them on 2026-11-19 at the
+  end of the 24-hour overlap. The repository records no reason for this overlap. Its effect is that sessions already
   running keep working, because a running session keeps the key it launched with.
 - The Z.ai Coding Plan key was replaced on both hosts and the old one deleted.
 - The NVIDIA key (then Mac only) was rotated and the old one deleted. The new key expires on
@@ -719,7 +719,7 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
 **Not automatic:**
 
 - **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances. Its
-  Z.ai row needs the local `CREDIT_LIMIT` parser fix of November 19.
+  Z.ai row reads the credit windows since a local parser fix on November 19.
   The monitor supplies fleet quota history, alerts and summaries. The Mac's `codex_cliproxy`
   moved to the tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
   CLIProxyBar's Will entry still reaches Will at its raw tailnet IP address, so the section 2.6
@@ -734,6 +734,11 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
+- **Host-side config edits on the Mac do not load.** Since the November 18 container recreate,
+  Docker Desktop's bind mount has not delivered in-place edits of the Mac's `config.yaml` to the
+  proxy's file watcher, so a host-side edit changes the file but not the running config. Confirm
+  a Mac edit with a `config file changed, reloading` log line and a live check, and if none
+  appears, apply it through `/v8/management/config` (FLEET.md, November 19).
 - **The monitor reports, it does not fail over.** The Mac LaunchAgent runs from the bundle every
   five minutes on Apple's `/usr/bin/python3`, because macOS Local Network privacy blocked SSH to
   Will from Homebrew's Python under launchd ([FLEET.md](FLEET.md#install-or-resume-on-the-mac)). It texts Andrew when
@@ -763,8 +768,6 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   The two `camoff-astra` exceptions are gone; the prefix itself was removed from both hosts.
 - **Will uses the flat legacy YAML layout** until the layout migration (design unit 7). The loaded
   view makes the two layouts comparable in the meantime.
-- **Old client keys overlap** until 2026-11-19 10:30 UTC, so sessions launched with an old key
-  keep working until then (section 2.9).
 - **No measurement of affinity with two or more eligible accounts** after the change.
 - **Deploys drop open streams**, because the idle gate does not work as designed (section 2.7).
 
