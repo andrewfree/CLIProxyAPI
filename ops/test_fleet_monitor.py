@@ -215,7 +215,7 @@ for target do printf '%s ok\n' "$target"; done
              "remaining": 1605, "percentage": 19, "nextResetTime": reset},
             {"type": "CREDIT_LIMIT", "unit": 6, "number": 1, "usage": 10000, "currentValue": 9200,
              "remaining": 800, "percentage": 92, "nextResetTime": reset}]}}
-        api = type("FakeAPI", (), {"quota": lambda self, request: {"status_code": 200, "body": json.dumps(body)}})()
+        api = type("FakeAPI", (), {"quota": lambda self, request, timeout: {"status_code": 200, "body": json.dumps(body)}})()
         item = {"provider": "zai", "index": "zai-index", "zai_host": "api.z.ai"}
         status, windows, _ = probe.fetch_windows(api, item, NOW)
         self.assertEqual(status, "ok")
@@ -249,25 +249,35 @@ for target do printf '%s ok\n' "$target"; done
         # Kimi stopped returning its weekly and monthly entries on 2026-11-19. The reset is
         # only in the count-based reading.
         body = {"limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
-                            "detail": {"limit": "100", "remaining": "100", "resetTime": SOON}}],
-                "usages": {"limit_5h": {"used_ratio": 0}}}
-        api = type("FakeAPI", (), {"quota": lambda self, request: {"status_code": 200, "body": json.dumps(body)}})()
+                            "detail": {"limit": "100", "remaining": "75", "resetTime": SOON}}],
+                "usages": {"limit_5h": {"used_ratio": 0.25}}}
+        api = type("FakeAPI", (), {"quota": lambda self, request, timeout: {"status_code": 200, "body": json.dumps(body)}})()
         status, windows, _ = probe.fetch_windows(api, {"provider": "kimi", "index": "kimi-index"}, NOW)
         self.assertEqual(status, "ok")
         self.assertEqual([(w["window"], w["used_percent"], w["reset_at"]) for w in windows],
-                         [("session", 0, SOON)])
+                         [("session", 25, SOON)])
 
-    def test_quota_reads_wait_for_slow_kimi_within_the_remote_deadline(self):
-        # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19. A worker polls at most
-        # two accounts after a Claude wait, before Will's worker deadline.
+    def test_quota_reads_wait_for_slow_kimi_and_stop_at_the_poll_deadline(self):
+        # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19.
         self.assertGreaterEqual(probe.HTTP_TIMEOUT, 15)
-        self.assertLess(probe.CLAUDE_MAX_WAIT + 2 * probe.HTTP_TIMEOUT, monitor.REMOTE_DEADLINE)
+        self.assertLess(probe.POLL_DEADLINE + 5, monitor.REMOTE_DEADLINE)
+        account = next(row for row in probe.quota_accounts(FILES, [], SALT).values() if row["provider"] == "kimi")
+        with (patch.object(probe, "route_label", return_value="account-test"),
+              patch.object(probe, "fetch_windows", return_value=("ok", [], None)) as fetch,
+              patch.object(probe.time, "monotonic", return_value=100)):
+            self.assertEqual(probe.collect_account(None, account, NOW, (), {}, {}, deadline=100.5)["status"],
+                             "quota-deferred")
+            fetch.assert_not_called()
+            probe.collect_account(None, account, NOW, (), {}, {}, deadline=105)
+            self.assertEqual(fetch.call_args.args[3], 5)
+            probe.collect_account(None, account, NOW, (), {}, {}, deadline=200)
+            self.assertEqual(fetch.call_args.args[3], probe.HTTP_TIMEOUT)
         response = type("Response", (), {"status": 200, "read": lambda self, *size: b"{}"})()
         with (patch.object(probe.http.client, "HTTPConnection") as connection,
               patch.object(probe.QuotaAPI, "management_key", return_value="fixture-management-key")):
             connection.return_value.getresponse.return_value = response
-            self.assertEqual(probe.QuotaAPI(1, Path("/nonexistent/.env")).quota({}), {})
-        self.assertEqual(connection.call_args.kwargs["timeout"], probe.HTTP_TIMEOUT)
+            self.assertEqual(probe.QuotaAPI(1, Path("/nonexistent/.env")).quota({}, 7), {})
+        self.assertEqual(connection.call_args.kwargs["timeout"], 7)
 
     def test_claude_waits_until_due_and_skips_if_too_early(self):
         account = next(row for row in probe.quota_accounts(FILES, [], SALT).values() if row["provider"] == "claude")
@@ -348,7 +358,7 @@ class MonitorTests(unittest.TestCase):
         requests = []
 
         class FakeAPI:
-            def quota(self, request):
+            def quota(self, request, timeout):
                 index = request["auth_index"]
                 requests.append(index)
                 if index == "claude-index" and requests.count(index) == 1:

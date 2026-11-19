@@ -36,9 +36,10 @@ CLAUDE_EVERY_TICKS = 3
 WORKER_POLLING = "quota-polling"
 CONTAINER = "cli-proxy-api"
 CLAUDE_MAX_WAIT = 15  # Longer waits defer the Claude account to a later tick.
-# Kimi's usage endpoint answered in about 10.5 s on 2026-11-19. A worker polls at
-# most two accounts after a Claude wait, inside Will's remote deadline.
-HTTP_TIMEOUT = 20
+HTTP_TIMEOUT = 20  # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19.
+# Quota reads end this many seconds after a host collection starts, so a slow
+# provider or a longer account list cannot run past Will's remote deadline.
+POLL_DEADLINE = 55
 
 
 def obj(value):
@@ -256,8 +257,8 @@ def quota_request(item):
     return {"auth_index": item["index"], "method": "GET", "url": url, "header": header}
 
 
-def fetch_windows(api, item, now):
-    result = obj(api.quota(quota_request(item)))
+def fetch_windows(api, item, now, timeout=HTTP_TIMEOUT):
+    result = obj(api.quota(quota_request(item), timeout))
     status = result.get("status_code")
     if not isinstance(status, int) or not 200 <= status < 300:
         return "quota-rate-limited" if status == 429 else "quota-unavailable", [], None
@@ -287,8 +288,8 @@ def fetch_windows(api, item, now):
 
 
 class QuotaAPI(fleetctl.LocalAPI):
-    def quota(self, payload):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=HTTP_TIMEOUT)
+    def quota(self, payload, timeout=HTTP_TIMEOUT):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             connection.request("POST", "/v8/management/requests/api-call", json.dumps(payload), {
                 "Authorization": "Bearer " + self.management_key(),
@@ -400,7 +401,7 @@ def local_cooldowns(item, now):
             for (scope, reason), retry in sorted(result.items())]
 
 
-def collect_account(api, account, now, visited, not_before, egress):
+def collect_account(api, account, now, visited, not_before, egress, deadline=None):
     tag = account["account_id"]
     item = account["item"]
     provider = account["provider"]
@@ -421,14 +422,16 @@ def collect_account(api, account, now, visited, not_before, egress):
     else:
         due = max(not_before.get(tag, 0), not_before.get("_all", 0))
         delay = max(0, due - time.time()) if provider == "claude" else 0
-        if delay > CLAUDE_MAX_WAIT:
+        left = math.inf if deadline is None else deadline - time.monotonic() - delay
+        if delay > CLAUDE_MAX_WAIT or left < 1:
             result["status"] = "quota-deferred"
             return result
         if delay:
             time.sleep(delay)
         result["attempted_at"] = time.time()
         try:
-            result["status"], result["windows"], result["grants"] = fetch_windows(api, account, now)
+            result["status"], result["windows"], result["grants"] = fetch_windows(
+                api, account, now, min(HTTP_TIMEOUT, left))
         except Exception:
             result["status"] = "quota-unavailable"
     return result
@@ -467,6 +470,7 @@ def probe_egress(targets):
 
 
 def collect_host(host, salt, visited, not_before, progress=lambda report: None):
+    deadline = time.monotonic() + POLL_DEADLINE
     now = datetime.now(timezone.utc)
     api = QuotaAPI(host["port"], Path(host["instance_root"]) / ".env")
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -504,7 +508,7 @@ def collect_host(host, salt, visited, not_before, progress=lambda report: None):
         targets.update(probe_egress(sorted(additional)))
     progress(dict(result, quota_errors=["inventory-incomplete"], stage=WORKER_POLLING))
     with ThreadPoolExecutor(max_workers=6) as pool:
-        pending = [pool.submit(collect_account, api, account, now, visited, not_before, targets)
+        pending = [pool.submit(collect_account, api, account, now, visited, not_before, targets, deadline)
                    for account in accounts.values()]
         result["accounts"] = [job.result() for job in pending]
     return result
