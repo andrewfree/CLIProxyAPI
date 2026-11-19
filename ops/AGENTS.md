@@ -8,17 +8,24 @@ and covers the Go server. Keep fork-only operational rules here.
 - To check Claude account usage, scoped model caps such as Fable, or reset
   grants, run `python3 ops/claude_usage_resets.py status`. Do not write
   one-off scripts. See `ops/CLAUDE_USAGE_RESETS.md`.
-- Usage and reset numbers are live. Query them fresh. Never reuse a percentage
-  from an earlier turn or note as current.
+- Usage and reset numbers change all the time. For any number you act on or
+  report as current (a claim, a fan-out check, a cap decision), run `status`
+  in this turn. Never reuse a percentage from an earlier turn or note as
+  current.
+- Run the tool from the checkout. The ops bundle ships a copy only for the
+  fleet monitor's imports, and that copy refuses to run as a command.
 - `status`, `watch`, and `claim --dry-run` are read-only and need no approval.
 - `claim --yes` consumes a grant. Run it only with Andrew's explicit approval
   for that account and grant ID. A conditional approval counts, for example
   "when it hits 99%, reset Fable". Never substitute a different grant when the
   approved one is refused. Report the refusal instead.
 - Poll usage no faster than every 300 seconds. Shorter intervals hit HTTP 429.
-- The fleet monitor also reads Claude usage about every 15 minutes and records
-  it in `ops/runtime/fleet/quota-history-YYYY-MM.jsonl`, so prefer that snapshot
-  for routine checks and pause the monitor before a `watch`.
+  Once the fleet monitor is active it also reads each Claude account about
+  every 15 minutes, so pause it before a `watch`.
+- The monitor's `ops/runtime/fleet/quota-history-YYYY-MM.jsonl` is for history
+  and trend questions only. Quote a row's `captured_at` time with it. A row can
+  be 15 or more minutes old, has no grant IDs, and the file does not exist
+  until the monitor is activated.
 - Report results from the claim receipt (`result`, `resets_left`, before and
   after limits), not from the request having been sent.
 - Never print or commit tokens, organization UUIDs, or management keys.

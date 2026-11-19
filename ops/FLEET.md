@@ -429,9 +429,9 @@ CLIPROXY_ROOT="$HOME/cliproxy" /opt/homebrew/bin/python3 -B "$HOME/cliproxy-live
 ```
 
 Pause with `launchctl bootout "gui/$(id -u)/com.rever.cliproxy-fleet-monitor"`.
-Resume by bootstrapping the installed plist again. For routine Claude usage
-checks, prefer the snapshot in `ops/runtime/fleet/quota-history-YYYY-MM.jsonl`.
-The monitor tracks its own read deadlines in `monitor-state.json`. A 429
+Resume by bootstrapping the installed plist again. For a current Claude
+reading, run `python3 ops/claude_usage_resets.py status` from the checkout;
+`ops/runtime/fleet/quota-history-YYYY-MM.jsonl` is history. The monitor tracks its own read deadlines in `monitor-state.json`. A 429
 defers that account for at least 20 minutes, and a Will SSH failure leaves
 Mac polling available. The reset tool reads usage independently of the
 monitor. Pause the monitor before using `watch`, and allow at least 300 seconds

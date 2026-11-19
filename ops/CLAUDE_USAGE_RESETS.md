@@ -21,10 +21,6 @@ The tool reads `GET https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip
 This request is read-only. The claude-cli `User-Agent`, `x-app: cli`, and
 `anthropic-beta: oauth-2025-04-20` headers are required to get the `cedar_ember` block.
 
-The fleet monitor also reads Claude usage about every 15 minutes and records
-it in `ops/runtime/fleet/quota-history-YYYY-MM.jsonl`, so prefer that snapshot
-for routine checks and pause the monitor before a `watch`.
-
 - `limits` holds `weekly_all`, the weekly total. It also holds one
   `weekly_scoped` entry per capped model. In November 2026 Fable was the only
   capped model.
@@ -38,6 +34,13 @@ for routine checks and pause the monitor before a `watch`.
 - `eligible` and `cooldown_until` gate every claim. `next_grant_id` is only a
   suggestion. On 2026-11-11 the server accepted a Fable grant while it named
   the full reset as next.
+
+Run the tool from the checkout. The ops bundle ships a copy only for the fleet
+monitor's imports, and that copy exits with an error if run as a command. Once
+the monitor is active it also reads each Claude account about every 15 minutes
+and records the readings in `ops/runtime/fleet/quota-history-YYYY-MM.jsonl`.
+Use that file for history only, not as a current reading, and pause the
+monitor before a `watch`.
 
 ## Watch a limit
 
