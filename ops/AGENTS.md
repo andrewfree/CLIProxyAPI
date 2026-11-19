@@ -20,12 +20,12 @@ and covers the Go server. Keep fork-only operational rules here.
   "when it hits 99%, reset Fable". Never substitute a different grant when the
   approved one is refused. Report the refusal instead.
 - Poll usage no faster than every 300 seconds. Shorter intervals hit HTTP 429.
-  Once the fleet monitor is active it also reads each Claude account about
-  every 15 minutes, so pause it before a `watch`.
+  The fleet monitor also reads each Claude account about every 15 minutes,
+  so pause it before a `watch` and resume it afterwards
+  ([Install or resume on the Mac](FLEET.md#install-or-resume-on-the-mac)).
 - The monitor's `ops/runtime/fleet/quota-history-YYYY-MM.jsonl` is for history
   and trend questions only. Quote a row's `captured_at` time with it. A row can
-  be 15 or more minutes old, has no grant IDs, and the file does not exist
-  until the monitor is activated.
+  be 15 or more minutes old and has no grant IDs.
 - Report results from the claim receipt (`result`, `resets_left`, before and
   after limits), not from the request having been sent.
 - Never print or commit tokens, organization UUIDs, or management keys.

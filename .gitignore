@@ -64,7 +64,7 @@ _bmad-output/*
 
 # Host watchdog runtime state and bounded logs
 ops/runtime/
-ops/__pycache__/
+__pycache__/
 
 # docker
 docker-compose.override.yml

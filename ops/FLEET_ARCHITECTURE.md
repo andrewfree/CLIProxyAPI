@@ -1,6 +1,6 @@
 # How the CLIProxy fleet is set up, and why
 
-This document explains the reasons behind the fleet's shape, as of November 18, 2026. Read it
+This document explains the reasons behind the fleet's shape, as of November 19, 2026. Read it
 before you change anything, so that you know which problem each part solves.
 
 It is an explanation, not a procedure:
@@ -594,7 +594,8 @@ Sessions that predate the repoint retain their original launcher until they end.
 renaming it breaks the mount's link to the inode, so every config change is one in-place write
 that preserves the inode and mode 600, followed by a check of the loaded values
 ([GLM_ROUTING.md](GLM_ROUTING.md), [evidence/cache-affinity-20261118/README.md](evidence/cache-affinity-20261118/README.md)).
-Never restore an old full config over later edits; remove only the lines you added.
+Never restore an old full config over later edits; remove only the lines you added. On the Mac,
+host-side edits do not load at the moment (section 4).
 
 **Why OAuth files are never synchronized.** Claude refresh tokens rotate. Two servers sharing one
 token file would invalidate each other, so each host logs in separately to the same accounts
@@ -615,12 +616,14 @@ a 1,024 MB cap with no archive, which is why the log cap is a host-specific path
 ([FLEET.md](FLEET.md#operations-on-november-18-2026)) and provider keys (session record) into
 their own transcripts.
 
-**The response, all on November 18:**
+**The response, on November 18 and 19:**
 
 - Two new client keys were added at the top of both hosts' key lists and every client moved to
-  them. The two old keys stay accepted until a scheduled task removes them on 2026-11-19 at 10:30
-  UTC. The repository records no reason for this overlap. Its effect is that sessions already
-  running keep working, because a running session keeps the key it launched with.
+  them. The two old keys stayed accepted for 24 hours. On 2026-11-19 a scheduled task removed them
+  on Will; on the Mac its edit did not load, and the keys were removed through the v8 management
+  API at Andrew's choice ([FLEET.md](FLEET.md#operations-on-november-19-2026)). The repository records no reason for this
+  overlap. Its effect was that sessions already running kept working, because a running session
+  keeps the key it launched with.
 - The Z.ai Coding Plan key was replaced on both hosts and the old one deleted.
 - The NVIDIA key (then Mac only) was rotated and the old one deleted. The new key expires on
   2027-11-18. Later that day the NVIDIA provider was added to Will as well.
@@ -698,7 +701,7 @@ private charts generated from the JSONL history.
 | A dropped SYN made one Claude dial wait about 133 to 135 s | `net.ipv4.tcp_syn_retries: 2`, live since the November 18 recreate | Both Compose files; Will's policy and verifier | PR #13; [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Z.ai answered `glm-5.2` with GLM-5.3, and Will's Cursor `glm-5.2` entry returned 503 `auth_not_found` | Client ID `glm-5.2` maps to upstream `glm-5.3` on `zai-coding-plan` | Host `config.yaml` on both hosts | [GLM_ROUTING.md](GLM_ROUTING.md#glm-52-maps-to-glm-53) |
 | Only the Mac served the NVIDIA models | NVIDIA provider and its three aliases added to Will | Will `config.yaml` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
-| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; the monitor collects quota history after activation | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; the monitor collects quota history | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Will's extra `kimi-ai` login looked like extra Kimi capacity | Removed: its usage counters matched the `kimi` login, so both share one quota | Will `auths/`; private backup in Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026); [KIMI_ROUTING.md](KIMI_ROUTING.md) |
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
 | A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
@@ -718,7 +721,9 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
 
 **Not automatic:**
 
-- **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances.
+- **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances. Its
+  Z.ai rows read the credit windows through a local, unpublished parser fix (November 19), which an
+  upstream update would drop.
   The monitor supplies fleet quota history, alerts and summaries. The Mac's `codex_cliproxy`
   moved to the tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
   CLIProxyBar's Will entry still reaches Will at its raw tailnet IP address, so the section 2.6
@@ -733,6 +738,17 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
+- **Host-side config edits on the Mac do not load.** On November 19, in-place edits of the Mac's
+  `config.yaml` changed the host file but not the running config; the container logged no reload,
+  and a second write never reached it. When this started is not known. Confirm a Mac edit with a
+  `config file changed, reloading` log line and a live check within 30 s. If none appears, write
+  once more with a comment change; if that does not load either, write the original bytes back and
+  ask Andrew. With his approval, apply the change through the v8 management API (for example
+  `PUT /v8/management/config/access/api-keys`), which edits the container's copy of the file and
+  saves it over the host file. Use it only when the two copies match: compare the `ETag` from
+  `GET /v8/management/config` (the SHA-256 of the container's bytes) with `shasum -a 256` of the
+  host file, and send that `ETag` as `If-Match`, so a changed container copy returns 412
+  ([FLEET.md](FLEET.md#operations-on-november-19-2026)).
 - **The monitor reports, it does not fail over.** The Mac LaunchAgent runs from the bundle every
   five minutes on Apple's `/usr/bin/python3`, because macOS Local Network privacy blocked SSH to
   Will from Homebrew's Python under launchd ([FLEET.md](FLEET.md#install-or-resume-on-the-mac)). It texts Andrew when
@@ -762,8 +778,6 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   The two `camoff-astra` exceptions are gone; the prefix itself was removed from both hosts.
 - **Will uses the flat legacy YAML layout** until the layout migration (design unit 7). The loaded
   view makes the two layouts comparable in the meantime.
-- **Old client keys overlap** until 2026-11-19 10:30 UTC, so sessions launched with an old key
-  keep working until then (section 2.9).
 - **No measurement of affinity with two or more eligible accounts** after the change.
 - **Deploys drop open streams**, because the idle gate does not work as designed (section 2.7).
 
@@ -830,7 +844,7 @@ text).
 **Config.**
 
 - One in-place write that keeps the inode and mode 600; then verify the loaded values, not the
-  file.
+  file. On the Mac, host-side edits do not load at the moment (section 4).
 - Remove only your own lines on rollback.
 - A reload reconfigures plugins and can close Cursor bridges.
 
@@ -849,5 +863,8 @@ text).
 **Compose and container settings.**
 
 - They take effect at a recreate, and a recreate drops every stream on that host.
-- On the Mac the watchdog can run `docker compose up` by itself, so a Compose change pulled into
-  the checkout can go live without an activation.
+- On the Mac the watchdog runs `docker compose up` by itself only while the Compose files, resolved
+  image and service config hash match the activation receipt, which is recorded only after the
+  running container was checked against them; otherwise it starts the existing container
+  (`ops/cliproxy_watchdog.py`, `guarded_compose_up`). A Compose change pulled into the checkout
+  waits for an activation, but a hand-run `docker compose up` in the instance root applies it.
