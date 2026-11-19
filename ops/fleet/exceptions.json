@@ -10,26 +10,5 @@
     "date": "2026-11-18",
     "review_by": "2026-12-02",
     "count": 1
-  },
-  {
-    "surface": "P6/camoff-astra",
-    "hosts": [
-      "m5"
-    ],
-    "reason": "One Mac Codex credential has this prefix. Unit 0 found 5,985 of 8,765 Mac rows used it, so review mirroring before removal.",
-    "decision_ref": "Fleet design 2026-11-17 Q9 and unit 0 prechecks",
-    "date": "2026-11-18",
-    "review_by": "2026-12-02",
-    "count": 1
-  },
-  {
-    "surface": "P8/camoff-astra",
-    "hosts": [
-      "m5"
-    ],
-    "reason": "The Mac Codex credential exposes its additional prefixed catalog.",
-    "decision_ref": "Fleet design 2026-11-17 Q9",
-    "date": "2026-11-18",
-    "review_by": "2026-12-02"
   }
 ]

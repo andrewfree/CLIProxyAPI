@@ -561,8 +561,8 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 
 | Location | What it is | Consequence |
 | --- | --- | --- |
-| `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. The installed jobs and T3 still use its checkout paths until cutover. | Until cutover, a pull, checkout, or uncommitted edit can change the next job run or new T3 session. |
-| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root. After cutover it supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths and, once enabled, the Codex fallback launcher and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. Since the November 18 cutover the installed jobs and new T3 sessions use the bundle, not its checkout paths. | A pull, checkout, or uncommitted edit no longer changes a job or new session. Compose inputs here are still live. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
 | `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
@@ -728,12 +728,13 @@ manual. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to t
   to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
-- **Monitor activation.** Andrew approves and installs the Mac LaunchAgent after the
-  bundle ships. Before activation, use `fleetctl health` and `parity` by hand. With only egress down,
+- **Monitor paused.** The Mac LaunchAgent is installed from the bundle but booted out,
+  because SSH from launchd jobs to Will times out on the Mac (FLEET.md, live activation).
+  Until it resumes, use `fleetctl health` and `parity` by hand. With only egress down,
   `/healthz` can stay green. Look for `egress_hold` lines in
   `ops/runtime/fleet/failover.jsonl` on the Mac or dial-error 5xx answers from Will.
-- **Bundle activation.** The Mac cutover and Will's first ship await live approval.
-  The cutover includes a P0 check of the installed paths and checksums (section 2.8).
+- **Will's first ship** (unit 2c) awaits its own approval. The Mac cutover ran on
+  November 18 with a passing P0 check of the installed paths and checksums (section 2.8).
 
 **Accepted:**
 
@@ -749,8 +750,8 @@ manual. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to t
   and both hosts use the same accounts and providers.
 - **Each host learns a cap separately.** Cooldown state is not shared, so a capped account costs
   about one wasted call per host per window ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
-- **Three dated exceptions** (debug logging and `camoff-astra`), due for review by December 2,
-  2026 (section 2.1).
+- **One dated exception** (debug logging), due for review by December 2, 2026 (section 2.1).
+  The two `camoff-astra` exceptions were removed once Will served the same prefix.
 - **Will uses the flat legacy YAML layout** until the layout migration (design unit 7). The loaded
   view makes the two layouts comparable in the meantime.
 - **Old client keys overlap** until 2026-11-19 10:30 UTC, so sessions launched with an old key
