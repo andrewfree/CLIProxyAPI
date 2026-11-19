@@ -86,9 +86,10 @@ private deployment backup after confirming no task-owned client uses it.
 ### Host failover for the shared pool
 
 `CLIPROXY_FALLBACK_URL` names a second CLIProxy origin for a shared-pool
-profile. Only `claude_cliproxy` on the Mac sets it (Will primary, Mac
-fallback). The launcher refuses it on a named account route, because a
-pinned account must never move to another host. Without the variable the
+profile. On the Mac, `claude_cliproxy` uses it for Will-to-Mac failover,
+and `codex_cliproxy` can opt in using the [Codex rollout](#codex-failover).
+The Claude launcher refuses it on a named account route, because a pinned
+account must never move to another host. Without the variable, the Claude
 launcher keeps the default connection agent and starts no timers or probes.
 
 With the variable set, the launcher:
@@ -236,6 +237,53 @@ an unavailable account's error. The `X-CPA-TRACE-ID` header identifies which
 proxy auth entry served the response. To undo this setup, remove the two T3
 provider entries through Settings, then clear their auth-file prefixes; existing
 unprefixed clients continue to use the shared pool.
+
+## Codex failover
+
+On the Mac, enable session-start failover for the Will-primary
+`codex_cliproxy` profile in T3 Settings after the approved rollout. Set:
+
+| Profile field | Value |
+| --- | --- |
+| `config.binaryPath` | Absolute path to `ops/codex_fallback_launcher.mjs` in the approved Mac checkout |
+| Profile environment `CLIPROXY_FALLBACK_URL` | `http://127.0.0.1:8317` |
+| Profile environment `CODEX_REAL_BINARY` | `/opt/homebrew/bin/codex` |
+
+Keep the existing launch arguments and auth command, including the
+`-c` argument followed by the single string
+`model_providers.cliproxy.base_url="http://will.<tailnet>.ts.net:8317/v1"`.
+The executable needs Node.js on T3's PATH and
+`claude_account_launcher.mjs` beside it for the shared health probe.
+
+The launcher probes both hosts in parallel. A host passes if a fresh
+connection to `GET /healthz` returns HTTP 200 with JSON `{"status":"ok"}`.
+The probes share a startup budget of about three seconds. Will wins if
+healthy, and the launcher cancels any pending Mac probe. If Will fails and
+the Mac passes, only the base URL changes, to `http://127.0.0.1:8317/v1`.
+If both fail, Codex starts with its original arguments so it can report
+its usual connection error. A running session stays on its selected host
+until its Codex process ends.
+
+Each invocation with the fallback variable and a config override decides
+and logs independently. This includes sessions, provider status probes,
+and `exec` and `mcp` helpers. The launcher skips both probing and logging
+when the fallback variable is absent or the invocation has no config
+overrides, as with `--version`. Each decision appends one JSON line to
+`ops/runtime/fleet/codex-failover.jsonl` under the launcher's checkout, or
+to the file selected by `CLIPROXY_CODEX_FAILOVER_LOG`. Records contain the
+timestamp, process ID, subcommand (`app-server`, `exec`, `mcp`, or `none`
+when there is no recognized subcommand), selected route, and reason.
+The log omits URLs, hostnames, and credentials. If the launcher cannot
+identify a single supported base URL, the fallback URL is invalid, or the
+probe module cannot load, it keeps the original arguments and records
+`invalid_configuration`.
+
+The launcher rewrites only a quoted URL assigned directly to the bare key
+`model_providers.cliproxy.base_url`. Quoted key paths and whole provider
+table overrides count when checking for ambiguity and pass through unchanged.
+
+See the [fleet runbook](FLEET.md#enable-or-roll-back-codex-failover) for the
+rollout, closed-port drill and rollback.
 
 ## Recovery behavior
 
