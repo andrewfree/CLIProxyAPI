@@ -1,6 +1,6 @@
 # How the CLIProxy fleet is set up, and why
 
-This document explains the reasons behind the fleet's shape, as of November 18, 2026. Read it
+This document explains the reasons behind the fleet's shape, as of November 19, 2026. Read it
 before you change anything, so that you know which problem each part solves.
 
 It is an explanation, not a procedure:
@@ -698,7 +698,7 @@ private charts generated from the JSONL history.
 | A dropped SYN made one Claude dial wait about 133 to 135 s | `net.ipv4.tcp_syn_retries: 2`, live since the November 18 recreate | Both Compose files; Will's policy and verifier | PR #13; [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Z.ai answered `glm-5.2` with GLM-5.3, and Will's Cursor `glm-5.2` entry returned 503 `auth_not_found` | Client ID `glm-5.2` maps to upstream `glm-5.3` on `zai-coding-plan` | Host `config.yaml` on both hosts | [GLM_ROUTING.md](GLM_ROUTING.md#glm-52-maps-to-glm-53) |
 | Only the Mac served the NVIDIA models | NVIDIA provider and its three aliases added to Will | Will `config.yaml` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
-| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; the monitor collects quota history after activation | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; the monitor collects quota history | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Will's extra `kimi-ai` login looked like extra Kimi capacity | Removed: its usage counters matched the `kimi` login, so both share one quota | Will `auths/`; private backup in Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026); [KIMI_ROUTING.md](KIMI_ROUTING.md) |
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
 | A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
@@ -718,7 +718,8 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
 
 **Not automatic:**
 
-- **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances.
+- **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances. Its
+  Z.ai row needs the local `CREDIT_LIMIT` parser fix of November 19.
   The monitor supplies fleet quota history, alerts and summaries. The Mac's `codex_cliproxy`
   moved to the tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
   CLIProxyBar's Will entry still reaches Will at its raw tailnet IP address, so the section 2.6
@@ -849,5 +850,7 @@ text).
 **Compose and container settings.**
 
 - They take effect at a recreate, and a recreate drops every stream on that host.
-- On the Mac the watchdog can run `docker compose up` by itself, so a Compose change pulled into
-  the checkout can go live without an activation.
+- On the Mac the watchdog runs `docker compose up` by itself only while the Compose inputs and the
+  running container match the activation receipt; otherwise it starts the existing container
+  (`ops/cliproxy_watchdog.py`, `guarded_compose_up`). A Compose change pulled into the checkout
+  waits for an activation, but a hand-run `docker compose up` in the instance root applies it.

@@ -98,6 +98,10 @@ commands from a shell or `env -i` connected. Little Snitch's network extension i
 macOS firewall is off. The job was booted out before a second matching sample could send a false
 Will alert. Z.ai quota read `quota-unavailable` with no error; that needs its own follow-up.
 
+Outcome: at about 19:26 the monitor was reinstalled from the bundle shipped at `663471d0`
+(PR #24, Apple's `/usr/bin/python3`), and its first run reached both hosts. The Z.ai reads were
+empty because the Coding Plan reply had moved to `CREDIT_LIMIT` windows; PR #27 reads them.
+
 Resume: allow SSH from launchd jobs to Will, rerun `ssh_probe_launchd.sh <file>` until both lines
 show `rc=0`, then run the install block in FLEET.md again.
 

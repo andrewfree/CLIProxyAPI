@@ -351,7 +351,10 @@ Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watch
 
 Follow the [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) to
 ship a reviewed bundle and install its LaunchAgents. The installer checks both
-script paths before touching either job. Inspect the installed jobs and their
+script paths before touching either job. The fleet monitor's LaunchAgent,
+`com.rever.cliproxy-fleet-monitor`, installs with the block in
+[Install or resume on the Mac](FLEET.md#install-or-resume-on-the-mac) and logs to
+`~/Library/Logs/cliproxy-fleet-monitor.log`. Inspect the installed jobs and their
 logs from the instance checkout.
 
 ```bash
