@@ -93,7 +93,7 @@ private deployment backup after confirming no task-owned client uses it.
 
 `CLIPROXY_FALLBACK_URL` names a second CLIProxy origin for a shared-pool
 profile. On the Mac, `claude_cliproxy` uses it for Will-to-Mac failover,
-and `codex_cliproxy` can opt in using the [Codex rollout](#codex-failover).
+and `codex_cliproxy` has used it for session-start failover since November 18 (see [Codex failover](#codex-failover)).
 The Claude launcher refuses it on a named account route, because a pinned
 account must never move to another host. Without the variable, the Claude
 launcher keeps the default connection agent and starts no timers or probes.
@@ -246,8 +246,9 @@ unprefixed clients continue to use the shared pool.
 
 ## Codex failover
 
-On the Mac, enable session-start failover for the Will-primary
-`codex_cliproxy` profile in T3 Settings after the approved rollout. Set:
+On the Mac, the Will-primary `codex_cliproxy` profile has used session-start
+failover since the approved rollout on November 18, after the Mac bundle cutover.
+To enable it again after a rollback, set:
 
 | Profile field | Value |
 | --- | --- |

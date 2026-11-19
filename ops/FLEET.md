@@ -50,27 +50,34 @@ The read-only checks cover the management API contract. Use the existing
 instance verifiers for Docker image and Compose checks. The bundle can be
 shipped separately from the proxy. The Mac cutover below adds the P0 check
 for deployed files and configured launch paths. The Mac's scheduled monitor
-adds [in-container egress and quota checks](#health-and-quota-monitor) after
-the cutover and its own LaunchAgent are activated.
+adds [in-container egress and quota checks](#health-and-quota-monitor). It was
+installed on November 18 and is paused until SSH from launchd jobs to Will works.
 
 Operational differences recorded on November 18, 2026, for review by December 2, 2026:
 
 - Will uses flat legacy YAML until the layout migration (fleet design November 17, unit 7).
-- The Mac runs scripts from its primary checkout and Will has a hand-copied ops subset
-  pending bundle receipts (units 2b and 2c).
+- Will has a hand-copied ops subset pending its first bundle ship (unit 2c). The Mac
+  runs its ops jobs and T3 launchers from the bundle since the November 18 cutover.
 - The installed Mac token helper differed from the tracked copy and reachable history
   during prechecks (unit 0).
 
-Until bundle cutover, updating the watchdog, log archiver, Claude launcher,
-Codex fallback launcher, their plists, or Compose configuration in the Mac's
-primary checkout is a live change and requires Andrew's promote phrase. Edit
-those files in a worktree. Activate the Mac first, then Will. If verification
-fails, roll back the host just changed. A host that already passed requires
-Andrew's instruction to roll back.
+The Mac cutover ran on November 18, 2026, at commit `9273f727`. Since then a
+checkout edit reaches no job or new T3 session. These are live changes that
+require Andrew's promote phrase: a Mac `fleetctl ship --apply`, reinstalling a
+LaunchAgent or the token helper from the bundle, changing a T3 profile's launch
+settings, and any Compose configuration in the primary checkout. T3 sessions
+started before 17:54 Pacific that day keep the checkout launcher until they
+end, so until then updating the Claude launcher in the primary checkout is a
+live change too. Edit ops files and Compose configuration in a worktree.
+Activate the Mac first, then Will. If verification fails, roll back the host
+just changed. A host that already passed requires Andrew's instruction to roll
+back.
 
 ## Mac ops bundle cutover
 
-Unit 2b is prepared for Andrew's live approval. Run from a clean worktree at
+The first cutover ran on November 18, 2026 (see the
+[activation record](evidence/live-activation-20261118/README.md)). These steps
+stay as the record and as the procedure for a first cutover. Run from a clean worktree at
 the reviewed, merged unit 2b commit. Wait for Andrew's `promote fleet <id>`
 phrase before publishing, installing, or repointing profiles. Coordinate a
 window for the two LaunchAgents and new Claude CLIProxy sessions. Existing
@@ -142,8 +149,8 @@ the instance root for Compose, the host's logs, and private runtime state.
    and one new named Claude session and verify that each can answer
    `count_tokens` through its intended route. In a scratch worktree, a
    local edit to a shipped script should leave the deployed hash unchanged.
-   Keep the interim live-change rule until sessions using the old launcher
-   have ended. The token and P0 checks run in a subshell, so a failure stops
+   Keep treating a checkout launcher edit as live until sessions using the old
+   launcher have ended. The token and P0 checks run in a subshell, so a failure stops
    only that block and leaves `commit` and `backup` set for the rollback.
 
    ```sh
@@ -217,7 +224,7 @@ unmanaged files stay in place.
 
 ## Running fleet
 
-Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`. The Mac's `claude_cliproxy` and `codex_cliproxy` profiles reach Will by its tailnet name, `http://will.<tailnet>.ts.net:8317` (with `/v1` for Codex). Public resolvers answer NXDOMAIN for that name, so with Tailscale stopped the lookup should fail at once, instead of sending traffic and the client key to whatever holds Will's tailnet address on another network. The Claude launcher then fails over. Once enabled, the Codex launcher can select the Mac at session start after that failed lookup. M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw address.
+Will is the always-on primary at `http://100.98.74.67:8317`. This address is private to the Tailscale network; Tailscale encrypts transport. Will's container remains bound to loopback. Tailscale Serve forwards TCP 8317 to it. The M5 Mac runs a local fallback at `http://127.0.0.1:8317`. The Mac's `claude_cliproxy` and `codex_cliproxy` profiles reach Will by its tailnet name, `http://will.<tailnet>.ts.net:8317` (with `/v1` for Codex). Public resolvers answer NXDOMAIN for that name, so with Tailscale stopped the lookup should fail at once, instead of sending traffic and the client key to whatever holds Will's tailnet address on another network. The Claude launcher then fails over. Since November 18 the Codex launcher selects the Mac at session start after that failed lookup. M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw address.
 
 `fleet-release.json` pins one application source commit, one Cursor plugin version, and the exact platform image and plugin hashes. Both images are built from the same commit. ARM64 runs on the Mac's Docker VM; AMD64 runs on Will. Compose uses immutable local image IDs with `pull_policy: never`, so a restart cannot silently select a new release. The two Compose files and owner contracts must be changed together for the next release.
 
@@ -287,7 +294,7 @@ T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the sha
 
 `ops/claude_account_launcher.mjs` supports explicit `shared-pool` mode through `CLIPROXY_CLAUDE_ROUTE`. This mode forwards unprefixed Claude model IDs to the existing credential selector. Named profiles keep their account prefixes. `ops/configure_claude_pool.mjs` provisions pool profiles through the running T3 settings API and stores keys in its secret store. The [routing receipt](evidence/claude-pool-routing-20261103.json) records tests, deployed artifact hashes, and runtime-check limits. This host-side integration does not change the fleet's server images or manifest.
 
-`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. The Mac's `codex_cliproxy` can opt into session-start failover using the procedure below. The `_mac` profiles, named Claude profiles and Will's own `claude_cliproxy` use fixed hosts. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
+`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. The Mac's `codex_cliproxy` has used session-start failover from the bundle since November 18 (procedure and rollback below). The `_mac` profiles, named Claude profiles and Will's own `claude_cliproxy` use fixed hosts. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
 
 For exact-model discovery and an authorized T3 task, follow [the Kimi CLIProxy routing recipe](KIMI_ROUTING.md).
 
@@ -321,7 +328,9 @@ Tailscale Serve can remain in place during an application rollback. To remove on
 
 ### Enable or roll back Codex failover
 
-Enable it only after the [Mac bundle cutover](#mac-ops-bundle-cutover)
+It was enabled on November 18, 2026 (see the
+[activation record](evidence/live-activation-20261118/README.md)). These steps stay
+as the procedure and the rollback. Enable it only after the [Mac bundle cutover](#mac-ops-bundle-cutover)
 has passed, so T3 runs the launcher from the bundle and never from the
 checkout. The T3 path is
 `/Users/rever/cliproxy-live/ops/codex_fallback_launcher.mjs`. The launcher
@@ -507,5 +516,11 @@ These changes are live but are not part of a release. Of the changes below, only
   - **Quota plugin removed from Will.** `cliproxybar-quota` was written by Andrew's sessions on 2026-10-13 in his local CLIProxyBar branch (`~/cliproxybar`, upstream `darfink/cliproxybar`). It reads quota only for Grok browser and xAI accounts, which neither host has. It was disabled with `PATCH /v0/management/plugins/cliproxybar-quota/enabled` and `{"enabled":false}`, its config lines were removed, and its library was moved to a private backup on Will under `ops/runtime/parity-20261118/plugin-backup`. The [fleet monitor](#health-and-quota-monitor) supplies alerts, quota history, a daily summary and charts once activated. CLIProxyBar stays for live glances.
   - **`kimi-ai` login removed from Will.** The management `api-call` `GET /coding/v1/usages` returned identical counters for the `kimi` login (`api.kimi.com`) and the `kimi-ai` login (`api.kimi.ai`): the same 5-hour reset time to the microsecond and the same monthly use (97.36% on November 18, resetting November 22). They share one Kimi quota, so `kimi-ai` added no capacity. Its auth file was moved to a private backup on Will under `ops/runtime/parity-20261118/auth-backup`. Check: Kimi on Will answered with the single `kimi` login afterwards (a `kimi-k3-256k` request returned 200 with the exact reply), and `fleetctl parity` no longer reports `P6/kimi-ai`. See [the Kimi routing recipe](KIMI_ROUTING.md).
   - **Containers recreated** on unchanged images: the Mac at 23:18:46Z and Will at 23:19:06Z (15:18 to 15:19 Pacific). Check: `net.ipv4.tcp_syn_retries` reads back as 2 inside each container, and Will's `verify_live.py` reports ok with no `container_sysctls_drift`.
-  - **Parity.** [exceptions.json](fleet/exceptions.json) now holds three entries: `P2/debug`, `P6/camoff-astra` and `P8/camoff-astra`. The six for NVIDIA (`P2`, `P5`, `P8`), the quota plugin (`P2`, `P10`) and `kimi-ai` (`P6`) were removed because they matched nothing. The `config_fingerprint` pins in [fleet-release.json](fleet-release.json) now hold shared digest `9213320e...` and Mac observed digest `fcd1d0b4...`. Check: `fleetctl parity` reports `equal` with no drift. The fleetctl tests now load a frozen copy of the nine exceptions seeded on November 18 ([test_fleetctl_exceptions.json](test_fleetctl_exceptions.json)), which matches their synthetic fleet, instead of the live file.
-  - **Still open:** `camoff-astra` on Will (needs Andrew's OAuth login), live activation of the unit 2b Mac bundle, the unit 5 monitor and the unit 10 Codex automatic fallback (all merged), and the raw-address entries on M1 and in CLIProxyBar.
+  - **Parity.** [exceptions.json](fleet/exceptions.json) then held three entries: `P2/debug`, `P6/camoff-astra` and `P8/camoff-astra` (the `camoff-astra` two were removed in the evening, see below). The six for NVIDIA (`P2`, `P5`, `P8`), the quota plugin (`P2`, `P10`) and `kimi-ai` (`P6`) were removed because they matched nothing. The `config_fingerprint` pins in [fleet-release.json](fleet-release.json) now hold shared digest `9213320e...` and Mac observed digest `fcd1d0b4...`. Check: `fleetctl parity` reports `equal` with no drift. The fleetctl tests now load a frozen copy of the nine exceptions seeded on November 18 ([test_fleetctl_exceptions.json](test_fleetctl_exceptions.json)), which matches their synthetic fleet, instead of the live file.
+  - **Still open then:** `camoff-astra` on Will, live activation of the unit 2b Mac bundle, the unit 5 monitor and the unit 10 Codex automatic fallback, and the raw-address entries on M1 and in CLIProxyBar. The evening activation below closed all but the monitor and the raw-address entries.
+- **Live activation** (evening), approved by Andrew with `promote fleet mac-bundle`, `promote fleet monitor` and `promote fleet codex-failover`; run by Claude Opus 5.5 in T3. Commands and redacted results are in [the activation record](evidence/live-activation-20261118/README.md).
+  - **Mac bundle cutover** at about 17:53 Pacific: `fleetctl ship` published `9273f727` (24 files) to `~/cliproxy-live/ops`, the Compose activation receipt was recorded, both LaunchAgents and the token helper were reinstalled from the bundle, and the five Mac Claude profiles were repointed. Check: P0 `ok` with no issues, two watchdog cycles and one archiver run from the bundle passed, new sessions on `claude_cliproxy_mac` and `claude_gmail_mac` answered, and a checkout edit left the deployed hash unchanged.
+  - **Codex failover** on `codex_cliproxy` at about 18:01: `binaryPath` is the bundled wrapper, with `CLIPROXY_FALLBACK_URL` and `CODEX_REAL_BINARY`. The closed-port drill ran the shipped wrapper from the command line with the profile's exact launch arguments (`selected: fallback`, `fallback_healthy`) instead of a temporary T3 profile copy. Check: a new T3 session logged `app-server`, `primary`, `primary_healthy`.
+  - **`camoff-astra` on Will.** Will already had its own login for the account behind the Mac's `camoff-astra` credential, so no sign-in or file copy was needed. `PATCH /v8/management/credentials/fields` set its `prefix`. Check: Will lists the same 20 `camoff-astra/` models out of 187 as the Mac, a `camoff-astra/gpt-5.6-luna` request through Will returned 200, and `fleetctl parity` reports `equal` with both `camoff-astra` exceptions unused, so they were removed from [exceptions.json](fleet/exceptions.json).
+  - **Monitor paused.** The LaunchAgent was installed and its first run passed for the Mac, but SSH from launchd jobs to Will times out (both `will.local` and the Tailscale address, exit 255) while the same SSH from a shell works. Little Snitch is active on the Mac. The job was booted out before a second sample could raise a false Will alert. Resume it with the [install block](#install-or-resume-on-the-mac) once SSH from launchd jobs is allowed. Z.ai quota also read `quota-unavailable` and needs a follow-up.
+  - **Primary checkout pulled.** At 17:52:45 Pacific, before the cutover, a `git pull --ff-only` outside this session moved the primary checkout to `9273f727`, so the checkout jobs briefly ran the merged code. The next watchdog cycle passed.

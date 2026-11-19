@@ -39,7 +39,8 @@ secrets and logs.
    claude_cliproxy_mac (shared pool) -> launcher, pool mode ------------> Mac                        Z.ai Coding Plan
    3 named Claude profiles -----------> launcher, account prefix -------> Mac                        Cursor plugin
                                                                           Docker Desktop, arm64      NVIDIA
-   codex_cliproxy --------------------- (no launcher, one base_url) ----> Will  (tailnet name)
+   codex_cliproxy --------------------> codex_fallback_launcher.mjs ---> Will  (tailnet name);
+                                        picks a host at session start      Mac if Will fails at start
    codex_cliproxy_mac, codex_kimi_mac - (no launcher, one base_url) ----> Mac   127.0.0.1:8317
 
  Will, T3
@@ -48,7 +49,8 @@ secrets and logs.
  M1, T3
    codex_cliproxy --------------------- (no launcher) ------------------> Will  (tailnet address)
 
- Only the first arrow pair is automatic. Every other profile has one fixed host.
+ claude_cliproxy fails over per request and codex_cliproxy per session; every other profile has
+ one fixed host. On the Mac both launchers run from the ops bundle in ~/cliproxy-live/ops.
  The two proxies share no runtime state and neither is in the other's request path.
  CLIProxyBar (the Mac menu-bar quota app, not shown) still reaches Will by address (section 4).
 ```
@@ -141,8 +143,9 @@ Three details of the parity design matter when you change it:
   tags made with a nonce that exists for one run ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 4
   and 8).
 - **Every difference needs a dated exception.** [fleet/exceptions.json](fleet/exceptions.json)
-  holds three entries dated November 18 with `review_by` December 2: debug logging, and two for
-  the `camoff-astra` prefix on the Mac. Six more were seeded that day, for NVIDIA on the Mac only,
+  holds one entry, debug logging, dated November 18 with `review_by` December 2. Two more for
+  the `camoff-astra` prefix on the Mac were removed that evening once Will served the same
+  prefix. Six more were seeded that day, for NVIDIA on the Mac only,
   the quota plugin on Will only and the extra `kimi-ai` credential on Will. They were removed the
   same day once those differences were gone
   ([FLEET.md](FLEET.md#operations-on-november-18-2026), parity cleanup). None is on a Claude row.
@@ -394,8 +397,8 @@ and the check was a resolver comparison. With the raw address, a foreign network
 100.x range could receive the traffic in clear
 ([FLEET.md](FLEET.md#running-fleet), design question 3). Since the November 18 parity cleanup the
 Mac's `codex_cliproxy` uses the name too, for the same reason: its
-`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. With the optional
-Codex launcher enabled, a failed startup lookup can send a new Codex session to the Mac
+`model_providers.cliproxy.base_url` is `http://will.<tailnet>.ts.net:8317/v1`. With the Codex
+launcher enabled since November 18, a failed startup lookup sends a new Codex session to the Mac
 (section 4). M1 and the Will entry in CLIProxyBar (the Mac menu-bar quota app) still use the raw
 address.
 
@@ -561,8 +564,8 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 
 | Location | What it is | Consequence |
 | --- | --- | --- |
-| `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. The installed jobs and T3 still use its checkout paths until cutover. | Until cutover, a pull, checkout, or uncommitted edit can change the next job run or new T3 session. |
-| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root. After cutover it supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths and, once enabled, the Codex fallback launcher and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. Since the November 18 cutover the installed jobs and new T3 sessions use the bundle, not its checkout paths. | A pull, checkout, or uncommitted edit no longer changes a job or new session. Compose inputs here are still live. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
 | `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
@@ -583,9 +586,9 @@ files, and `.env`, then checks the hashes and resolved image against the
 activation receipt. A mismatch falls back to starting the existing container
 by name. An expiring pause lets an approved activation temporarily suppress
 all repairs. See the [cutover and rollback](FLEET.md#mac-ops-bundle-cutover).
-Until Andrew approves and verifies cutover, the interim live-change rule in
-[FLEET.md](FLEET.md#fleet-contract) applies. Sessions that predate the repoint
-retain their original launcher until they end.
+Andrew approved the cutover and it was verified on November 18. The live-change
+rule in [FLEET.md](FLEET.md#fleet-contract) now gates ships and reinstalls.
+Sessions that predate the repoint retain their original launcher until they end.
 
 **Why config is edited in place.** `config.yaml` is bind-mounted as a single file. Replacing or
 renaming it breaks the mount's link to the inode, so every config change is one in-place write
@@ -708,8 +711,8 @@ the Mac's `codex_cliproxy` checks Will at startup and selects the Mac automatica
 fails its health check and the Mac passes. If both fail, it starts with the Will URL. The
 launcher reuses the three-second `/healthz` probe from section 2.6. A healthy `/healthz`
 cannot reveal an upstream egress outage. Codex CLI keeps one `base_url` per process, so an
-existing session stays on its selected host. Until Andrew enables the launcher, switching is
-manual. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to the Mac.
+existing session stays on its selected host. Andrew enabled the launcher on November 18, from
+the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to the Mac.
 
 **Not automatic:**
 
@@ -728,12 +731,13 @@ manual. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to t
   to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
-- **Monitor activation.** Andrew approves and installs the Mac LaunchAgent after the
-  bundle ships. Before activation, use `fleetctl health` and `parity` by hand. With only egress down,
+- **Monitor paused.** The Mac LaunchAgent is installed from the bundle but booted out,
+  because SSH from launchd jobs to Will times out on the Mac (FLEET.md, live activation).
+  Until it resumes, use `fleetctl health` and `parity` by hand. With only egress down,
   `/healthz` can stay green. Look for `egress_hold` lines in
   `ops/runtime/fleet/failover.jsonl` on the Mac or dial-error 5xx answers from Will.
-- **Bundle activation.** The Mac cutover and Will's first ship await live approval.
-  The cutover includes a P0 check of the installed paths and checksums (section 2.8).
+- **Will's first ship** (unit 2c) awaits its own approval. The Mac cutover ran on
+  November 18 with a passing P0 check of the installed paths and checksums (section 2.8).
 
 **Accepted:**
 
@@ -749,8 +753,8 @@ manual. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to t
   and both hosts use the same accounts and providers.
 - **Each host learns a cap separately.** Cooldown state is not shared, so a capped account costs
   about one wasted call per host per window ([FLEET_DESIGN.md](FLEET_DESIGN.md) section 5).
-- **Three dated exceptions** (debug logging and `camoff-astra`), due for review by December 2,
-  2026 (section 2.1).
+- **One dated exception** (debug logging), due for review by December 2, 2026 (section 2.1).
+  The two `camoff-astra` exceptions were removed once Will served the same prefix.
 - **Will uses the flat legacy YAML layout** until the layout migration (design unit 7). The loaded
   view makes the two layouts comparable in the meantime.
 - **Old client keys overlap** until 2026-11-19 10:30 UTC, so sessions launched with an old key
@@ -794,8 +798,9 @@ text).
 
 **The launcher.**
 
-- It serves every Claude CLIProxy profile on both machines, and on the Mac it runs from the
-  checkout. Treat any edit as a live change.
+- It serves every Claude CLIProxy profile on both machines. On the Mac it runs from the bundle,
+  so a change goes live only through an approved ship. Sessions started before the November 18
+  cutover still run the checkout copy until they end.
 - Without `CLIPROXY_FALLBACK_URL`, behaviour must not change: no timers, no probes.
 - Never retry or move a request to another account. Never let a named route cross hosts.
 - Never replay a message that may already be generating. Only pre-connect failures and dial-error
