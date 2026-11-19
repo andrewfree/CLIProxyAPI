@@ -733,11 +733,14 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
-- **Monitor paused.** The Mac LaunchAgent is installed from the bundle but booted out,
-  because SSH from launchd jobs to Will times out on the Mac (FLEET.md, live activation).
-  Until it resumes, use `fleetctl health` and `parity` by hand. With only egress down,
-  `/healthz` can stay green. Look for `egress_hold` lines in
-  `ops/runtime/fleet/failover.jsonl` on the Mac or dial-error 5xx answers from Will.
+- **The monitor reports, it does not fail over.** The Mac LaunchAgent runs from the bundle every
+  five minutes on Apple's `/usr/bin/python3`, because macOS Local Network privacy blocked SSH to
+  Will from Homebrew's Python under launchd (FLEET.md, live activation). It texts Andrew when
+  either proxy is unreachable, when Will loses egress, on parity drift and on quota limits, and
+  nothing acts on those texts automatically. With only egress down, `/healthz` can stay green, so
+  the monitor also checks egress from inside each container. If the monitor is stopped, use `fleetctl health` and `parity` by hand and look
+  for `egress_hold` lines in `ops/runtime/fleet/failover.jsonl` on the Mac or dial-error 5xx
+  answers from Will.
 - **Will's first ship** (unit 2c) awaits its own approval. The Mac cutover ran on
   November 18 with a passing P0 check of the installed paths and checksums (section 2.8).
 
