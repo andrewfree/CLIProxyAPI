@@ -575,9 +575,9 @@ runs within 120 or 300 seconds ([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 2 an
 GitHub changes nothing on the Mac until it is pulled. The design's answer is to run
 both hosts from a shipped bundle at a recorded commit, outside the checkout. That is unit 2b, and
 it is not done. Until it is, the interim rule in [FLEET.md](FLEET.md#fleet-contract) applies:
-changing the watchdog, the log archiver, the Claude launcher, their plists or the Compose file in
-the Mac's primary checkout is a live change and needs Andrew's promote phrase. Edit those files
-only in a worktree.
+changing the watchdog, the log archiver, the Claude launcher, the Codex fallback launcher,
+their plists or the Compose file in the Mac's primary checkout is a live change and needs
+Andrew's promote phrase. Edit those files only in a worktree.
 
 **Why config is edited in place.** `config.yaml` is bind-mounted as a single file. Replacing or
 renaming it breaks the mount's link to the inode, so every config change is one in-place write

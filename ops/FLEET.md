@@ -61,11 +61,11 @@ Operational differences recorded on November 18, 2026, for review by December 2,
   during prechecks (unit 0).
 
 Until bundle cutover, updating the watchdog, log archiver, Claude launcher,
-their plists, or Compose configuration in the Mac's primary checkout is a
-live change and requires Andrew's promote phrase. Edit those files in a
-worktree. Activate the Mac first, then Will. If verification fails, roll back
-the host just changed. A host that already passed requires Andrew's
-instruction to roll back.
+Codex fallback launcher, their plists, or Compose configuration in the Mac's
+primary checkout is a live change and requires Andrew's promote phrase. Edit
+those files in a worktree. Activate the Mac first, then Will. If verification
+fails, roll back the host just changed. A host that already passed requires
+Andrew's instruction to roll back.
 
 ## Running fleet
 
@@ -196,15 +196,18 @@ Tailscale Serve can remain in place during an application rollback. To remove on
 
    Replace only the copy's primary `base_url` value with the printed
    loopback URL and set its `CLIPROXY_CODEX_FAILOVER_LOG` to the printed file.
-   Start a new session on the copy and check that the approved smoke request
-   completes through the Mac. Run `cat "$codex_drill_dir/codex-failover.jsonl"`
-   and check for `"selected":"fallback"` with `"reason":"fallback_healthy"`.
+   Note the time, start a new session on the copy, and check that the approved
+   smoke request completes through the Mac. Run
+   `cat "$codex_drill_dir/codex-failover.jsonl"` and match the decision by
+   `"subcommand":"app-server"` and the `ts` for that session start. Check that
+   the matching line has `"selected":"fallback"` and `"reason":"fallback_healthy"`.
    End that session and remove the temporary profile.
 4. Apply the [profile settings](README.md#codex-failover) to
    `codex_cliproxy` in T3 Settings, with its original Will launch arguments.
-   Start a fresh session while Will is healthy and check the new decision in
-   `ops/runtime/fleet/codex-failover.jsonl` for `"selected":"primary"` and
-   `"reason":"primary_healthy"`.
+   Note the time and start a fresh session while Will is healthy. In
+   `ops/runtime/fleet/codex-failover.jsonl`, match `"subcommand":"app-server"`
+   and the `ts` for that session start. Check that the matching line has
+   `"selected":"primary"` and `"reason":"primary_healthy"`.
 
 To roll back, restore `config.binaryPath` to `/opt/homebrew/bin/codex` and
 remove `CLIPROXY_FALLBACK_URL` and `CODEX_REAL_BINARY` from that profile's
