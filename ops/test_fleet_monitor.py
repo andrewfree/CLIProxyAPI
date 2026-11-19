@@ -267,8 +267,17 @@ for target do printf '%s ok\n' "$target"; done
         # A negative reading is dropped instead of reading as an idle 0%.
         self.assertIsNone(used(percentage=-3))
         self.assertIsNone(used(usage=100, currentValue=-1))
+        self.assertEqual(used(usage=100, currentValue=-1, percentage=100), 100)
         # Stale counts never hide a cap the provider reports.
         self.assertEqual(used(usage=100, currentValue=0, remaining=100, percentage=100), 100)
+
+    def test_reset_is_copied_between_readings_only_for_kimi(self):
+        body = {"rate_limit": {"primary_window": {"limit_window_seconds": 18000, "used_percent": 5},
+                               "secondary_window": {"limit_window_seconds": 3600, "used_percent": 7,
+                                                    "reset_after_seconds": 30}}}
+        api = type("FakeAPI", (), {"quota": lambda self, request, timeout: {"status_code": 200, "body": json.dumps(body)}})()
+        _, windows, _ = probe.fetch_windows(api, {"provider": "codex", "index": "codex-index"}, NOW)
+        self.assertEqual([(w["window"], w["used_percent"], w["reset_at"]) for w in windows], [("session", 5, None)])
 
     def test_quota_reads_wait_for_slow_kimi_and_stop_at_the_poll_deadline(self):
         # Kimi's usage endpoint answered in about 10.5 s on 2026-11-19.

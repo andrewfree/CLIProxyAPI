@@ -196,10 +196,9 @@ ZAI_UNITS = {1: (1440, "d"), 3: (60, "h"), 5: (1, "min"), 6: (10080, "w")}
 def zai_used(entry):
     usage, current = number(entry.get("usage")), number(entry.get("currentValue"))
     remaining, percent = number(entry.get("remaining")), number(entry.get("percentage"))
-    if any(value is not None and value < 0 for value in (current, percent)):
-        return None  # A negative reading is malformed, not an idle window.
-    shares = [] if percent is None else [percent]
-    if usage is not None and usage > 0:
+    # A negative value is malformed, not an idle window, so it is ignored.
+    shares = [] if percent is None or percent < 0 else [percent]
+    if usage is not None and usage > 0 and (current is None or current >= 0):
         if remaining is not None:
             used = max(usage - remaining, usage - remaining if current is None else current)
         else:
@@ -409,7 +408,7 @@ def collect_account(api, account, now, visited, not_before, egress, deadline=Non
     provider = account["provider"]
     target = account.get("zai_host") or QUOTA_HOSTS[provider]
     late = deadline is not None and deadline - time.monotonic() < 1
-    # Past the deadline, skip the label lookup too; the account is deferred below.
+    # Past the deadline, skip the label lookup; the monitor keeps the remembered label.
     label = "account-" + tag[:8] if late else route_label(api, account)
     result = {"provider": provider, "account_id": tag, "label": label,
               "cooldowns": local_cooldowns(item, now), "windows": [], "grants": None,
