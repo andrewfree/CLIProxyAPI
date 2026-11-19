@@ -35,6 +35,13 @@ This request is read-only. The claude-cli `User-Agent`, `x-app: cli`, and
   suggestion. On 2026-11-11 the server accepted a Fable grant while it named
   the full reset as next.
 
+Run the tool from the checkout. The ops bundle ships a copy only for the fleet
+monitor's imports, and that copy exits with an error if run as a command. Once
+the monitor is active it also reads each Claude account about every 15 minutes
+and records the readings in `ops/runtime/fleet/quota-history-YYYY-MM.jsonl`.
+Use that file for history only, not as a current reading, and pause the
+monitor before a `watch`.
+
 ## Watch a limit
 
 ```sh

@@ -24,6 +24,7 @@ JOBS = {
     "com.rever.cliproxy-watchdog": "cliproxy_watchdog.py",
     "com.rever.cliproxy-log-archive": "archive_logs.py",
 }
+MONITOR = "com.rever.cliproxy-fleet-monitor"
 
 
 class BundleError(Exception):
@@ -344,6 +345,18 @@ def verify_bundle(host, manifest, launchers):
                     issues.append("P0/" + label)
             except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
                 issues.append("P0/" + label)
+
+        # The monitor plist is installed verbatim from the bundle once Andrew activates
+        # it, so an installed copy must match the shipped bytes. Not installed is fine.
+        monitor = home / "Library/LaunchAgents" / (MONITOR + ".plist")
+        if os.path.lexists(monitor):
+            expected = manifest["files"].get("ops/" + MONITOR + ".plist", {}).get("sha256")
+            try:
+                actual = hashlib.sha256(read_regular(monitor)[0]).hexdigest()
+            except (OSError, BundleError):
+                actual = None
+            if expected is None or actual != expected:
+                issues.append("P0/" + MONITOR)
 
         token = home / ".local/bin/cliproxy-codex-token"
         try:
