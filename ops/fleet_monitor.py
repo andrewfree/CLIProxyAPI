@@ -3,7 +3,8 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, time as local_time, timezone
+from copy import deepcopy
+from datetime import datetime, time as local_time, timedelta, timezone
 import fcntl
 import http.client
 import json
@@ -27,7 +28,9 @@ PARITY_TIMEOUT = 105
 TEXT_TIMEOUT = 12
 PARITY_INTERVAL = 3600
 DAILY_AT = local_time(9)
+COOLDOWN_QUIET = timedelta(hours=1)
 TEXT_PORT = 8787
+TEXT_SENT, TEXT_NOT_SENT, TEXT_UNCONFIRMED = 0, 20, 21
 SSH_ARGS = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
             "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
             "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes"]
@@ -138,7 +141,7 @@ def host_output(stdout, returncode, fallback, destination):
     if report is not None:
         return dict(report, uncertain=report.get("stage") == probes.WORKER_POLLING)
     if returncode in (255, None) and destination is not None:
-        return dict(fallback, reachability="unreachable")
+        return dict(fallback, reachability="unreachable", ssh_unreachable=True, uncertain=True)
     return fallback
 
 
@@ -156,24 +159,44 @@ def run_parity():
 
 
 def notify_message(message, command):
-    if command:
-        subprocess.run(command, input=message + "\n", text=True, timeout=10,
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        subprocess.run([sys.executable, "-B", str(OPS / "fleet_monitor.py"), "--text-me-worker"],
-                       input=message, text=True, timeout=TEXT_TIMEOUT, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    argv = command or [sys.executable, "-B", str(OPS / "fleet_monitor.py"), "--text-me-worker"]
+    try:
+        result = subprocess.run(argv, input=message + ("\n" if command else ""), text=True,
+                                timeout=10 if command else TEXT_TIMEOUT, check=False,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (FileNotFoundError, PermissionError):
+        return TEXT_NOT_SENT
+    except (OSError, subprocess.SubprocessError):
+        return TEXT_UNCONFIRMED
+    if result.returncode == TEXT_SENT:
+        return TEXT_SENT
+    if not command and result.returncode == TEXT_NOT_SENT:
+        return TEXT_NOT_SENT
+    return TEXT_UNCONFIRMED
 
 
 def text_me_worker():
     connection = http.client.HTTPConnection("127.0.0.1", TEXT_PORT, timeout=10)
     try:
-        connection.request("POST", "/text", json.dumps({"text": sys.stdin.read()}),
-                           {"Content-Type": "application/json"})
+        body = json.dumps({"text": sys.stdin.read()})
+        try:
+            connection.connect()
+        except OSError:
+            return TEXT_NOT_SENT
+        # Once writing starts, the request may reach Text Me even if we get an error.
+        connection.request("POST", "/text", body, {"Content-Type": "application/json"})
         response = connection.getresponse()
-        return 0 if response.status == 200 and json.load(response).get("ok") is True else 1
-    except Exception:
-        return 1
+        if response.status != 200:
+            return TEXT_NOT_SENT
+        result = json.load(response)
+        if isinstance(result, dict):
+            if result.get("ok") is True:
+                return TEXT_SENT
+            if result.get("ok") is False:
+                return TEXT_NOT_SENT
+        return TEXT_UNCONFIRMED
+    except (OSError, http.client.HTTPException, ValueError):
+        return TEXT_UNCONFIRMED
     finally:
         connection.close()
 
@@ -188,7 +211,7 @@ def host_health(host):
     else:
         status = "ok" if egress and all(value == "ok" for value in egress.values()) else "unknown"
     return {"status": status, "reachability": reachability, "egress": egress,
-            "quota_errors": host["quota_errors"]}
+            "quota_errors": host["quota_errors"], "ssh_unreachable": host.get("ssh_unreachable", False)}
 
 
 def quota_records(observed, previous, captured_at):
@@ -232,25 +255,36 @@ def status_alerts(state, hosts, parity):
     egress = will["egress"].values()
     affected = ", ".join(name for name, value in sorted(will["egress"].items()) if value == "down")
     egress_down = (True if "down" in egress else False if egress and all(s == "ok" for s in egress) else None)
+    fallback = "Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults."
+    will_opening = ("Will is not reachable over SSH from the Mac." if will.get("ssh_unreachable")
+                    else f"Will proxy unreachable. {fallback}")
     issues = [
-        ("will-unreachable", will["reachability"] == "unreachable" if will["reachability"] != "unknown" else None,
-         "Will unreachable. Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults.",
-         "Will proxy reachable again."),
+        ("will-unreachable", unreachable(will), will_opening, "Will health checks recovered."),
         ("will-egress", egress_down if will["reachability"] == "ok" else None,
-         f"Will egress down for {affected}. Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults.",
-         "Will egress recovered."),
-        ("mac-unreachable", mac["reachability"] == "unreachable" if mac["reachability"] != "unknown" else None,
+         f"Will egress down for {affected}. {fallback}", "Will egress recovered."),
+        ("mac-unreachable", unreachable(mac),
          "Mac proxy down. Check the local fallback.", "Mac proxy reachable again."),
-        ("parity-drift", {"drift": True, "equal": False}.get(parity.get("status")),
-         "Fleet parity drift appeared. Check the latest parity report.", "Fleet parity is equal again."),
     ]
-    for key, active, opening, closing in issues:
-        if active is None:
-            continue
-        if active != previous.get(key, False):
-            alerts.append(opening if active else closing)
-        previous[key] = active
+    if parity is not None:
+        issues.append(("parity-drift", {"drift": True, "equal": False}.get(parity.get("status")),
+                       "Fleet parity drift appeared. Check the latest parity report.", "Fleet parity is equal again."))
+    for key, failing, opening, closing in issues:
+        current = previous.get(key, False)
+        if isinstance(current, bool):
+            current = {"active": current, "streak": 0}
+        if failing is None or failing == current["active"]:
+            current["streak"] = 0
+        elif current["streak"] == 1:
+            alerts.append(opening if failing else closing)
+            current = {"active": failing, "streak": 0}
+        else:
+            current["streak"] = 1
+        previous[key] = current
     return alerts
+
+
+def unreachable(host):
+    return {"unreachable": True, "ok": False}.get(host["reachability"])
 
 
 def account_name(row):
@@ -285,14 +319,13 @@ def quota_alerts(state, records, now):
         deadline = max((entry["until"] for entry in row["cooldowns"]
                         if entry["scope"] == "credential" and entry["reason"] == "quota"), default=None)
         cooldown = account.setdefault("_credential_cooldown", {})
-        old_deadline = probes.timestamp(cooldown.get("until"))
-        if deadline:
-            if ((old_deadline is None or old_deadline <= now)
+        observed_until = probes.timestamp(deadline)
+        last_cooldown = probes.timestamp(cooldown.get("until"))
+        if observed_until is not None and observed_until > now:
+            if ((last_cooldown is None or now - last_cooldown >= COOLDOWN_QUIET)
                     and not any(window["capped"] for window in row["windows"])):
                 alerts.append(f"{name} in proxy quota cooldown until {display_time(deadline)}.")
-            cooldown["until"] = deadline
-        elif row["status"] == "ok":
-            cooldown["until"] = None
+            cooldown["until"] = probes.iso(max(last_cooldown or now, observed_until))
     return alerts
 
 
@@ -300,7 +333,9 @@ def outages(hosts):
     found = []
     for name, report in hosts.items():
         label = "Will" if name == "will" else "Mac"
-        if report["reachability"] == "unreachable":
+        if report.get("ssh_unreachable"):
+            found.append("Will unreachable over SSH from the Mac")
+        elif report["reachability"] == "unreachable":
             found.append(label + " proxy unreachable")
         if any(value == "down" for value in report["egress"].values()):
             found.append(label + " upstream egress down")
@@ -381,27 +416,44 @@ def tick(root, hosts, runtime, command, no_notify):
     state["outages"] = seen_outages
     delivery = state.get("last_notification")
     if not no_notify:
-        messages = status_alerts(state, health, latest) + quota_alerts(state, records, now)
+        candidate = deepcopy(state)
+        # A confirmed failure can leave an alert pending across ticks with no quota reading.
+        pending = candidate.pop("pending_alerts", {})
+        alerts = pending.pop("messages", [])
+        candidate.update(pending)
+        alerts += status_alerts(candidate, health, latest if parity_due else None)
+        alerts += quota_alerts(candidate, records, now)
+        messages = list(alerts)
         local = now.astimezone()
         day = local.date().isoformat()
         summary_due = local.time() >= DAILY_AT and day > state.get("summary_day", "")
         if summary_due:
             messages.append(daily_message(day, records, health, latest, seen_outages))
-            state["summary_day"] = day
-        if messages:
-            # Text Me has no idempotency key. Persist the delivery claim before
-            # sending, since a lost response can follow a successful text.
+            candidate["summary_day"] = day
+        if not messages:
+            state = candidate
+        else:
+            # Save the claim before sending so a crash cannot repeat an ambiguous delivery.
             delivery = {"at": captured_at, "status": "attempting"}
-            state["last_notification"] = delivery
-            write_json(state_file, state)
-            try:
-                notify_message("\n".join(messages), command)
-                delivery["status"] = "sent"
-                if summary_due:
+            candidate["last_notification"] = delivery
+            write_json(state_file, candidate)
+            outcome = notify_message("\n".join(messages), command)
+            if outcome == TEXT_NOT_SENT:
+                delivery["status"] = "not-sent"
+                state["last_notification"] = delivery
+                alert_state = {key: candidate[key] for key in ("health_alerts", "quota_alerts")}
+                if alerts:
+                    state["pending_alerts"] = {"messages": alerts, **alert_state}
+                else:
+                    state.update(alert_state)
+                print("Fleet monitor notification failed. Pending alerts will be retried.", file=sys.stderr)
+            else:
+                state = candidate
+                delivery["status"] = "sent" if outcome == TEXT_SENT else "unconfirmed"
+                if outcome == TEXT_SENT and summary_due:
                     state["outages"] = []
-            except (OSError, subprocess.SubprocessError):
-                delivery["status"] = "unconfirmed"
-                print("Fleet monitor notification unconfirmed.", file=sys.stderr)
+                if outcome != TEXT_SENT:
+                    print("Fleet monitor notification unconfirmed.", file=sys.stderr)
 
     write_json(state_file, state)
     write_json(runtime / "health.json", {"checked_at": captured_at, "hosts": health,

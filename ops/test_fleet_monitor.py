@@ -215,7 +215,8 @@ for target do printf '%s ok\n' "$target"; done
         self.assertEqual(report["reachability"], "ok")
         self.assertTrue(report["uncertain"])
         absent = monitor.host_output("", 255, {"uncertain": False}, "will.example.test")
-        self.assertEqual(absent, {"reachability": "unreachable", "uncertain": False})
+        self.assertEqual(absent, {"reachability": "unreachable", "ssh_unreachable": True, "uncertain": True})
+        self.assertEqual(monitor.host_output("", None, {}, "will.example.test"), absent)
 
 
 class MonitorTests(unittest.TestCase):
@@ -223,41 +224,80 @@ class MonitorTests(unittest.TestCase):
         with (tempfile.TemporaryDirectory() as directory,
               patch.object(monitor, "DAILY_AT", time(0)),
               patch.object(monitor, "run_host") as runs,
-              patch.object(monitor, "run_parity", side_effect=[{"status": "equal"}, {"status": "drift"}]) as parity,
-              patch.object(monitor, "notify_message") as notify):
+              patch.object(monitor, "run_parity", side_effect=[
+                  {"status": "equal"}, {"status": "drift"}, {"status": "drift"}]) as parity,
+              patch.object(monitor, "notify_message", return_value=monitor.TEXT_SENT) as notify):
             root = Path(directory)
 
-            for offset, reading, will_state, will_egress in ((0, 89, "ok", "ok"),
-                      (300, 92, "unreachable", "unknown"), (600, 92, "unreachable", "unknown"),
-                      (3600, 100, "ok", "down"), (3900, 100, "ok", "down")):
+            for offset, reading, will_state, will_egress in (
+                    (0, 89, "ok", "ok"), (300, 92, "unreachable", "unknown"),
+                    (600, 92, "unreachable", "unknown"), (3600, 100, "ok", "down"),
+                    (3900, 100, "ok", "down"), (7200, 100, "ok", "ok")):
                 reading_now = NOW + timedelta(seconds=offset)
-                current = sample(percent=reading)
-                current["attempted_at"] = reading_now.timestamp()
-                runs.side_effect = [host_report([current]), host_report(state=will_state, egress=will_egress)]
+                current = dict(sample(percent=reading), provider="codex", attempted_at=reading_now.timestamp())
+
+                runs.side_effect = [host_report([current]),
+                                    host_report(state=will_state, egress=will_egress)]
                 with patch.object(monitor, "now_utc", return_value=reading_now):
                     monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
-                self.assertEqual(runs.call_args.args[2], {"test-account"})
-                if offset == 300:
-                    self.assertEqual(runs.call_args.args[3]["test-account"], NOW.timestamp() + 300)
 
-            self.assertEqual(parity.call_count, 2)
+            self.assertEqual(parity.call_count, 3)
             messages = [call.args[0] for call in notify.call_args_list]
-            self.assertEqual(len(messages), 3)
+            self.assertEqual(len(messages), 6)
             self.assertEqual(sum("daily summary" in message for message in messages), 1)
-            self.assertIn("Will unreachable", messages[1])
             self.assertIn("92% used", messages[1])
-            self.assertIn("Will egress down", messages[2])
-            self.assertIn("drift appeared", messages[2])
-            self.assertIn("weekly capped", messages[2])
-            history = [json.loads(line) for line in (root / "quota-history-2026-11.jsonl").read_text().splitlines()]
-            self.assertEqual(len(history), 5)
+            self.assertIn("Will proxy unreachable", messages[2])
+            self.assertIn("weekly capped", messages[3])
+            self.assertIn("Will egress down", messages[4])
+            self.assertIn("drift appeared", messages[5])
+            history_path = root / "quota-history-2026-11.jsonl"
+            history = [json.loads(line) for line in history_path.read_text().splitlines()]
+            self.assertEqual(len(history), 6)
             self.assertEqual(history[-1]["windows"][0]["used_percent"], 100)
-            self.assertEqual(stat.S_IMODE((root / "quota-history-2026-11.jsonl").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(history_path.stat().st_mode), 0o600)
             health = monitor.read_json(root / "health.json", {})
-            self.assertEqual(health["hosts"]["will"]["status"], "egress-down")
+            self.assertEqual(health["hosts"]["will"]["status"], "ok")
             latest = monitor.read_json(root / "latest.json", {})
             self.assertEqual(latest["status"], "drift")
-            self.assertEqual(latest["health"]["will"]["status"], "egress-down")
+            self.assertEqual(latest["health"]["will"]["status"], "ok")
+
+    def test_health_hysteresis_and_ssh_only_wording(self):
+        state = {}
+        reports = {"m5": host_report()}
+        failure = dict(host_report(state="unreachable"), ssh_unreachable=True)
+        clean = host_report()
+        unknown = host_report(state="unknown")
+
+        def alerts(sample):
+            return monitor.status_alerts(state, dict(reports, will=sample), None)
+
+        for sample in (failure, clean, failure, unknown, failure, clean):
+            self.assertEqual(alerts(sample), [])
+        self.assertEqual(alerts(failure), [])
+        self.assertEqual(alerts(failure), ["Will is not reachable over SSH from the Mac."])
+        self.assertEqual(alerts(failure), [])
+        for sample in (clean, unknown, clean, failure, clean):
+            self.assertEqual(alerts(sample), [])
+        self.assertEqual(alerts(clean), ["Will health checks recovered."])
+        self.assertEqual(alerts(clean), [])
+        proxy_down = host_report(state="unreachable")
+        self.assertEqual(alerts(proxy_down), [])
+        self.assertIn("Select the _mac profile", alerts(proxy_down)[0])
+
+    def test_short_cooldowns_share_one_episode_until_an_hour_quiet(self):
+        state = {}
+        record = sample()
+
+        def alerts(minutes, cooldown):
+            now = NOW + timedelta(minutes=minutes)
+            record["cooldowns"] = ([
+                {"scope": "credential", "reason": "quota", "until": probe.iso(now + timedelta(seconds=120))}
+            ] if cooldown else [])
+            return monitor.quota_alerts(state, [record], now)
+
+        self.assertEqual(sum(len(alerts(minute, True)) for minute in (0, 5, 10, 15)), 1)
+        self.assertEqual(alerts(25, False), [])
+        self.assertEqual(alerts(77, True)[0].split(" until ")[0], "claude t3-demo in proxy quota cooldown")
 
     def test_no_notification_or_transition_claim_in_dry_run(self):
         with (tempfile.TemporaryDirectory() as directory,
@@ -291,22 +331,53 @@ class MonitorTests(unittest.TestCase):
         monitor.quota_alerts(state, [sample(percent=50)], NOW)
         self.assertEqual(len(monitor.quota_alerts(state, [record], NOW)), 1)
 
-    def test_notification_timeout_does_not_resend_claimed_transition(self):
+    def test_definite_notification_failure_retries_health_quota_and_summary(self):
+        with (tempfile.TemporaryDirectory() as directory, patch.object(monitor, "DAILY_AT", time(0)),
+              patch.object(monitor, "run_host") as runs,
+              patch.object(monitor, "run_parity", return_value={"status": "equal"}),
+              patch.object(monitor, "notify_message", side_effect=[
+                  monitor.TEXT_NOT_SENT, monitor.TEXT_NOT_SENT, monitor.TEXT_SENT]) as notify,
+              patch("sys.stderr")):
+            root = Path(directory)
+            for tick in range(3):
+                reading = sample(percent=92) if tick == 0 else sample(status="quota-deferred")
+                runs.side_effect = [host_report([reading]), host_report(state="unreachable")]
+                with patch.object(monitor, "now_utc", return_value=NOW + timedelta(minutes=5 * tick)):
+                    monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
+                state = monitor.read_json(root / "monitor-state.json", {})
+                if tick < 2:
+                    self.assertNotIn("summary_day", state)
+                    self.assertNotIn("health_alerts", state)
+                    self.assertNotIn("quota_alerts", state)
+                    self.assertIn("92% used", state["pending_alerts"]["messages"][0])
+                    self.assertEqual(state["last_notification"]["status"], "not-sent")
+
+            messages = [call.args[0] for call in notify.call_args_list]
+            self.assertEqual(len(messages), 3)
+            self.assertNotIn("Select the _mac profile", messages[0])
+            for message in messages[1:]:
+                for text in ("Select the _mac profile", "92% used", "daily summary"):
+                    self.assertIn(text, message)
+            self.assertEqual(state["last_notification"]["status"], "sent")
+            self.assertNotIn("pending_alerts", state)
+            self.assertTrue(state["health_alerts"]["will-unreachable"]["active"])
+            self.assertTrue(state["quota_alerts"]["test-account"]["weekly"]["above"])
+
+    def test_ambiguous_notification_is_not_resent(self):
         with (tempfile.TemporaryDirectory() as directory,
               patch.object(monitor, "DAILY_AT", time(0)),
               patch.object(monitor, "now_utc", return_value=NOW),
-              patch.object(monitor, "run_host", return_value=host_report(state="unreachable")),
-              patch.object(monitor, "run_parity", return_value={"status": "unreachable"}),
-              patch.object(monitor, "notify_message", side_effect=subprocess.TimeoutExpired("fake", 1)) as notify,
+              patch.object(monitor, "run_host") as runs,
+              patch.object(monitor, "run_parity", return_value={"status": "equal"}),
+              patch.object(monitor.subprocess, "run", side_effect=subprocess.TimeoutExpired("fake", 1)) as notify,
               patch("sys.stderr")):
             root = Path(directory)
-            monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
-            monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
+            for _ in range(2):
+                runs.side_effect = [host_report([sample(percent=92)]), host_report()]
+                monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
             notify.assert_called_once()
             health = monitor.read_json(root / "health.json", {})
             self.assertEqual(health["last_notification"]["status"], "unconfirmed")
-            state = monitor.read_json(root / "monitor-state.json", {})
-            self.assertEqual(state["outages"], ["Mac proxy unreachable", "Will proxy unreachable"])
 
     def test_interrupted_history_append_is_repaired(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -329,6 +400,26 @@ class MonitorTests(unittest.TestCase):
             method, route, body, _ = connection.return_value.request.call_args.args
             self.assertEqual((method, route), ("POST", "/text"))
             self.assertEqual(json.loads(body), {"text": "fixture notification"})
+
+    def test_text_me_worker_distinguishes_failed_delivery_from_timeout(self):
+        from io import StringIO
+
+        for failed_at, error, status, body, expected in (
+                ("connect", ConnectionRefusedError(), 200, "", monitor.TEXT_NOT_SENT),
+                ("getresponse", TimeoutError(), 200, "", monitor.TEXT_UNCONFIRMED),
+                (None, None, 503, "", monitor.TEXT_NOT_SENT),
+                (None, None, 200, '{"ok": false}', monitor.TEXT_NOT_SENT),
+                (None, None, 200, "invalid", monitor.TEXT_UNCONFIRMED)):
+            with (self.subTest(failed_at=failed_at, status=status, body=body),
+                  patch.object(monitor.http.client, "HTTPConnection") as factory,
+                  patch.object(monitor.sys, "stdin", StringIO("fixture notification"))):
+                connection = factory.return_value
+                if failed_at:
+                    getattr(connection, failed_at).side_effect = error
+                response = connection.getresponse.return_value
+                response.status = status
+                response.read.return_value = body
+                self.assertEqual(monitor.text_me_worker(), expected)
 
     def test_pluggable_notifier_receives_text_on_stdin(self):
         with tempfile.TemporaryDirectory() as directory:
