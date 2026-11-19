@@ -71,6 +71,21 @@ from `ops/fleet/exceptions.json`.
 
 Rollback: the same PATCH with `"prefix": ""`, then restore the two exceptions.
 
+## `camoff-astra` prefix removed from both hosts (about 18:45)
+
+Andrew asked for the cleanest fix to the default-model side effect below and approved removing
+the prefix. The 5,985 of 8,765 unit 0 figure counted the `codex:camoff-astra` credential serving
+unprefixed requests (the `att` field); 0 of the 8,765 requests named a `camoff-astra/` model, and
+none of the 181 request logs kept locally since did either. [clear_camoff_prefix.py](clear_camoff_prefix.py)
+(label hash passed at run time) ran on the Mac, then on Will over SSH: 40 models to 20 on each,
+all unprefixed models kept. Both `/v1/models` lists then had 167 models with no `camoff-astra/`
+entry, a `gpt-5.6-luna` pool request returned 200 on each host, `fleetctl parity` reported
+`equal` with no unused exception, and a new `codex_cliproxy` session defaulted to `gpt-6.2-sol`.
+
+Rollback: run [will_set_camoff_prefix.py](will_set_camoff_prefix.py) `<label-hash>` on each host.
+The hash is the first 10 hex characters of the SHA-256 of the lowercased label of the Codex
+credential whose ID is `camoff-astra`, computed at run time from the Mac's credential list.
+
 ## Monitor (installed 17:56, paused 17:57:57)
 
 The install block in FLEET.md ran: `plutil` OK, Text Me health OK, bootstrap rc 0. The first run
@@ -90,11 +105,8 @@ show `rc=0`, then run the install block in FLEET.md again.
 
 - **Default model on `codex_cliproxy`.** A T3 session started at 18:02 with no model chosen ran
   `gpt-6.2-sol`. One started at 18:28, after Will gained the `camoff-astra/` models, ran
-  `camoff-astra/gpt-6.2-sol`, which routes only to the one prefixed credential. The Mac has likely shown
-  the same pattern for `codex_cliproxy_mac`: the removed `P6/camoff-astra` exception recorded that
-  unit 0 found 5,985 of 8,765 Mac Codex request rows used the prefix.
-  Whether to keep the prefix on both hosts is Andrew's decision. Undo on Will with the same PATCH
-  and `"prefix": ""`.
+  `camoff-astra/gpt-6.2-sol`, which routes only to the one prefixed credential. Resolved by
+  removing the prefix from both hosts (section above).
 - **Wrapper processes killed by a test cleanup.** At about 18:28 a `pkill -f` meant for a stub in
   a temp directory also matched the real bundled Codex wrapper processes. T3 restarted the
   `codex_cliproxy` app-server within about 20 seconds, and a new session answered; a session
