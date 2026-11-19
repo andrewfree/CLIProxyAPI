@@ -82,7 +82,9 @@ all unprefixed models kept. Both `/v1/models` lists then had 167 models with no 
 entry, a `gpt-5.6-luna` pool request returned 200 on each host, `fleetctl parity` reported
 `equal` with no unused exception, and a new `codex_cliproxy` session defaulted to `gpt-6.2-sol`.
 
-Rollback: run [will_set_camoff_prefix.py](will_set_camoff_prefix.py) on each host.
+Rollback: run [will_set_camoff_prefix.py](will_set_camoff_prefix.py) `<label-hash>` on each host.
+The hash is the first 10 hex characters of the SHA-256 of the lowercased label of the Codex
+credential whose ID is `camoff-astra`, computed at run time from the Mac's credential list.
 
 ## Monitor (installed 17:56, paused 17:57:57)
 
