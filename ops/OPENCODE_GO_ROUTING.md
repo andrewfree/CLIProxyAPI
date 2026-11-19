@@ -102,9 +102,9 @@ Andrew's Backlog task TASK-168, due February 10, 2027, tracks the renewal before
 1. In OpenCode Console, **Account → Personal API keys → Add API key**, workspace `Default`, permissions **Custom** with models `Request` only. The Console shows the key once; write it straight to `~/.config/opencode-go-secret/key` (mode `0600`) without displaying it.
 2. Mac: replace the `opencode-go` key through the v8 `PUT` with `If-Match`, as in the deployment, after confirming the host and container copies match.
 3. Will: replace the key in `config.yaml` in place, keeping the inode, and confirm the container's copy matches the host.
-4. OpenCode CLI: run `opencode auth login opencode-go`, choose the API key method and paste the new key at the prompt. This keeps the key out of the command line, and the login removes the integration's previous credential itself.
+4. OpenCode CLI: run `opencode auth login opencode-go`, choose the API key method and paste the new key at the prompt. This keeps the key out of the command line. The login adds the new key as a second, active account and keeps the old one, so find the old account's label with `opencode auth list` and remove it with `opencode auth logout opencode-go "<old label>"`. Confirm that `opencode auth list` shows only the new OpenCode Go account.
 5. Run the checks in [Verify](#verify) on both hosts and one `opencode run -m opencode-go/glm-5.3` request.
-6. Revoke the old key in the Console. Key values are redacted from the fingerprint (`fleetctl.py` hides any field named like `api-key`), so a key-only change does not move the pins. Parity does compare a private tag of the keys between the hosts, so expect a provider-config difference between steps 2 and 3 that clears once both hosts hold the new key. Run `fleetctl parity` at the end and expect `equal`.
+6. Revoke the old key in the Console. Key values are redacted from the fingerprint (`fleetctl.py` hides any field named like `api-key`), so a key-only change does not move the pins. Parity does compare a private tag of the keys between the hosts, so expect a `P5/shared` provider-config difference between steps 2 and 3 that clears once both hosts hold the new key. It is not a strict surface. Run `fleetctl parity` at the end and expect `equal`.
 
 ## Roll back
 
