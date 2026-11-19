@@ -35,7 +35,7 @@ openai-compatibility:
 
 The block above is the legacy layout, which Will uses: root `api-keys:` is the list of client keys, and the top-level `openai-compatibility` key list is named `api-key-entries`. The Mac has used the v8 layout since November 14 ([GLM_ROUTING.md](GLM_ROUTING.md#client-authentication-and-configuration-layout)). There the provider sits in the nested `api-keys:` provider map, and its key list is named `keys:`, as in `config.example.yaml`. With `keys:` in a legacy-layout file, CLIProxy still lists the aliases in `/v1/models` but sends no `Authorization` header, and NVIDIA answers `Header of type authorization was missing`. A correct reload logs `1 OpenAI-compat`.
 
-Edit the file in place to keep its inode, because Docker bind-mounts the single file. CLIProxy hot-reloads it without a restart.
+Edit the file in place to keep its inode, because Docker bind-mounts the single file. CLIProxy hot-reloads it without a restart. On the Mac, host-side edits do not load at the moment; follow [FLEET_ARCHITECTURE section 4](FLEET_ARCHITECTURE.md#4-what-is-still-manual-or-accepted).
 
 ## Choosing models
 
@@ -62,7 +62,7 @@ Then send one small chat request per alias. In T3, run `orchestrator_capabilitie
 
 ## Roll back
 
-On the Mac, remove only the `nvidia` entry from `openai-compatibility` in `config.yaml`, in place. The list also holds other providers, such as `zai-coding-plan` ([GLM_ROUTING.md](GLM_ROUTING.md)). The pre-change copy is in the private, ignored `ops/runtime/nvidia-provider-20261111/backup-20261111T150145Z/`. Do not restore that whole file over later edits.
+On the Mac, remove only the `nvidia` entry from `openai-compatibility` in `config.yaml`, in place (host-side edits do not load there at the moment; follow [FLEET_ARCHITECTURE section 4](FLEET_ARCHITECTURE.md#4-what-is-still-manual-or-accepted)). The list also holds other providers, such as `zai-coding-plan` ([GLM_ROUTING.md](GLM_ROUTING.md)). The pre-change copy is in the private, ignored `ops/runtime/nvidia-provider-20261111/backup-20261111T150145Z/`. Do not restore that whole file over later edits.
 
 On Will, remove only the `nvidia` entry from `openai-compatibility` in place; it was added on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)).
 

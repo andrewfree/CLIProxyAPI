@@ -745,7 +745,9 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   once more with a comment change; if that does not load either, write the original bytes back and
   ask Andrew. With his approval, apply the change through the v8 management API (for example
   `PUT /v8/management/config/access/api-keys`), which edits the container's copy of the file and
-  saves it over the host file, so never use it while an unloaded host edit is still on disk
+  saves it over the host file. Use it only when the two copies match: compare the `ETag` from
+  `GET /v8/management/config` (the SHA-256 of the container's bytes) with `shasum -a 256` of the
+  host file, and send that `ETag` as `If-Match`, so a changed container copy returns 412
   ([FLEET.md](FLEET.md#operations-on-november-19-2026)).
 - **The monitor reports, it does not fail over.** The Mac LaunchAgent runs from the bundle every
   five minutes on Apple's `/usr/bin/python3`, because macOS Local Network privacy blocked SSH to
