@@ -392,11 +392,11 @@ old, with its observation time.
 
 ### Install or resume on the Mac
 
-After review, ship the approved bundle to `~/cliproxy-live`. Unit 2b's bundle
-must include the monitor, its probe helper, the chart, the plist,
-`claude_usage_resets.py`, and the existing `fleetctl.py` contract inputs.
-Install and bootstrap the LaunchAgent only after Andrew approves the live
-change. Its first run can text Andrew. The job uses the existing Text Me
+Install it after the [Mac bundle cutover](#mac-ops-bundle-cutover), from a
+bundle shipped at a commit that contains this monitor. `ops/fleet/bundle.txt`
+lists the monitor, its probe helper, the chart, the plist,
+`claude_usage_resets.py`, and the `fleetctl.py` contract inputs. Install and
+bootstrap the LaunchAgent only after Andrew approves the live change. Its first run can text Andrew. The job uses the existing Text Me
 LaunchAgent's default recipient.
 
 ```sh
@@ -496,4 +496,4 @@ These changes are live but are not part of a release. Of the changes below, only
   - **`kimi-ai` login removed from Will.** The management `api-call` `GET /coding/v1/usages` returned identical counters for the `kimi` login (`api.kimi.com`) and the `kimi-ai` login (`api.kimi.ai`): the same 5-hour reset time to the microsecond and the same monthly use (97.36% on November 18, resetting November 22). They share one Kimi quota, so `kimi-ai` added no capacity. Its auth file was moved to a private backup on Will under `ops/runtime/parity-20261118/auth-backup`. Check: Kimi on Will answered with the single `kimi` login afterwards (a `kimi-k3-256k` request returned 200 with the exact reply), and `fleetctl parity` no longer reports `P6/kimi-ai`. See [the Kimi routing recipe](KIMI_ROUTING.md).
   - **Containers recreated** on unchanged images: the Mac at 23:18:46Z and Will at 23:19:06Z (15:18 to 15:19 Pacific). Check: `net.ipv4.tcp_syn_retries` reads back as 2 inside each container, and Will's `verify_live.py` reports ok with no `container_sysctls_drift`.
   - **Parity.** [exceptions.json](fleet/exceptions.json) now holds three entries: `P2/debug`, `P6/camoff-astra` and `P8/camoff-astra`. The six for NVIDIA (`P2`, `P5`, `P8`), the quota plugin (`P2`, `P10`) and `kimi-ai` (`P6`) were removed because they matched nothing. The `config_fingerprint` pins in [fleet-release.json](fleet-release.json) now hold shared digest `9213320e...` and Mac observed digest `fcd1d0b4...`. Check: `fleetctl parity` reports `equal` with no drift. The fleetctl tests now load a frozen copy of the nine exceptions seeded on November 18 ([test_fleetctl_exceptions.json](test_fleetctl_exceptions.json)), which matches their synthetic fleet, instead of the live file.
-  - **Still open:** `camoff-astra` on Will (needs Andrew's OAuth login), live activation of the unit 5 monitor and the unit 2b Mac bundle, unit 10 Codex automatic fallback, and the raw-address entries on M1 and in CLIProxyBar.
+  - **Still open:** `camoff-astra` on Will (needs Andrew's OAuth login), live activation of the unit 2b Mac bundle, the unit 5 monitor and the unit 10 Codex automatic fallback (all merged), and the raw-address entries on M1 and in CLIProxyBar.
