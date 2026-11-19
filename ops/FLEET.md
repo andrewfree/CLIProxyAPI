@@ -138,22 +138,25 @@ the instance root for Compose, the host's logs, and private runtime state.
    `count_tokens` through its intended route. In a scratch worktree, a
    local edit to a shipped script should leave the deployed hash unchanged.
    Keep the interim live-change rule until sessions using the old launcher
-   have ended.
+   have ended. The token and P0 checks run in a subshell, so a failure stops
+   only that block and leaves `commit` and `backup` set for the rollback.
 
    ```sh
    for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
      launchctl print "gui/$(id -u)/$label"
    done
-   set -o pipefail
-   if ! token_length=$("$HOME/.local/bin/cliproxy-codex-token" | wc -c) ||
-     [ "$token_length" -le 0 ]; then
-     printf '%s\n' 'Installed Codex token helper failed to return a token.' >&2
-     exit 1
-   fi
-   printf 'Replaced the installed Codex token helper with the shipped copy from %s. Token check passed.\n' \
-     "$commit" > "$backup/token-helper-replacement.txt"
-   node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report |
-     python3 ops/fleetctl.py check --host m5 --bundle-commit "$commit" --launcher-paths -
+   (
+     set -o pipefail
+     if ! token_length=$("$HOME/.local/bin/cliproxy-codex-token" | wc -c) ||
+       [ "$token_length" -le 0 ]; then
+       printf '%s\n' 'Installed Codex token helper failed to return a token. Stop and roll back.' >&2
+       exit 1
+     fi
+     printf 'Replaced the installed Codex token helper with the shipped copy from %s. Token check passed.\n' \
+       "$commit" > "$backup/token-helper-replacement.txt"
+     node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report |
+       python3 ops/fleetctl.py check --host m5 --bundle-commit "$commit" --launcher-paths -
+   )
    ```
 
 For a later Compose activation, run these from the instance root immediately
