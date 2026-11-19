@@ -2,7 +2,8 @@
 """Closed-port drill: run the shipped Codex wrapper with codex_cliproxy's real launch args,
 primary replaced by a closed loopback port. Prints only the reply marker and the decision."""
 import json, os, shlex, socket, subprocess, sys, tempfile
-args_text, drill_dir = sys.argv[1], sys.argv[2]
+# The launch arguments arrive on stdin so they never appear in a process list or error message.
+args_text, drill_dir = sys.stdin.read(), sys.argv[1]
 argv = shlex.split(args_text)
 key = "model_providers.cliproxy.base_url="
 hits = [i for i, a in enumerate(argv) if a.startswith(key)]

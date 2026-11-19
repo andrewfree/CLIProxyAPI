@@ -10,4 +10,12 @@ try {
 } finally {
   client.close();
 }
-process.stdout.write(execFileSync("python3", [new URL("./codex_cli_drill.py", import.meta.url).pathname, args, drillDir], { encoding: "utf8" }));
+// The arguments go on stdin, so an error message from execFileSync cannot echo them.
+try {
+  process.stdout.write(execFileSync("python3", [new URL("./codex_cli_drill.py", import.meta.url).pathname, drillDir],
+    { input: args, encoding: "utf8" }));
+} catch (error) {
+  process.stdout.write(error.stdout ?? "");
+  console.error(`drill failed with exit ${error.status ?? "unknown"}`);
+  process.exitCode = 1;
+}

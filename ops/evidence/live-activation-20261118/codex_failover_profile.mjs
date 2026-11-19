@@ -23,9 +23,19 @@ try {
   if (profile?.driver !== "codex") throw new Error(`refusing: ${id} is not a codex profile`);
   const expectFrom = mode === "apply" ? plain : wrapper;
   if (profile.config?.binaryPath !== expectFrom) throw new Error(`refusing: ${id} binaryPath is not the expected starting value`);
-  if ((profile.environment ?? []).some((v) => v.sensitive)) throw new Error(`refusing: ${id} has sensitive environment values`);
+  const current = profile.environment ?? [];
+  if (current.some((v) => v.sensitive)) throw new Error(`refusing: ${id} has sensitive environment values`);
+  const names = new Set(env.map((v) => v.name));
+  const ours = current.filter((v) => names.has(v.name));
+  // Add or remove only the two failover variables; keep every other variable as it is.
+  if (mode === "apply" && ours.length) throw new Error(`refusing: ${id} already has a failover variable`);
+  if (mode === "rollback" && (ours.length !== env.length ||
+      !env.every((want) => ours.some((v) => v.name === want.name && v.value === want.value)))) {
+    throw new Error(`refusing: ${id} does not hold exactly the expected failover variables`);
+  }
+  const kept = current.filter((v) => !names.has(v.name));
   const next = { ...profile, config: { ...profile.config, binaryPath: mode === "apply" ? wrapper : plain },
-                 environment: mode === "apply" ? env : [] };
+                 environment: mode === "apply" ? [...kept, ...env] : kept };
   const stamp = new Date().toISOString().replace(/[:.]/g, "");
   const backup = (name, value) => fs.writeFileSync(path.join(backupDir, `settings-${mode}-${name}-${stamp}.json`),
     JSON.stringify(withoutSecrets(value), null, 2), { flag: "wx", mode: 0o600 });

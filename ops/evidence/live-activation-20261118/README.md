@@ -35,7 +35,8 @@ Rollback: the first-cutover rollback in FLEET.md, with `backup` set to the priva
 ## Codex failover on `codex_cliproxy` (about 18:00 to 18:02)
 
 - Drill: [codex_cli_drill.mjs](codex_cli_drill.mjs) reads the profile's launch arguments without
-  printing them and runs [codex_cli_drill.py](codex_cli_drill.py). The Python half swaps only the
+  printing them and passes them on stdin to [codex_cli_drill.py](codex_cli_drill.py). (As run, it
+  passed them as an argument; the committed copy uses stdin so a failure cannot echo them.) The Python half swaps only the
   `base_url` value for a closed loopback port and runs one `codex exec` through the shipped
   wrapper with the real Codex binary. Result: exit 0, reply marker present, decision
   `exec`, `fallback`, `fallback_healthy`. This replaced the runbook's temporary T3 profile copy,
@@ -45,7 +46,9 @@ Rollback: the first-cutover rollback in FLEET.md, with `backup` set to the priva
   `CODEX_REAL_BINARY=/opt/homebrew/bin/codex`. Launch arguments and the 19 other profiles were
   unchanged. The as-run copy compared JSON strings and reported a false mismatch because T3
   returned the profile's keys in another order; a field-by-field diff of the redacted backups
-  showed only the intended changes. The committed copy compares with sorted keys.
+  showed only the intended changes. The committed copy compares with sorted keys, adds or
+  removes only its two variables, and refuses a profile that already holds one of them (apply)
+  or does not hold both with the expected values (rollback).
 - Check: a new T3 session answered, and `ops/runtime/fleet/codex-failover.jsonl` under the
   instance root logged `app-server`, `primary`, `primary_healthy` at 02:02:06Z. Nothing was
   written inside the release directory.
