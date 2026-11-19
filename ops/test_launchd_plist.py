@@ -15,8 +15,9 @@ class LaunchdPlistTest(unittest.TestCase):
         self.assertTrue(plist["RunAtLoad"])
         self.assertLessEqual(plist["StartInterval"], 180)
         self.assertEqual(plist["WorkingDirectory"], str(root))
+        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], str(root))
         self.assertIn(
-            str(root / "ops" / "cliproxy_watchdog.py"),
+            str(root.with_name("cliproxy-live") / "ops" / "cliproxy_watchdog.py"),
             plist["ProgramArguments"],
         )
         self.assertEqual(plist["StandardOutPath"], "/dev/null")
@@ -37,8 +38,9 @@ class LaunchdPlistTest(unittest.TestCase):
         self.assertTrue(plist["RunAtLoad"])
         self.assertLessEqual(plist["StartInterval"], 600)
         self.assertEqual(plist["WorkingDirectory"], str(root))
+        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], str(root))
         self.assertIn(
-            str(root / "ops" / "archive_logs.py"),
+            str(root.with_name("cliproxy-live") / "ops" / "archive_logs.py"),
             plist["ProgramArguments"],
         )
         environment = plist["EnvironmentVariables"]

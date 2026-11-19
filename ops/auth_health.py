@@ -13,6 +13,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from .instance_root import instance_root, MissingInstanceRoot
+else:
+    from instance_root import instance_root, MissingInstanceRoot
+
 
 REFRESH_RESULT_RE = re.compile(
     r"refreshed\s+(?P<provider>[^,]+),\s+(?P<filename>[^,]+),\s+(?P<result>.*)$",
@@ -293,10 +298,9 @@ def format_text(
 
 
 def main() -> int:
-    project_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--auth-dir", type=Path, default=project_root / "auths")
-    parser.add_argument("--log", type=Path, default=project_root / "logs" / "main.log")
+    parser.add_argument("--auth-dir", type=Path)
+    parser.add_argument("--log", type=Path)
     parser.add_argument(
         "--warn-days",
         type=int,
@@ -304,9 +308,15 @@ def main() -> int:
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    try:
+        project_root = instance_root(__file__)
+    except MissingInstanceRoot as error:
+        parser.error(str(error))
 
     statuses = scan_auth_directory(
-        args.auth_dir, args.log, warn_days=args.warn_days
+        args.auth_dir or project_root / "auths",
+        args.log or project_root / "logs" / "main.log",
+        warn_days=args.warn_days,
     )
     if args.json:
         print(json.dumps([status.safe_dict() for status in statuses], indent=2))

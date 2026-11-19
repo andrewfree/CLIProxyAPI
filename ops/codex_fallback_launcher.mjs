@@ -89,10 +89,17 @@ async function logDecision(subcommand, selected, reason) {
   const line = JSON.stringify({ ts: new Date().toISOString(), pid: process.pid, subcommand, selected, reason });
   try {
     const { appendFile, mkdir } = await import("node:fs/promises");
-    const { dirname } = await import("node:path");
+    const { dirname, join, sep } = await import("node:path");
+    const { homedir } = await import("node:os");
     const { fileURLToPath } = await import("node:url");
+    // Same mapping as claude_account_launcher.mjs: a shipped release logs under the
+    // instance root, not inside its own generation directory.
+    const source = fileURLToPath(import.meta.url);
+    const generation = `${sep}.fleet-releases${sep}`;
+    const ops = source.includes(generation) ? source.split(generation, 1)[0] : dirname(source);
+    const instanceOps = ops === join(homedir(), "cliproxy-live/ops") ? join(homedir(), "cliproxy/ops") : ops;
     const file = process.env.CLIPROXY_CODEX_FAILOVER_LOG ||
-      fileURLToPath(new URL("./runtime/fleet/codex-failover.jsonl", import.meta.url));
+      join(instanceOps, "runtime/fleet/codex-failover.jsonl");
     await mkdir(dirname(file), { recursive: true, mode: 0o700 });
     await appendFile(file, `${line}\n`, { mode: 0o600 });
   } catch {
