@@ -51,7 +51,7 @@ function routePlan(willOrigin) {
 
 const usage = [
   "Usage: set_t3_profile_routes.mjs [plan] --base-dir <dir> --will-origin <origin>",
-  "       set_t3_profile_routes.mjs apply --base-dir <dir> --will-origin <origin> --steps <comma-separated list> --backup-dir <dir> [--named-account-keys-stdin]",
+  "       set_t3_profile_routes.mjs apply --base-dir <dir> --will-origin <origin> --steps <comma-separated list> --backup-dir <dir> [--named-account-keys-stdin | --no-key-check]",
   "       set_t3_profile_routes.mjs rollback --base-dir <dir> --record <file>",
   "For redacted named-account keys, pass a JSON object keyed by profile ID on stdin. The keys are used only for verification.",
 ].join("\n");
@@ -77,6 +77,7 @@ function options(args) {
       options: {
         "base-dir": { type: "string" }, "will-origin": { type: "string" }, steps: { type: "string" },
         "backup-dir": { type: "string" }, record: { type: "string" }, "named-account-keys-stdin": { type: "boolean" },
+        "no-key-check": { type: "boolean" },
       },
     });
   } catch {
@@ -90,7 +91,7 @@ function options(args) {
   };
   if (extra.length || !Object.hasOwn(flags, mode)) throw new RouteError(usage);
   const required = flags[mode];
-  const accepted = mode === "apply" ? [...required, "named-account-keys-stdin"] : required;
+  const accepted = mode === "apply" ? [...required, "named-account-keys-stdin", "no-key-check"] : required;
   if (required.some((name) => !values[name]) || Object.keys(values).some((name) => !accepted.includes(name))) {
     throw new RouteError(usage);
   }
@@ -98,8 +99,11 @@ function options(args) {
   if (steps && (new Set(steps).size !== steps.length || steps.some((step) => !Object.hasOwn(routePlan(), step)))) {
     throw new RouteError("Pass unique step names: default, names, mac-pool-name, named-accounts, kimi-fallback.");
   }
-  if (values["named-account-keys-stdin"] && !steps.includes("named-accounts")) {
-    throw new RouteError("--named-account-keys-stdin requires the named-accounts step.");
+  if ((values["named-account-keys-stdin"] || values["no-key-check"]) && !steps.includes("named-accounts")) {
+    throw new RouteError("--named-account-keys-stdin and --no-key-check require the named-accounts step.");
+  }
+  if (values["named-account-keys-stdin"] && values["no-key-check"]) {
+    throw new RouteError("Pass either --named-account-keys-stdin or --no-key-check, not both.");
   }
   return { mode, values, steps };
 }
@@ -362,7 +366,10 @@ export async function runCli(args, {
     }
     if (Object.values(report.steps).some((step) => step.error)) throw new RouteError("One or more selected steps refused the current settings.");
     if (mode !== "plan" && changes.length) {
-      if (!rollback && changes.some(({ step }) => step === "named-accounts")) {
+      if (!rollback && changes.some(({ step }) => step === "named-accounts") && values["no-key-check"]) {
+        // T3 stores these keys redacted, so the caller verifies them with a new session on each profile after apply.
+        report.keyChecks = "skipped";
+      } else if (!rollback && changes.some(({ step }) => step === "named-accounts")) {
         const keys = values["named-account-keys-stdin"] ? readKeys() : {};
         report.keyChecks = await checkNamedKeys(before, willOrigin, keys, fetchModels);
         if (report.keyChecks.some(({ status }) => status !== 200)) {

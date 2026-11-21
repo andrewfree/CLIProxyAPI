@@ -225,6 +225,28 @@ test("named accounts retain the pinned prefixes and stored keys and probe each k
   assert.deepEqual(h.saved, expected);
 });
 
+test("--no-key-check applies named accounts without probing keys, and only with that step", async (t) => {
+  const expected = fixture();
+  const h = harness(t, expected);
+  const { code, report } = await h.apply("named-accounts", ["--no-key-check"]);
+  assert.equal(code, 0);
+  assert.equal(report.keyChecks, "skipped");
+  assert.deepEqual(h.requests, []);
+  for (const id of Object.keys(secrets)) {
+    expected.providerInstances[id].environment.find((entry) => entry.name === "CLIPROXY_BASE_URL").value = will;
+  }
+  assert.deepEqual(h.saved, expected);
+
+  const other = harness(t);
+  const wrongStep = await other.apply("names", ["--no-key-check"]);
+  assert.equal(wrongStep.code, 1);
+  assert.match(wrongStep.report.error, /require the named-accounts step/);
+  const both = await other.apply("named-accounts", ["--no-key-check", "--named-account-keys-stdin"]);
+  assert.equal(both.code, 1);
+  assert.match(both.report.error, /not both/);
+  assert.deepEqual(other.writes, []);
+});
+
 test("Kimi uses the same launcher shape as the Will pool and edits only the intended URL bytes", async (t) => {
   const expected = fixture();
   const h = harness(t, expected);
