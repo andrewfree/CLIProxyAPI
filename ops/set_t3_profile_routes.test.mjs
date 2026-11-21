@@ -44,9 +44,13 @@ function fixture() {
     },
     fallbackModelSelection: { instanceId: "codex", model: "gpt-6.2-sol" },
     providerInstances: {
-      claude_cliproxy: instance("claudeAgent", "Advanced · Claude pool · W", {}, [env("ANTHROPIC_API_KEY", "fixture-pool-secret", true)]),
+      claude_cliproxy: instance("claudeAgent", "Advanced · Claude pool · W", {}, [
+        env("CLIPROXY_BASE_URL", will), env("ANTHROPIC_API_KEY", "fixture-pool-secret", true),
+      ]),
       claude_cliproxy_mac: instance("claudeAgent", "Claude pool · M"),
-      codex_cliproxy: instance("codex", "Advanced · CLIProxy pool · W", { binaryPath: launcher }, [
+      codex_cliproxy: instance("codex", "Advanced · CLIProxy pool · W", {
+        binaryPath: launcher, launchArgs: `-c '${key}="${will}/v1"'`,
+      }, [
         env("DO_NOT_TRACK", "1"), ...fallbackEnv,
       ]),
       codex_cliproxy_mac: instance("codex", "CLIProxy pool · M"),
@@ -106,7 +110,7 @@ function fakeT3(settings, { onWrite, onRead, redact = true } = {}) {
   };
 }
 
-function fixtureFetch(statuses = {}) {
+function fixtureFetch(statuses = {}, gmailModel = "t3-gmail/claude-opus") {
   const requests = [];
   return {
     requests,
@@ -117,7 +121,7 @@ function fixtureFetch(statuses = {}) {
       const status = statuses[id] ?? 200;
       if (status === "invalid-response") return new Response("Not a model list");
       return new Response(JSON.stringify({ data: [
-        { id: "t3-pro/claude-opus" }, { id: "t3-icloud/claude-sonnet" }, { id: "t3-gmail-extra/claude-opus" },
+        { id: "t3-pro/claude-opus" }, { id: "t3-icloud/claude-sonnet" }, { id: gmailModel },
       ] }), { status });
     },
   };
@@ -128,7 +132,7 @@ function harness(t, settings = fixture(), options = {}) {
   t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
   const backupDir = path.join(baseDir, "backup");
   const service = fakeT3(settings, options);
-  const network = fixtureFetch(options.statuses);
+  const network = fixtureFetch(options.statuses, options.gmailModel);
   async function run(mode, args = []) {
     const lines = [];
     const argv = mode ? [mode] : [];
@@ -172,6 +176,31 @@ test("the default invocation prints all five steps without writing or checking k
   assert.equal(h.closed(), 1);
 });
 
+test("both route steps require the supplied Will origin to match both existing pools in plan and apply", async (t) => {
+  const cases = [
+    [(s) => { s.providerInstances.codex_cliproxy.config.launchArgs = `-c '${key}="${mac}/v1"'`; }, /must match.*codex_cliproxy/],
+    [(s) => { s.providerInstances.codex_cliproxy.config.launchArgs = `-c '${key}="invalid-url"'`; }, /codex_cliproxy launchArgs.*valid/],
+    [(s) => { s.providerInstances.claude_cliproxy.environment[0].value = mac; }, /must match.*claude_cliproxy/],
+  ];
+  for (const [edit, message] of cases) {
+    const settings = fixture();
+    edit(settings);
+    const h = harness(t, settings);
+    const plan = await h.run("plan");
+    assert.equal(plan.code, 1);
+    for (const step of ["named-accounts", "kimi-fallback"]) {
+      assert.match(plan.report.steps[step].error, message);
+      const applied = await h.apply(step);
+      assert.equal(applied.code, 1);
+      assert.match(applied.report.steps[step].error, message);
+    }
+    assert.deepEqual(h.writes, []);
+    assert.deepEqual(h.requests, []);
+    assert.equal(fs.existsSync(h.backupDir), false);
+    assert.equal((await h.apply("names")).code, 0);
+  }
+});
+
 test("default patches the full selection and keeps its model, options and other settings", async (t) => {
   const expected = fixture();
   const h = harness(t, expected);
@@ -213,7 +242,7 @@ test("named accounts retain the pinned prefixes and stored keys and probe each k
   assert.equal(code, 0);
   assert.deepEqual(report.keyChecks, [
     { id: "claude_lockdown_mac", prefix: "t3-pro", status: 200, prefixPresent: true },
-    { id: "claude_gmail_mac", prefix: "t3-gmail", status: 200, prefixPresent: false },
+    { id: "claude_gmail_mac", prefix: "t3-gmail", status: 200, prefixPresent: true },
     { id: "claude_icloud_mac", prefix: "t3-icloud", status: 200, prefixPresent: true },
   ]);
   assert.deepEqual(h.requests, Object.keys(secrets).map((id) => ({ id, url: `${will}/v1/models`, method: "GET", redirect: "manual" })));
@@ -223,6 +252,17 @@ test("named accounts retain the pinned prefixes and stored keys and probe each k
     assert.deepEqual(sentKey, { name: "ANTHROPIC_API_KEY", value: "", sensitive: true, valueRedacted: true });
   }
   assert.deepEqual(h.saved, expected);
+});
+
+test("an explicitly empty named-account fallback survives apply and rollback", async (t) => {
+  const settings = fixture();
+  settings.providerInstances.claude_lockdown_mac.environment.push(env("CLIPROXY_FALLBACK_URL", ""));
+  const h = harness(t, settings);
+  const { code, report } = await h.apply("named-accounts", ["--named-account-keys-stdin"]);
+  assert.equal(code, 0);
+  assert.equal(envValue(h.saved.providerInstances.claude_lockdown_mac, "CLIPROXY_FALLBACK_URL"), "");
+  assert.equal((await h.rollback(report.record)).code, 0);
+  assert.deepEqual(h.saved, settings);
 });
 
 test("--no-key-check applies named accounts without probing keys, and only with that step", async (t) => {
@@ -324,10 +364,20 @@ test("HTTP 200 from a route without a model list cannot authorize the named-acco
   const h = harness(t, fixture(), { statuses: { claude_icloud_mac: "invalid-response" } });
   const { code, report } = await h.apply("named-accounts", ["--named-account-keys-stdin"]);
   assert.equal(code, 1);
-  assert.match(report.error, /without a readable model list/);
+  assert.match(report.error, /expected prefix/);
   assert.equal(report.keyChecks[2].status, 200);
   assert.equal(report.keyChecks[2].prefixPresent, null);
   assert.deepEqual(h.writes, []);
+});
+
+test("HTTP 200 with only a similarly named Gmail prefix refuses the entire apply", async (t) => {
+  const h = harness(t, fixture(), { gmailModel: "t3-gmail-extra/claude-opus" });
+  const { code, report } = await h.apply("names,named-accounts", ["--named-account-keys-stdin"]);
+  assert.equal(code, 1);
+  assert.match(report.error, /expected prefix/);
+  assert.deepEqual(report.keyChecks[1], { id: "claude_gmail_mac", prefix: "t3-gmail", status: 200, prefixPresent: false });
+  assert.deepEqual(h.writes, []);
+  assert.equal(fs.existsSync(h.backupDir), false);
 });
 
 test("apply writes a private redacted settings copy and a minimal rollback record before the RPC", async (t) => {

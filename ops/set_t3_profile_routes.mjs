@@ -133,8 +133,9 @@ function accountProfile(settings, id) {
   const instance = profile(settings, id);
   const prefix = publicVariable(instance, id, "CLIPROXY_ACCOUNT_PREFIX")?.value;
   const route = publicVariable(instance, id, "CLIPROXY_CLAUDE_ROUTE")?.value;
+  const fallback = variable(instance, id, "CLIPROXY_FALLBACK_URL");
   if (prefix !== accountPrefixes[id] || (route !== undefined && route !== "account")
-      || variable(instance, id, "CLIPROXY_FALLBACK_URL")
+      || (fallback && (fallback.valueRedacted || fallback.value !== ""))
       || !publicVariable(instance, id, "CLIPROXY_BASE_URL")) {
     throw new RouteError(`Refusing ${id}: expected its pinned account, an absent or account route, a base URL and no fallback.`);
   }
@@ -217,6 +218,24 @@ function launchBaseURL(config) {
   };
 }
 
+function checkWillOrigin(settings, step, willOrigin) {
+  const codex = profile(settings, "codex_cliproxy");
+  let codexURL;
+  try {
+    codexURL = new URL(launchBaseURL(codex.config).value);
+  } catch (error) {
+    if (!(error instanceof RouteError || error instanceof TypeError)) throw error;
+    throw new RouteError(`Refusing ${step}: codex_cliproxy launchArgs must have one valid CLIProxy base_url override.`);
+  }
+  if (!["http:", "https:"].includes(codexURL.protocol) || codexURL.origin !== willOrigin) {
+    throw new RouteError(`Refusing ${step}: --will-origin must match the CLIProxy base_url origin of codex_cliproxy.`);
+  }
+  const claude = profile(settings, "claude_cliproxy");
+  if (publicVariable(claude, "claude_cliproxy", "CLIPROXY_BASE_URL")?.value !== willOrigin) {
+    throw new RouteError(`Refusing ${step}: --will-origin must match CLIPROXY_BASE_URL of claude_cliproxy.`);
+  }
+}
+
 function property(target, name) {
   return { value: target[name], set: (value) => { target[name] = value; } };
 }
@@ -253,7 +272,8 @@ function fieldName({ id, kind, name }) {
   return `${id}.${prefix}${name}`;
 }
 
-function prepareStep(settings, step, fields, rollback = false) {
+function prepareStep(settings, step, fields, { rollback, willOrigin }) {
+  if (!rollback && (step === "named-accounts" || step === "kimi-fallback")) checkWillOrigin(settings, step, willOrigin);
   if (step === "named-accounts") for (const { id } of fields) accountProfile(settings, id);
   if (step === "kimi-fallback") {
     if (!rollback) checkCodexTemplate(settings);
@@ -356,7 +376,7 @@ export async function runCli(args, {
     report.steps = {};
     for (const [step, fields] of Object.entries(selected)) {
       try {
-        const prepared = prepareStep(before, step, fields, rollback);
+        const prepared = prepareStep(before, step, fields, { rollback, willOrigin });
         report.steps[step] = prepared.map(({ label, from, to, needed }) => ({ field: label, from, to, needed }));
         changes.push(...prepared.filter(({ needed }) => needed).map((change) => ({ step, ...change })));
       } catch (error) {
@@ -375,8 +395,8 @@ export async function runCli(args, {
         if (report.keyChecks.some(({ status }) => status !== 200)) {
           throw new RouteError("Every named-account key must receive HTTP 200 from GET /v1/models on Will.");
         }
-        if (report.keyChecks.some(({ prefixPresent }) => prefixPresent === null)) {
-          throw new RouteError("Will returned HTTP 200 without a readable model list for one or more named accounts.");
+        if (report.keyChecks.some(({ prefixPresent }) => prefixPresent !== true)) {
+          throw new RouteError("Every named account must expose models under its expected prefix in Will's GET /v1/models response.");
         }
       }
 
