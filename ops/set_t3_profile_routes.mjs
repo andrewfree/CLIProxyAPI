@@ -31,20 +31,21 @@ function routePlan(willOrigin) {
       displayName("claude_cliproxy", "Advanced · Claude pool · W", "Claude pool · W"),
       displayName("codex_cliproxy", "Advanced · CLIProxy pool · W", "CLIProxy pool · W"),
       displayName("codex_cliproxy_mac", "CLIProxy pool · M", "Advanced · CLIProxy pool · M (Mac only)"),
-      displayName("claude_lockdown_mac", "Advanced · Claude Pro · M", "Advanced · Claude Pro · W"),
-      displayName("claude_gmail_mac", "Advanced · Claude Gmail · M", "Advanced · Claude Gmail · W"),
-      displayName("claude_icloud_mac", "Advanced · Claude iCloud Max 5× · M", "Advanced · Claude iCloud Max 5× · W"),
-      displayName("codex_kimi_mac", "Kimi via CLIProxy · M (lean)", "Kimi via CLIProxy · W (lean)"),
     ],
     "mac-pool-name": [
       displayName("claude_cliproxy_mac", "Claude pool · M", "Advanced · Claude pool · M (Mac only)"),
     ],
-    "named-accounts": Object.keys(accountPrefixes)
-      .map((id) => field(id, "environment", "CLIPROXY_BASE_URL", macOrigin, willOrigin)),
+    "named-accounts": [
+      ...Object.keys(accountPrefixes).map((id) => field(id, "environment", "CLIPROXY_BASE_URL", macOrigin, willOrigin)),
+      displayName("claude_lockdown_mac", "Advanced · Claude Pro · M", "Advanced · Claude Pro · W"),
+      displayName("claude_gmail_mac", "Advanced · Claude Gmail · M", "Advanced · Claude Gmail · W"),
+      displayName("claude_icloud_mac", "Advanced · Claude iCloud Max 5× · M", "Advanced · Claude iCloud Max 5× · W"),
+    ],
     "kimi-fallback": [
       field("codex_kimi_mac", "config", "binaryPath", codexBinary, codexLauncher),
       field("codex_kimi_mac", "launchArgs", baseURLKey, `${macOrigin}/v1`, `${willOrigin}/v1`),
       ...Object.entries(fallbackEnv).map(([name, value]) => field("codex_kimi_mac", "environment", name, null, value)),
+      displayName("codex_kimi_mac", "Kimi via CLIProxy · M (lean)", "Kimi via CLIProxy · W (lean)"),
     ],
   };
 }
@@ -272,9 +273,29 @@ function fieldName({ id, kind, name }) {
   return `${id}.${prefix}${name}`;
 }
 
+function macReferences(settings) {
+  const references = [];
+  function collect(container, prefix) {
+    for (const [key, selection] of Object.entries(container ?? {})) {
+      if (!key.endsWith("ModelSelection") || (!prefix && key === "defaultModelSelection")) continue;
+      const id = selection?.instanceId;
+      if (id === "codex_cliproxy_mac" || id === "claude_cliproxy_mac") {
+        references.push({ path: `${prefix}${key}`, instanceId: id });
+      }
+    }
+  }
+  collect(settings, "");
+  for (const [project, overrides] of Object.entries(settings.projectSettingsOverrides ?? {})) {
+    collect(overrides, `projectSettingsOverrides[${JSON.stringify(project)}].`);
+  }
+  return references;
+}
+
 function prepareStep(settings, step, fields, { rollback, willOrigin }) {
   if (!rollback && (step === "named-accounts" || step === "kimi-fallback")) checkWillOrigin(settings, step, willOrigin);
-  if (step === "named-accounts") for (const { id } of fields) accountProfile(settings, id);
+  if (step === "named-accounts") {
+    for (const id of new Set(fields.map(({ id }) => id))) accountProfile(settings, id);
+  }
   if (step === "kimi-fallback") {
     if (!rollback) checkCodexTemplate(settings);
     const kimi = profile(settings, "codex_kimi_mac");
@@ -335,8 +356,15 @@ function writePrivate(file, value) {
 function readRecord(file) {
   try {
     const record = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (record.version !== 1 || !Array.isArray(record.changes) || record.changes.length === 0) throw new Error();
+    if (![1, 2].includes(record.version) || !Array.isArray(record.changes) || record.changes.length === 0) throw new Error();
     const plan = routePlan(record.willOrigin === undefined ? undefined : willHTTPOrigin(record.willOrigin));
+    if (record.version === 1) {
+      // Older records stored the route labels in the names step.
+      for (const step of ["named-accounts", "kimi-fallback"]) {
+        plan.names.push(...plan[step].filter(({ kind }) => kind === "profile"));
+        plan[step] = plan[step].filter(({ kind }) => kind !== "profile");
+      }
+    }
     const seen = new Set();
     const steps = {};
     for (const entry of record.changes) {
@@ -372,6 +400,7 @@ export async function runCli(args, {
     client = await connect(values["base-dir"], mode === "plan" ? ["orchestration:read"] : undefined);
     const read = async () => (await client.rpc("server.getConfig")).settings;
     const before = await read();
+    if (!rollback) report.macReferences = macReferences(before);
     const changes = [];
     report.steps = {};
     for (const [step, fields] of Object.entries(selected)) {
@@ -422,7 +451,7 @@ export async function runCli(args, {
         writePrivate(backupFile, withoutSecrets(before));
         report.backup = backupFile;
         writePrivate(recordFile, {
-          version: 1,
+          version: 2,
           ...(changes.some(({ step }) => step === "named-accounts" || step === "kimi-fallback") ? { willOrigin } : {}),
           ...(changedKimiEnvironment && !Object.hasOwn(before.providerInstances.codex_kimi_mac, "environment") ? { kimiEnvironmentWasAbsent: true } : {}),
           changes: changes.map(({ step, label, from, to }) => ({ step, field: label, from, to })),

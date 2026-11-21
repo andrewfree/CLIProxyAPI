@@ -165,15 +165,53 @@ test("the default invocation prints all five steps without writing or checking k
   assert.deepEqual(report.steps.default, [{
     field: "defaultModelSelection.instanceId", from: "codex_cliproxy_mac", to: "codex_cliproxy", needed: true,
   }]);
-  assert.equal(report.steps.names.length, 7);
+  assert.deepEqual(report.steps.names.map(({ field }) => field), [
+    "claude_cliproxy.displayName", "codex_cliproxy.displayName", "codex_cliproxy_mac.displayName",
+  ]);
   assert.equal(report.steps["mac-pool-name"][0].to, "Advanced · Claude pool · M (Mac only)");
   assert.equal(report.steps["named-accounts"][1].to, will);
+  assert.deepEqual(report.steps["named-accounts"].filter(({ field }) => field.endsWith(".displayName")).map(({ field }) => field), [
+    "claude_lockdown_mac.displayName", "claude_gmail_mac.displayName", "claude_icloud_mac.displayName",
+  ]);
   assert.equal(report.steps["kimi-fallback"][1].to, `${will}/v1`);
+  assert.equal(report.steps["kimi-fallback"].find(({ field }) => field === "codex_kimi_mac.displayName").to, "Kimi via CLIProxy · W (lean)");
+  assert.deepEqual(report.macReferences, []);
   assert.deepEqual(h.sessions[0].scopes, ["orchestration:read"]);
   assert.deepEqual(h.requests, []);
   assert.deepEqual(h.writes, []);
   assert.equal(fs.existsSync(h.backupDir), false);
   assert.equal(h.closed(), 1);
+});
+
+test("plan and apply report every other top-level and project Mac model selection without editing it", async (t) => {
+  const expected = fixture();
+  const codexMac = { instanceId: "codex_cliproxy_mac", model: "gpt-6.2-sol" };
+  const claudeMac = { instanceId: "claude_cliproxy_mac", model: "claude-sonnet" };
+  expected.fallbackModelSelection = codexMac;
+  expected.reviewModelSelection = claudeMac;
+  expected.unrelated = claudeMac;
+  expected.projectSettingsOverrides = {
+    "project.with dots": { defaultModelSelection: claudeMac, fallbackModelSelection: codexMac, unrelated: codexMac },
+    other: { customModelSelection: claudeMac, defaultModelSelection: { instanceId: "codex_cliproxy" } },
+  };
+  const h = harness(t, expected);
+  const references = [
+    { path: "fallbackModelSelection", instanceId: "codex_cliproxy_mac" },
+    { path: "reviewModelSelection", instanceId: "claude_cliproxy_mac" },
+    { path: 'projectSettingsOverrides["project.with dots"].defaultModelSelection', instanceId: "claude_cliproxy_mac" },
+    { path: 'projectSettingsOverrides["project.with dots"].fallbackModelSelection', instanceId: "codex_cliproxy_mac" },
+    { path: 'projectSettingsOverrides["other"].customModelSelection', instanceId: "claude_cliproxy_mac" },
+  ];
+  const plan = await h.run("plan");
+  assert.equal(plan.code, 0);
+  assert.deepEqual(plan.report.macReferences, references);
+  const applied = await h.apply("default,names");
+  assert.equal(applied.code, 0);
+  assert.deepEqual(applied.report.macReferences, references);
+  assert.deepEqual(Object.keys(h.writes[0]), ["defaultModelSelection", "providerInstances"]);
+  assert.deepEqual(h.saved.projectSettingsOverrides, expected.projectSettingsOverrides);
+  assert.deepEqual(h.saved.fallbackModelSelection, expected.fallbackModelSelection);
+  assert.deepEqual(h.saved.reviewModelSelection, expected.reviewModelSelection);
 });
 
 test("both route steps require the supplied Will origin to match both existing pools in plan and apply", async (t) => {
@@ -215,17 +253,13 @@ test("default patches the full selection and keeps its model, options and other 
   }]);
 });
 
-test("names changes exactly seven labels, and the Mac Claude pool name is a separate step", async (t) => {
+test("names changes only the three specified pool labels, and the Mac Claude pool has a separate step", async (t) => {
   const expected = fixture();
   const h = harness(t, expected);
   const names = {
     claude_cliproxy: "Claude pool · W",
     codex_cliproxy: "CLIProxy pool · W",
     codex_cliproxy_mac: "Advanced · CLIProxy pool · M (Mac only)",
-    claude_lockdown_mac: "Advanced · Claude Pro · W",
-    claude_gmail_mac: "Advanced · Claude Gmail · W",
-    claude_icloud_mac: "Advanced · Claude iCloud Max 5× · W",
-    codex_kimi_mac: "Kimi via CLIProxy · W (lean)",
   };
   for (const [id, name] of Object.entries(names)) expected.providerInstances[id].displayName = name;
   assert.equal((await h.apply("names")).code, 0);
@@ -234,6 +268,12 @@ test("names changes exactly seven labels, and the Mac Claude pool name is a sepa
   assert.equal((await h.apply("mac-pool-name")).code, 0);
   assert.deepEqual(h.saved, expected);
 });
+
+const willAccountNames = {
+  claude_lockdown_mac: "Advanced · Claude Pro · W",
+  claude_gmail_mac: "Advanced · Claude Gmail · W",
+  claude_icloud_mac: "Advanced · Claude iCloud Max 5× · W",
+};
 
 test("named accounts retain the pinned prefixes and stored keys and probe each key on Will", async (t) => {
   const expected = fixture();
@@ -247,6 +287,7 @@ test("named accounts retain the pinned prefixes and stored keys and probe each k
   ]);
   assert.deepEqual(h.requests, Object.keys(secrets).map((id) => ({ id, url: `${will}/v1/models`, method: "GET", redirect: "manual" })));
   for (const id of Object.keys(secrets)) {
+    expected.providerInstances[id].displayName = willAccountNames[id];
     expected.providerInstances[id].environment.find((entry) => entry.name === "CLIPROXY_BASE_URL").value = will;
     const sentKey = h.writes[0].providerInstances[id].environment.find(({ name }) => name === "ANTHROPIC_API_KEY");
     assert.deepEqual(sentKey, { name: "ANTHROPIC_API_KEY", value: "", sensitive: true, valueRedacted: true });
@@ -273,6 +314,7 @@ test("--no-key-check applies named accounts without probing keys, and only with 
   assert.equal(report.keyChecks, "skipped");
   assert.deepEqual(h.requests, []);
   for (const id of Object.keys(secrets)) {
+    expected.providerInstances[id].displayName = willAccountNames[id];
     expected.providerInstances[id].environment.find((entry) => entry.name === "CLIPROXY_BASE_URL").value = will;
   }
   assert.deepEqual(h.saved, expected);
@@ -293,6 +335,7 @@ test("Kimi uses the same launcher shape as the Will pool and edits only the inte
   const { code, report } = await h.apply("kimi-fallback");
   assert.equal(code, 0);
   const kimi = expected.providerInstances.codex_kimi_mac;
+  kimi.displayName = "Kimi via CLIProxy · W (lean)";
   kimi.config.binaryPath = launcher;
   kimi.config.launchArgs = launchArgs.replace(`${key}='${mac}/v1'`, `${key}='${will}/v1'`);
   kimi.environment.push(...fallbackEnv);
@@ -324,12 +367,14 @@ test("unknown or unsupported starting values refuse the entire selected patch", 
     ["named-accounts", (s) => { s.providerInstances.claude_lockdown_mac.environment[1].value = "shared-pool"; }, /pinned account/],
     ["named-accounts", (s) => { s.providerInstances.claude_lockdown_mac.environment.push(fallbackEnv[0]); }, /no fallback/],
     ["named-accounts", (s) => { s.providerInstances.claude_lockdown_mac.environment[2].sensitive = true; }, /non-sensitive value/],
+    ["named-accounts", (s) => { s.providerInstances.claude_gmail_mac.displayName = "Custom"; }, /claude_gmail_mac.displayName: unexpected/],
     ["kimi-fallback", (s) => { s.providerInstances.codex_cliproxy.config.binaryPath = binary; }, /expected fallback launcher and environment/],
     ["kimi-fallback", (s) => { s.providerInstances.codex_cliproxy.environment.pop(); }, /expected fallback launcher and environment/],
     ["kimi-fallback", (s) => { s.providerInstances.codex_kimi_mac.environment.push(env("CODEX_REAL_BINARY", "/different")); }, /CODEX_REAL_BINARY: unexpected/],
     ["kimi-fallback", (s) => { s.providerInstances.codex_kimi_mac.config.launchArgs += ` -c '${key}="${mac}/v1"'`; }, /unambiguous/],
     ["kimi-fallback", (s) => { s.providerInstances.codex_kimi_mac.config.launchArgs += String.raw` -c 'model_providers.cliproxy."base_\u0075rl"="${mac}/v1"'`; }, /unambiguous/],
     ["kimi-fallback", (s) => { s.providerInstances.codex_kimi_mac.environment.push(env("T3CODE_CODEX_LAUNCH_ARGS", "override")); }, /overrides config.launchArgs/],
+    ["kimi-fallback", (s) => { s.providerInstances.codex_kimi_mac.displayName = "Custom"; }, /codex_kimi_mac.displayName: unexpected/],
   ];
   for (const [step, change, message] of cases) {
     const settings = fixture();
@@ -397,8 +442,12 @@ test("apply writes a private redacted settings copy and a minimal rollback recor
   assert.equal(envValue(saved.providerInstances.other, "ANTHROPIC_API_KEY"), "<redacted>");
   assert.equal(envValue(saved.providerInstances.other, "OTHER_TOKEN"), "<redacted>");
   const record = JSON.parse(fs.readFileSync(report.record, "utf8"));
-  assert.equal(record.changes.length, 3);
-  assert.ok(record.changes.every(({ field, from, to }) => field.endsWith(".CLIPROXY_BASE_URL") && from === mac && to === will));
+  assert.deepEqual(record.changes, [
+    ...Object.keys(secrets).map((id) => ({ step: "named-accounts", field: `${id}.environment.CLIPROXY_BASE_URL`, from: mac, to: will })),
+    ...Object.entries(willAccountNames).map(([id, to]) => ({
+      step: "named-accounts", field: `${id}.displayName`, from: fixture().providerInstances[id].displayName, to,
+    })),
+  ]);
 });
 
 test("rollback restores only recorded changes and leaves later unrelated changes alone", async (t) => {
@@ -433,6 +482,25 @@ test("rollback refuses unexpected state and records that request fields outside 
   fs.writeFileSync(report.record, JSON.stringify(tampered));
   assert.match((await h.rollback(report.record)).report.error, /Invalid rollback record/);
   assert.equal(h.writes.length, 1);
+});
+
+test("rollback retains the original step grouping for old records and enforces the new grouping for new records", async (t) => {
+  const settings = fixture();
+  const h = harness(t, settings);
+  const { code, report } = await h.apply("named-accounts,kimi-fallback", ["--no-key-check"]);
+  assert.equal(code, 0);
+  const record = JSON.parse(fs.readFileSync(report.record, "utf8"));
+  assert.equal(record.version, 2);
+  for (const change of record.changes) {
+    if (change.field.endsWith(".displayName")) change.step = "names";
+  }
+  fs.writeFileSync(report.record, JSON.stringify(record));
+  assert.match((await h.rollback(report.record)).report.error, /Invalid rollback record/);
+  assert.equal(h.writes.length, 1);
+  record.version = 1;
+  fs.writeFileSync(report.record, JSON.stringify(record));
+  assert.equal((await h.rollback(report.record)).code, 0);
+  assert.deepEqual(h.saved, settings);
 });
 
 test("preflight refuses settings drift before sending a replacement map", async (t) => {
