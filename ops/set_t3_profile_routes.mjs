@@ -321,7 +321,13 @@ function prepareStep(settings, step, fields, { rollback, willOrigin }) {
     const from = rollback ? edit.to : edit.from;
     const to = rollback ? edit.from : edit.to;
     const { value } = locate(settings, edit);
-    if (value !== from && value !== to) throw new RouteError(`Refusing ${label}: unexpected value. Expected the starting value or target.`);
+    if (value !== from && value !== to) {
+      // A label renamed by hand since apply must not block an urgent route rollback; keep it and report it.
+      if (rollback && edit.kind === "profile" && edit.name === "displayName") {
+        return { edit, label, from, to, needed: false, skipped: "label changed since apply; left as is" };
+      }
+      throw new RouteError(`Refusing ${label}: unexpected value. Expected the starting value or target.`);
+    }
     return { edit, label, from, to, needed: value !== to };
   });
 }
@@ -423,7 +429,9 @@ export async function runCli(args, {
     for (const [step, fields] of selected) {
       try {
         const prepared = prepareStep(before, step, fields, { rollback, willOrigin });
-        report.steps[step] = prepared.map(({ label, from, to, needed }) => ({ field: label, from, to, needed }));
+        report.steps[step] = prepared.map(({ label, from, to, needed, skipped }) => ({
+          field: label, from, to, needed, ...(skipped ? { skipped } : {}),
+        }));
         changes.push(...prepared.filter(({ needed }) => needed).map((change) => ({ step, ...change })));
       } catch (error) {
         if (!(error instanceof RouteError)) throw error;

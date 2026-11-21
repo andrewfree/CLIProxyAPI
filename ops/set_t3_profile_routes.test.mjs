@@ -501,16 +501,16 @@ test("rollback --steps restores just the selected fields and checks those fields
   const names = h.saved.providerInstances.codex_cliproxy;
   names.displayName = "Later unrelated edit";
   const kimi = h.saved.providerInstances.codex_kimi_mac;
-  const appliedName = kimi.displayName;
-  kimi.displayName = "Later selected edit";
+  const appliedPath = kimi.config.binaryPath;
+  kimi.config.binaryPath = "/somewhere/else/codex";
 
   const selected = ["--steps", "default, kimi-fallback"];
   const refused = await h.rollback(report.record, selected);
   assert.equal(refused.code, 1);
-  assert.match(refused.report.steps["kimi-fallback"].error, /codex_kimi_mac.displayName: unexpected/);
+  assert.match(refused.report.steps["kimi-fallback"].error, /codex_kimi_mac.config.binaryPath: unexpected/);
   assert.equal(h.writes.length, 1);
 
-  kimi.displayName = appliedName;
+  kimi.config.binaryPath = appliedPath;
   const expected = structuredClone(h.saved);
   expected.defaultModelSelection = before.defaultModelSelection;
   expected.providerInstances.codex_kimi_mac = before.providerInstances.codex_kimi_mac;
@@ -533,18 +533,32 @@ test("rollback --steps rejects a step missing from the record before connecting"
   assert.equal(h.writes.length, 1);
 });
 
-test("rollback refuses unexpected state and records that request fields outside the plan", async (t) => {
+test("rollback skips a hand-renamed label, refuses drifted route values, and rejects records outside the plan", async (t) => {
   const h = harness(t);
   const { report } = await h.apply("names");
   h.saved.providerInstances.codex_cliproxy.displayName = "Edited later";
-  const refused = await h.rollback(report.record);
+  const back = await h.rollback(report.record);
+  assert.equal(back.code, 0);
+  const codex = back.report.steps.names.find(({ field }) => field === "codex_cliproxy.displayName");
+  assert.match(codex.skipped, /label changed since apply/);
+  assert.equal(h.saved.providerInstances.codex_cliproxy.displayName, "Edited later");
+  assert.equal(h.saved.providerInstances.claude_cliproxy.displayName, "Advanced · Claude pool · W");
+
+  const routes = harness(t);
+  const applied = await routes.apply("named-accounts", ["--no-key-check"]);
+  assert.equal(applied.code, 0);
+  routes.saved.providerInstances.claude_gmail_mac.environment
+    .find(({ name }) => name === "CLIPROXY_BASE_URL").value = "http://elsewhere.invalid:8317";
+  const writes = routes.writes.length;
+  const refused = await routes.rollback(applied.report.record);
   assert.equal(refused.code, 1);
-  assert.match(refused.report.steps.names.error, /codex_cliproxy.displayName: unexpected/);
+  assert.match(refused.report.steps["named-accounts"].error, /claude_gmail_mac.environment.CLIPROXY_BASE_URL: unexpected/);
+  assert.equal(routes.writes.length, writes);
+
   const tampered = JSON.parse(fs.readFileSync(report.record, "utf8"));
   tampered.changes[0].field = "claude_cliproxy.environment.ANTHROPIC_API_KEY";
   fs.writeFileSync(report.record, JSON.stringify(tampered));
   assert.match((await h.rollback(report.record)).report.error, /Invalid rollback record/);
-  assert.equal(h.writes.length, 1);
 });
 
 test("rollback retains the original step grouping for old records and enforces the new grouping for new records", async (t) => {
