@@ -294,7 +294,7 @@ T3 on the Mac has explicit `Will primary` and `Mac fallback` entries for the sha
 
 `ops/claude_account_launcher.mjs` supports explicit `shared-pool` mode through `CLIPROXY_CLAUDE_ROUTE`. This mode forwards unprefixed Claude model IDs to the existing credential selector. Named profiles keep their account prefixes. `ops/configure_claude_pool.mjs` provisions pool profiles through the running T3 settings API and stores keys in its secret store. The [routing receipt](evidence/claude-pool-routing-20261103.json) records tests, deployed artifact hashes, and runtime-check limits. This host-side integration does not change the fleet's server images or manifest.
 
-`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. The Mac's `codex_cliproxy` has used session-start failover from the bundle since November 18 (procedure and rollback below). The `_mac` profiles, named Claude profiles and Will's own `claude_cliproxy` use fixed hosts. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
+`claude_cliproxy` on the Mac fails over automatically: Will is its primary and `CLIPROXY_FALLBACK_URL=http://127.0.0.1:8317` names the Mac (see [host failover](README.md#host-failover-for-the-shared-pool)). A rerun of `configure_claude_pool.mjs` for `claude_cliproxy` must pass `--fallback http://127.0.0.1:8317` again, or failover is removed. The Mac's `codex_cliproxy` has used session-start failover from the bundle since November 18 (procedure and rollback below). `claude_cliproxy_mac`, `codex_cliproxy_mac`, the named Claude profiles (on Will since November 21) and Will's own `claude_cliproxy` use fixed hosts. Since November 21, `codex_kimi_mac` uses the same session-start failover as `codex_cliproxy`. Native provider entries retain their direct subscription routes. Cursor is reserved for Cursor-only models and Gemini under the owner's model-routing policy.
 
 For exact-model discovery and an authorized T3 task, follow [the Kimi CLIProxy routing recipe](KIMI_ROUTING.md).
 
@@ -378,6 +378,50 @@ remove `CLIPROXY_FALLBACK_URL` and `CODEX_REAL_BINARY` from that profile's
 environment. Save the profile and use a fresh session. A session already
 running stays on the host it started with until its Codex process exits.
 
+## Quitting Docker on the Mac
+
+Run these commands on the Mac from the CLIProxy checkout. Keep the Mac on.
+T3 and its agent sessions still run there.
+
+```sh
+python3 ops/fleetctl.py mac status
+python3 ops/fleetctl.py mac pause
+# When the Mac fallback is needed again:
+python3 ops/fleetctl.py mac resume
+python3 ops/fleetctl.py mac status
+```
+
+`pause` requires all of the following unless you pass `--force`:
+
+- Will passes health checks over SSH and at the client origin in the T3
+  `claude_cliproxy` profile's `CLIPROXY_BASE_URL`.
+- If the monitor's `health.json` is no more than 20 minutes old, it reports
+  Will as `ok`.
+- No Mac-only T3 sessions are running. The check looks for a Claude launcher
+  with a loopback base URL and no fallback, and for a Codex app-server on the
+  Mac proxy.
+- The shipped Mac bundle supports the pause marker in both the watchdog and
+  the monitor.
+
+`pause` lists every running Docker Desktop container and asks for confirmation
+unless you pass `--yes`. Quitting Docker Desktop stops all of them. On
+November 21 the list also included `slk`, `staging-track` and the CodeOne wiki
+backend. The command rechecks under a lock
+and writes `ops/runtime/fleet/mac-paused.json` under the Mac instance root
+before running `docker desktop stop`. If Docker is already down, it only
+records the pause.
+
+While paused, `claude_cliproxy` keeps working through Will. New
+`codex_cliproxy` and Kimi lean sessions start on Will and have no working
+fallback if Will is down at startup. Named-account profiles work only while
+Will is up. `claude_cliproxy_mac` and `codex_cliproxy_mac` use only the Mac
+proxy, so they do not work while paused.
+
+`resume` starts Docker Desktop if needed. Once the engine is up, it removes
+the marker and waits for the Mac proxy to become healthy. `status` shows the
+marker, whether the engine is `up`, `down` or `unknown`, and both hosts' health.
+It warns if Docker is running while the marker still exists.
+
 ## Health and quota monitor
 
 One job on the Mac checks both proxies and does a TCP connect from inside each
@@ -418,6 +462,15 @@ Mac deferred.
 The summary includes those readings and any published reset timestamps. On
 a tick that defers Claude, it can include a Claude reading less than 35 minutes
 old, with its observation time.
+
+While the [Mac fallback is paused](#quitting-docker-on-the-mac), the monitor
+reports the Mac as `paused`, sends no Mac-down texts, and skips parity and
+collection from the Mac. If Will's proxy is unreachable, the monitor sends
+this text. If Will is unreachable over SSH, the text starts with "Will is not
+reachable over SSH from the Mac." If Will's egress fails, the text names the
+affected providers. Both end with the same `mac resume` advice.
+
+> Will proxy unreachable and the Mac fallback is paused. Run `python3 ops/fleetctl.py mac resume` on the Mac. Open Codex sessions and named-account profiles stay on Will.
 
 ### Install or resume on the Mac
 
@@ -554,3 +607,42 @@ Times are UTC (06:45 UTC is 22:45 Pacific on November 18).
 - **Old client keys removed** at the end of the 24-hour overlap. On Will, the in-place edit at 10:30 UTC removed 2 keys and kept 2, and the proxy reloaded. On the Mac the same edit changed the host file; the container showed the new bytes but logged no reload, and a second write with a comment change never reached the container. The last host-side edit known to have loaded on the Mac was on November 18, before the 15:18 Pacific container recreate; when this started is not known. Following the FLEET_DESIGN unit 1 rule, the original bytes were written back and Andrew was asked; he chose the v8 management API. The post-removal bytes were then written to the host so that the host file matched the container's copy (the `GET` `ETag` equalled the host SHA-256), and the `PUT` carried that `ETag` as `If-Match`. `PUT /v8/management/config/access/api-keys` at 10:39 UTC applied the change in memory and saved the file from inside the container. Check: on both hosts the new key returned 200 and both old keys 401, host and container config were identical, the instance verifiers reported no failures, and `fleetctl parity` reported `equal`. The Mac reload problem is tracked in Andrew's Backlog.
 - **CLIProxyBar** reads the Z.ai credit windows after a local parser fix in `~/cliproxybar` (commits `9295448` and `2bceca8`), which was not published to `darfink/cliproxybar`.
 - **Housekeeping.** PR #2 was closed as superseded, and three superseded worktrees from November 2 to 6 were removed, keeping their branches.
+
+## Operations on November 21, 2026
+
+- **Mac fallback only.** Andrew said Will is primary and the Mac proxy must
+  be only a fallback. He wants to be able to quit all of Docker Desktop on
+  the Mac without affecting his work.
+- **T3 routes on the Mac.** The changes were applied from
+  [PR #30](https://github.com/andrewfree/CLIProxyAPI/pull/30) in three runs of
+  `node ops/set_t3_profile_routes.mjs apply --base-dir ~/.t3 --will-origin <Will origin> --backup-dir ops/runtime/mac-fallback-only-20261121/t3-backups`,
+  with `--steps default,review-guide`, then
+  `--steps named-accounts,kimi-fallback --no-key-check`, then `--steps names`.
+  Open sessions kept their processes through all three. The redacted backups
+  and rollback records in that directory are ignored by Git. The default for
+  new threads and T3's review-guide selection both moved from
+  `codex_cliproxy_mac` to `codex_cliproxy`, which picks Will first and can fall
+  back to the Mac at session start.
+  - `claude_cliproxy` is **Claude pool · W**. `codex_cliproxy` is
+    **CLIProxy pool · W**. `codex_cliproxy_mac` is
+    **Advanced · CLIProxy pool · M (Mac only)**. The `mac-pool-name` step was
+    not applied on November 21, because three threads still ran on
+    `claude_cliproxy_mac`. Run it with `--steps mac-pool-name` after that
+    profile's last threads move. It renames the profile to
+    **Advanced · Claude pool · M (Mac only)**.
+  - `claude_lockdown_mac` (`t3-pro`), `claude_gmail_mac` (`t3-gmail`) and
+    `claude_icloud_mac` (`t3-icloud`) now reach Will's proxy. Their labels end
+    in **· W**. They have no Mac fallback by design. A named account never
+    switches accounts.
+  - `codex_kimi_mac` is **Kimi via CLIProxy · W (lean)**. It uses
+    `ops/codex_fallback_launcher.mjs` with Will first and the same session-start
+    fallback as `codex_cliproxy`. The profile IDs keep their `_mac` suffixes.
+  - A new iCloud session replied through Will. Gmail and Pro returned Claude
+    rate-limit errors because their weekly caps were used up. A Kimi lean
+    session replied, and its launcher and Codex app-server carried Will's
+    `base_url`.
+- **Docker Desktop pause.** [PR #31](https://github.com/andrewfree/CLIProxyAPI/pull/31)
+  added `fleetctl.py mac pause`, `resume` and `status`. It shipped to the Mac
+  bundle at `18e4f8e1`. The P0 check printed `status: ok` with no issues. The
+  next watchdog cycle and monitor tick ran clean on the new code. See
+  [Quitting Docker on the Mac](#quitting-docker-on-the-mac).

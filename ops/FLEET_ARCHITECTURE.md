@@ -1,6 +1,6 @@
 # How the CLIProxy fleet is set up, and why
 
-This document explains the reasons behind the fleet's shape, as of November 19, 2026. Read it
+This document explains the reasons behind the fleet's shape, as of November 21, 2026. Read it
 before you change anything, so that you know which problem each part solves.
 
 It is an explanation, not a procedure:
@@ -37,11 +37,11 @@ secrets and logs.
                                                                       |   by address: M1 only        OpenAI Codex
                                                                       +-> Mac   (fallback)           Kimi
    claude_cliproxy_mac (shared pool) -> launcher, pool mode ------------> Mac                        Z.ai Coding Plan
-   3 named Claude profiles -----------> launcher, account prefix -------> Mac                        Cursor plugin
-                                                                          Docker Desktop, arm64      NVIDIA
-   codex_cliproxy --------------------> codex_fallback_launcher.mjs ---> Will  (tailnet name);
-                                        picks a host at session start      Mac if Will fails at start
-   codex_cliproxy_mac, codex_kimi_mac - (no launcher, one base_url) ----> Mac   127.0.0.1:8317
+                                                                          Docker Desktop, arm64      Cursor plugin
+   3 named Claude profiles -----------> launcher, account prefix -------> Will (no fallback)         NVIDIA
+   codex_cliproxy, codex_kimi_mac ----> codex_fallback_launcher.mjs ----> Will  (tailnet name);
+                                        picks a host at session start     Mac if Will fails at start
+   codex_cliproxy_mac ----------------- (no launcher, one base_url) ----> Mac   127.0.0.1:8317
 
  Will, T3
    claude_cliproxy -------------------> launcher, pool mode ------------> Will  (own loopback)
@@ -49,15 +49,16 @@ secrets and logs.
  M1, T3
    codex_cliproxy --------------------- (no launcher) ------------------> Will  (tailnet address)
 
- claude_cliproxy fails over per request and codex_cliproxy per session; every other profile has
- one fixed host. On the Mac both launchers run from the ops bundle in ~/cliproxy-live/ops.
+ claude_cliproxy fails over per request. codex_cliproxy and codex_kimi_mac pick a host at session
+ start. Every other profile has one fixed host. The Mac launchers run from ~/cliproxy-live/ops.
  The two proxies share no runtime state and neither is in the other's request path.
  CLIProxyBar (the Mac menu-bar quota app, not shown) still reaches Will by address (section 4).
 ```
 
-Sources: profile list and hosts in [FLEET.md](FLEET.md#running-fleet); per-client routes in
-[FLEET_DESIGN.md](FLEET_DESIGN.md) section 6; addresses and platforms in
-[fleet-release.json](fleet-release.json).
+The runbook lists the [running hosts](FLEET.md#running-fleet) and the
+[November 21 profile changes](FLEET.md#operations-on-november-21-2026).
+[FLEET_DESIGN.md](FLEET_DESIGN.md) section 6 covers the client route design.
+[fleet-release.json](fleet-release.json) lists addresses and platforms.
 
 Three ideas explain most of the picture:
 
@@ -72,7 +73,7 @@ Three ideas explain most of the picture:
    a host that has neither: with two or more eligible accounts, its first turn there can land on
    another account and pay a cold cache write. That cost is why the launcher does not move a
    conversation back and forth on a flapping link (section 2.6, Recovery).
-3. **Failover lives in the client's launcher, for one profile.** There is no new service and no
+3. **Failover lives in each enabled profile's launcher.** There is no new service and no
    daemon in the request path.
 
 ## 2. The choices and their reasons
@@ -370,8 +371,10 @@ listed in [README.md](README.md#host-failover-for-the-shared-pool); this section
 **For Claude, only `claude_cliproxy` on the Mac fails over.** The launcher refuses `CLIPROXY_FALLBACK_URL` on
 a named account route, because a pinned account must never move to another host. Named routes
 never cross hosts, so failover cannot reach an account mismatch even if the hosts drift
-([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 6 and 14). The `_mac` profiles are already local and
-need no fallback.
+([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 6 and 14). Since November 21 the three named profiles
+on the Mac reach Will. `claude_lockdown_mac`, `claude_gmail_mac` and `claude_icloud_mac` still pin
+`t3-pro`, `t3-gmail` and `t3-icloud`, respectively. The IDs retain their `_mac` suffixes. The
+shared `claude_cliproxy_mac` pool still points only at the Mac.
 
 **The scope guard.** The same launcher file serves all five Mac profiles and Will's T3. Without
 `CLIPROXY_FALLBACK_URL` the request path is the old code: the default connection agent, no timers,
@@ -565,7 +568,7 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | Location | What it is | Consequence |
 | --- | --- | --- |
 | `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. Since the November 18 cutover the installed jobs and new T3 sessions use the bundle, not its checkout paths. | A pull, checkout, or uncommitted edit no longer changes a job or new session. Compose inputs here are still live. |
-| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`, and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
 | `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
@@ -685,6 +688,21 @@ service sends to its configured recipient. The
 [runbook](FLEET.md#health-and-quota-monitor) covers activation, pause, and
 private charts generated from the JSONL history.
 
+### 2.11 Intentionally pausing the Mac fallback
+
+Andrew wants to be able to quit Docker Desktop while his work uses Will. `mac pause` writes
+the marker under the Mac instance root before it stops Docker. The watchdog and the pause
+command share a lock so a recovery cannot race the shutdown. The marker tells later watchdog
+cycles to skip all checks and recovery, even if the stop fails. It also tells the monitor to
+report the Mac as paused, skip collection from the Mac and parity, and suppress Mac-down
+alerts. `mac resume` waits for Docker before clearing the marker so recovery can run again.
+A watchdog cycle that starts while `mac pause` or `mac resume` holds the lock is skipped.
+
+The engine state is `unknown` when the Docker probe could not complete. A running engine
+can be slow under memory pressure. Pause requires a definite engine state at its final check
+and skips the stop only when Docker is `down`. See
+[Quitting Docker on the Mac](FLEET.md#quitting-docker-on-the-mac).
+
 ## 3. Problem, fix, location, evidence
 
 | Problem | Fix | Where it lives | Evidence |
@@ -717,7 +735,9 @@ fails its health check and the Mac passes. If both fail, it starts with the Will
 launcher reuses the three-second `/healthz` probe from section 2.6. A healthy `/healthz`
 cannot reveal an upstream egress outage. Codex CLI keeps one `base_url` per process, so an
 existing session stays on its selected host. Andrew enabled the launcher on November 18, from
-the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to the Mac.
+the bundle. On November 21, `codex_cliproxy` replaced `codex_cliproxy_mac` as the default for new
+threads and the selection for T3's review guide. `codex_kimi_mac` uses the same launcher and
+tries Will first at session start. `codex_cliproxy_mac` stays fixed to the Mac.
 
 **Not automatic:**
 

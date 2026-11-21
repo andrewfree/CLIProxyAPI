@@ -4,7 +4,7 @@ Both proxies, Will (primary) and the M5 Mac (`http://127.0.0.1:8317`), serve sel
 
 ## Use it from T3
 
-Select **CLIProxy pool · W** (`codex_cliproxy`, Will) or **CLIProxy pool · M** (`codex_cliproxy_mac`, the Mac) and one of these model IDs. Will has served the aliases since November 18. Confirm that T3 lists them for the profile you choose ([Verify](#verify)).
+Select **CLIProxy pool · W** (`codex_cliproxy`, Will first) or **Advanced · CLIProxy pool · M (Mac only)** (`codex_cliproxy_mac`) and one of these model IDs. Will has served the aliases since November 18. Confirm that T3 lists them for the profile you choose ([Verify](#verify)).
 
 | T3 / proxy model ID | NVIDIA model | Status on 2026-11-11 |
 |---|---|---|
@@ -12,7 +12,7 @@ Select **CLIProxy pool · W** (`codex_cliproxy`, Will) or **CLIProxy pool · M**
 | `nvidia-minimax-m3.1-flash` | `minimaxai/minimax-m3.1-flash` | Chat and Responses passed. About 8 to 12 seconds. |
 | `nvidia-nemotron-3-ultra` | `nvidia/nemotron-3-ultra-550b-a55b` | Passed through the proxy, but NVIDIA intermittently returns `finish_reason: stop` with empty content, also on direct calls. |
 
-The `codex` driver is only the client. CLIProxy translates Responses API requests into Chat Completions for this upstream. `codex_kimi_mac` also lists these models because it targets the same Mac proxy as `codex_cliproxy_mac`.
+The `codex` driver is only the client. CLIProxy translates Responses API requests into Chat Completions for this upstream. `codex_kimi_mac` also lists these models. It targets Will first and can fall back to the Mac at session start.
 
 ## Configuration
 

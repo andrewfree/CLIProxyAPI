@@ -93,7 +93,7 @@ private deployment backup after confirming no task-owned client uses it.
 
 `CLIPROXY_FALLBACK_URL` names a second CLIProxy origin for a shared-pool
 profile. On the Mac, `claude_cliproxy` uses it for Will-to-Mac failover,
-and `codex_cliproxy` has used it for session-start failover since November 18 (see [Codex failover](#codex-failover)).
+and `codex_cliproxy` has used it for session-start failover since November 18, and `codex_kimi_mac` since November 21 (see [Codex failover](#codex-failover)).
 The Claude launcher refuses it on a named account route, because a pinned
 account must never move to another host. Without the variable, the Claude
 launcher keeps the default connection agent and starts no timers or probes.
@@ -295,7 +295,14 @@ rollout, closed-port drill and rollback.
 
 ## Recovery behavior
 
-`com.rever.cliproxy-watchdog` runs at login and every 120 seconds. One run performs these checks in order:
+`com.rever.cliproxy-watchdog` runs at login and every 120 seconds. While
+`ops/runtime/fleet/mac-paused.json` exists under the Mac instance root, the
+watchdog skips every check and recovery action. The marker stays in place
+until `mac resume` confirms the Docker engine is up. A cycle that starts while
+`mac pause` or `mac resume` holds the transition lock is skipped. See
+[Quitting Docker on the Mac](FLEET.md#quitting-docker-on-the-mac).
+
+During normal operation the watchdog performs these checks in order:
 
 1. A direct HTTP `GET /_ping` on the configured Docker Unix socket must return
    `200` and `OK`. The socket timeout is three seconds. This does not start the
@@ -340,8 +347,9 @@ The Mac's Compose guard requires the running container and Compose inputs
 to match the approved activation receipt before running `compose up`. The
 [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) covers recording
 that receipt and using `ops/runtime/watchdog.pause` before an approved Compose
-activation. The pause suppresses repairs for up to 30 minutes while checks
-continue. Remove the pause file after checking the refreshed receipt.
+activation. That maintenance pause suppresses repairs for up to 30 minutes
+while checks continue. Remove the pause file after checking the refreshed
+receipt.
 
 Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watchdog actions.
 
