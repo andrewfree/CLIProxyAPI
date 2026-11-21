@@ -27,6 +27,8 @@ const displayName = (id, from, to) => field(id, "profile", "displayName", from, 
 function routePlan(willOrigin) {
   return {
     default: [field(null, "default", "instanceId", "codex_cliproxy_mac", "codex_cliproxy")],
+    // T3's PR review guide runs on its own model selection, which pointed at the Mac-only profile.
+    "review-guide": [field(null, "selection", "reviewGuideModelSelection", "codex_cliproxy_mac", "codex_cliproxy")],
     names: [
       displayName("claude_cliproxy", "Advanced · Claude pool · W", "Claude pool · W"),
       displayName("codex_cliproxy", "Advanced · CLIProxy pool · W", "CLIProxy pool · W"),
@@ -99,7 +101,7 @@ function options(args) {
   }
   const steps = values.steps?.split(",").map((step) => step.trim());
   if (steps && (new Set(steps).size !== steps.length || steps.some((step) => !Object.hasOwn(routePlan(), step)))) {
-    throw new RouteError("Pass unique step names: default, names, mac-pool-name, named-accounts, kimi-fallback.");
+    throw new RouteError("Pass unique step names: default, review-guide, names, mac-pool-name, named-accounts, kimi-fallback.");
   }
   if ((values["named-account-keys-stdin"] || values["no-key-check"]) && !steps.includes("named-accounts")) {
     throw new RouteError("--named-account-keys-stdin and --no-key-check require the named-accounts step.");
@@ -250,6 +252,13 @@ function locate(settings, { id, kind, name }) {
     }
     return property(selection, name);
   }
+  if (kind === "selection") {
+    const selection = settings[name];
+    if (typeof selection?.model !== "string" || !selection.model) {
+      throw new RouteError(`Refusing ${name}: T3 must return a populated settings.${name}.`);
+    }
+    return property(selection, "instanceId");
+  }
   const instance = profile(settings, id);
   if (kind === "profile") return property(instance, name);
   if (kind === "launchArgs") return launchBaseURL(instance.config);
@@ -270,15 +279,19 @@ function locate(settings, { id, kind, name }) {
 
 function fieldName({ id, kind, name }) {
   if (kind === "default") return "defaultModelSelection.instanceId";
+  if (kind === "selection") return `${name}.instanceId`;
   const prefix = kind === "profile" ? "" : kind === "launchArgs" ? "config.launchArgs." : `${kind}.`;
   return `${id}.${prefix}${name}`;
 }
+
+// Top-level selections that plan steps change, so macReferences does not list them twice.
+const planSelections = new Set(["defaultModelSelection", "reviewGuideModelSelection"]);
 
 function macReferences(settings) {
   const references = [];
   function collect(container, prefix) {
     for (const [key, selection] of Object.entries(container ?? {})) {
-      if (!key.endsWith("ModelSelection") || (!prefix && key === "defaultModelSelection")) continue;
+      if (!key.endsWith("ModelSelection") || (!prefix && planSelections.has(key))) continue;
       const id = selection?.instanceId;
       if (id === "codex_cliproxy_mac" || id === "claude_cliproxy_mac") {
         references.push({ path: `${prefix}${key}`, instanceId: id });
@@ -442,7 +455,8 @@ export async function runCli(args, {
       }
       const patch = {};
       // T3's server patch replaces the full selection and the full provider map.
-      if (changes.some(({ edit }) => edit.id === null)) patch.defaultModelSelection = next.defaultModelSelection;
+      if (changes.some(({ edit }) => edit.kind === "default")) patch.defaultModelSelection = next.defaultModelSelection;
+      for (const { edit } of changes) if (edit.kind === "selection") patch[edit.name] = next[edit.name];
       if (changes.some(({ edit }) => edit.id !== null)) patch.providerInstances = next.providerInstances;
       if (!rollback) {
         const dir = values["backup-dir"];

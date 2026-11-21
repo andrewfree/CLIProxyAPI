@@ -43,6 +43,7 @@ function fixture() {
       options: { reasoningEffort: "xhigh", fast: true },
     },
     fallbackModelSelection: { instanceId: "codex", model: "gpt-6.2-sol" },
+    reviewGuideModelSelection: { instanceId: "codex_cliproxy_mac", model: "gpt-6.2-sol", options: { reasoningEffort: "high" } },
     providerInstances: {
       claude_cliproxy: instance("claudeAgent", "Advanced · Claude pool · W", {}, [
         env("CLIPROXY_BASE_URL", will), env("ANTHROPIC_API_KEY", "fixture-pool-secret", true),
@@ -161,7 +162,7 @@ test("the default invocation prints all five steps without writing or checking k
   const { code, report } = await h.run(null);
   assert.equal(code, 0);
   assert.equal(report.mode, "plan");
-  assert.deepEqual(Object.keys(report.steps), ["default", "names", "mac-pool-name", "named-accounts", "kimi-fallback"]);
+  assert.deepEqual(Object.keys(report.steps), ["default", "review-guide", "names", "mac-pool-name", "named-accounts", "kimi-fallback"]);
   assert.deepEqual(report.steps.default, [{
     field: "defaultModelSelection.instanceId", from: "codex_cliproxy_mac", to: "codex_cliproxy", needed: true,
   }]);
@@ -251,6 +252,28 @@ test("default patches the full selection and keeps its model, options and other 
   assert.deepEqual(record.changes, [{
     step: "default", field: "defaultModelSelection.instanceId", from: "codex_cliproxy_mac", to: "codex_cliproxy",
   }]);
+});
+
+test("review-guide moves only the review guide selection and keeps its model and options", async (t) => {
+  const expected = fixture();
+  const h = harness(t, expected);
+  expected.reviewGuideModelSelection.instanceId = "codex_cliproxy";
+  const { code, report } = await h.apply("review-guide");
+  assert.equal(code, 0);
+  assert.deepEqual(h.saved, expected);
+  assert.deepEqual(h.writes, [{ reviewGuideModelSelection: expected.reviewGuideModelSelection }]);
+  assert.equal(report.macReferences.some(({ path }) => path === "reviewGuideModelSelection"), false);
+  const record = JSON.parse(fs.readFileSync(report.record, "utf8"));
+  assert.deepEqual(record.changes.map(({ field }) => field), ["reviewGuideModelSelection.instanceId"]);
+  const back = await h.rollback(report.record);
+  assert.equal(back.code, 0);
+  assert.equal(h.saved.reviewGuideModelSelection.instanceId, "codex_cliproxy_mac");
+
+  const missing = harness(t, (() => { const s = fixture(); delete s.reviewGuideModelSelection; return s; })());
+  const refused = await missing.apply("review-guide");
+  assert.equal(refused.code, 1);
+  assert.match(refused.report.steps["review-guide"].error, /populated settings.reviewGuideModelSelection/);
+  assert.deepEqual(missing.writes, []);
 });
 
 test("names changes only the three specified pool labels, and the Mac Claude pool has a separate step", async (t) => {
@@ -345,7 +368,7 @@ test("Kimi uses the same launcher shape as the Will pool and edits only the inte
   assert.match(record, /CLIPROXY_FALLBACK_URL/);
 });
 
-const allSteps = "default,names,mac-pool-name,named-accounts,kimi-fallback";
+const allSteps = "default,review-guide,names,mac-pool-name,named-accounts,kimi-fallback";
 test("reapplying all steps does not write settings, probe keys or create more receipts", async (t) => {
   const h = harness(t);
   assert.equal((await h.apply(allSteps, ["--named-account-keys-stdin"])).code, 0);
