@@ -295,7 +295,13 @@ rollout, closed-port drill and rollback.
 
 ## Recovery behavior
 
-`com.rever.cliproxy-watchdog` runs at login and every 120 seconds. One run performs these checks in order:
+`com.rever.cliproxy-watchdog` runs at login and every 120 seconds. While
+`ops/runtime/fleet/mac-paused.json` exists under the Mac instance root, the
+watchdog skips every check and recovery action. The marker stays in place
+until `mac resume` confirms the Docker engine is up. See
+[Quitting Docker on the Mac](FLEET.md#quitting-docker-on-the-mac).
+
+During normal operation the watchdog performs these checks in order:
 
 1. A direct HTTP `GET /_ping` on the configured Docker Unix socket must return
    `200` and `OK`. The socket timeout is three seconds. This does not start the
@@ -340,8 +346,9 @@ The Mac's Compose guard requires the running container and Compose inputs
 to match the approved activation receipt before running `compose up`. The
 [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) covers recording
 that receipt and using `ops/runtime/watchdog.pause` before an approved Compose
-activation. The pause suppresses repairs for up to 30 minutes while checks
-continue. Remove the pause file after checking the refreshed receipt.
+activation. That maintenance pause suppresses repairs for up to 30 minutes
+while checks continue. Remove the pause file after checking the refreshed
+receipt.
 
 Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watchdog actions.
 
