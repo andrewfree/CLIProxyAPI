@@ -17,6 +17,7 @@ class BundleLaunchAgentsTest(unittest.TestCase):
         ops = Path(__file__).resolve().parent
         host = json.loads((ops / "fleet/hosts.json").read_text())["m5"]
         allowlist = (ops / "fleet/bundle.txt").read_text().splitlines()
+        self.assertIn("ops/fleet_mac.py", allowlist)
         for job, script, seconds in (
             ("watchdog", "cliproxy_watchdog.py", 120),
             ("log-archive", "archive_logs.py", 300),
@@ -179,7 +180,7 @@ class BundleJobsTest(unittest.TestCase):
         ops = Path(__file__).resolve().parent
         live = self.root / "release/ops"
         live.mkdir(parents=True)
-        for name in ("cliproxy_watchdog.py", "auth_health.py", "instance_root.py"):
+        for name in ("cliproxy_watchdog.py", "auth_health.py", "fleet_mac.py", "instance_root.py"):
             (live / name).write_bytes((ops / name).read_bytes())
         result = subprocess.run([sys.executable, "-E", "-B", str(live / "cliproxy_watchdog.py"), "--help"],
                                 capture_output=True, text=True, check=False)
@@ -197,7 +198,7 @@ class BundleJobsTest(unittest.TestCase):
             "archive_logs.py": ["--check-only", "--mount-point", str(self.root / "not-mounted")],
             "auth_health.py": ["--json"],
         }
-        for name in (*jobs, "instance_root.py"):
+        for name in (*jobs, "fleet_mac.py", "instance_root.py"):
             (release / name).write_bytes((ops / name).read_bytes())
             (live / name).symlink_to(Path(".fleet-current") / name)
         fake_environment = {"CLIPROXY_DOCKER": "/usr/bin/false", "CLIPROXY_CURL": "/usr/bin/false",

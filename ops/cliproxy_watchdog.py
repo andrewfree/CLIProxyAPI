@@ -22,9 +22,11 @@ from typing import Callable, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
 if __package__:
+    from . import fleet_mac
     from .auth_health import format_text, scan_auth_directory
     from .instance_root import instance_root, MissingInstanceRoot
 else:
+    import fleet_mac
     from auth_health import format_text, scan_auth_directory
     from instance_root import instance_root, MissingInstanceRoot
 
@@ -32,6 +34,15 @@ else:
 DEFAULT_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 PAUSE_SECONDS = 30 * 60
 COMPOSE_FILES = ("docker-compose.yml", "docker-compose.override.yml")
+
+
+def skip_if_mac_paused(root: Path, logger: logging.Logger) -> bool:
+    marker = fleet_mac.read_marker(root)
+    if marker is None:
+        return False
+    logger.info("Watchdog paused by mac-paused.json since %s. Skipping checks and recovery.",
+                marker["paused_at"])
+    return True
 
 
 def docker_socket_from_environment(environment: Mapping[str, str]) -> Path:
@@ -536,6 +547,19 @@ class Watchdog:
     def run_once(
         self, *, check_only: bool = False, skip_auth: bool = False
     ) -> int:
+        if skip_if_mac_paused(self.config.root, self.logger):
+            return 0
+        if check_only:
+            return self.check_and_recover(check_only=True, skip_auth=skip_auth)
+        with fleet_mac.transition_lock(self.config.root, blocking=False) as acquired:
+            if skip_if_mac_paused(self.config.root, self.logger):
+                return 0
+            if not acquired:
+                self.logger.info("Skipping watchdog cycle during a Mac Docker transition.")
+                return 0
+            return self.check_and_recover(check_only=False, skip_auth=skip_auth)
+
+    def check_and_recover(self, *, check_only: bool, skip_auth: bool) -> int:
         now = self.clock()
         pause = self.config.root / "ops/runtime/watchdog.pause"
         try:
@@ -697,6 +721,8 @@ def main() -> int:
         parser.error(str(error))
     logger = build_logger(root / "ops" / "runtime" / "watchdog.log", verbose=args.verbose)
     try:
+        if not args.record_compose_activation and skip_if_mac_paused(root, logger):
+            return 0
         config = WatchdogConfig.from_environment(root)
         watchdog = Watchdog(config, logger=logger)
         if args.record_compose_activation:

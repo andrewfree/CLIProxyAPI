@@ -17,7 +17,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from ops import fleet_monitor as monitor, fleet_monitor_probe as probe
+from ops import fleet_mac, fleet_monitor as monitor, fleet_monitor_probe as probe
 
 
 NOW = datetime(2026, 11, 18, 18, tzinfo=timezone.utc)
@@ -525,6 +525,57 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(monitor.status_alerts(state, both_down, None),
                          ["Will proxy unreachable.", "Mac proxy down. Check the local fallback."])
 
+    def test_paused_ticks_skip_mac_collection_and_resume_without_recovery_text(self):
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(monitor, "DAILY_AT", time(23, 59)),
+              patch.object(monitor, "run_host") as run,
+              patch.object(monitor, "run_parity", return_value={"status": "equal"}) as parity,
+              patch.object(monitor, "notify_message", return_value=monitor.TEXT_SENT) as notify):
+            root = Path(directory)
+            fleet_mac.write_marker(root, None, ["cli-proxy-api"])
+            marker = fleet_mac.read_marker(root)
+            monitor.write_json(root / "monitor-state.json", {
+                "salt": SALT, "health_alerts": {"mac-unreachable": True},
+                "pending_alerts": {"messages": [monitor.MAC_DOWN],
+                                   "health_alerts": {"mac-unreachable": True}},
+            })
+            # Both an SSH failure and an unhealthy proxy should use the pause-specific wording.
+            run.return_value = dict(host_report(state="unreachable"), ssh_unreachable=True)
+            for offset in (0, 300):
+                with patch.object(monitor, "now_utc", return_value=NOW + timedelta(seconds=offset)):
+                    monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
+            self.assertEqual([call.args[0]["name"] for call in run.call_args_list], ["will", "will"])
+            parity.assert_not_called()
+            notify.assert_called_once_with(
+                "Will proxy unreachable and the Mac fallback is paused. "
+                "Run `python3 ops/fleetctl.py mac resume` on the Mac.", [])
+            health = monitor.read_json(root / "health.json", {})["hosts"]["m5"]
+            self.assertEqual(health["status"], "paused")
+            self.assertEqual(health["reachability"], "paused")
+            self.assertEqual(health["paused_at"], marker["paused_at"])
+            self.assertEqual(health["quota_errors"], [])
+
+            fleet_mac.marker_path(root).unlink()
+            run.return_value = host_report()
+            for offset in (600, 900):
+                with patch.object(monitor, "now_utc", return_value=NOW + timedelta(seconds=offset)):
+                    monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
+            self.assertEqual([call.args[0] for call in notify.call_args_list][1:],
+                             ["Will health checks recovered."])
+            self.assertEqual(monitor.read_json(root / "health.json", {})["hosts"]["m5"]["status"], "ok")
+            parity.assert_called_once()
+
+    def test_pause_rewrites_a_pending_will_alert_that_promised_the_mac(self):
+        pending = {"messages": ["Will proxy unreachable. New codex_cliproxy sessions start on the Mac.",
+                                monitor.MAC_RECOVERED, "other alert"]}
+        state = {"pending_alerts": pending}
+        will = host_report(state="unreachable")
+        monitor.refresh_pending_health_alerts(state, {"m5": host_report(state="paused"), "will": will})
+        self.assertEqual(pending["messages"], [monitor.WILL_DOWN_MAC_PAUSED, "other alert"])
+        monitor.refresh_pending_health_alerts(state, {"m5": host_report(), "will": will})
+        self.assertEqual(pending["messages"],
+                         [monitor.will_down_message(will, host_report()), "other alert"])
+
     def test_short_cooldowns_share_one_episode_until_an_hour_quiet(self):
         state = {}
         record = sample()
@@ -724,7 +775,7 @@ class MonitorTests(unittest.TestCase):
     def test_monitor_modules_stay_compatible_with_apple_python_39(self):
         # /usr/bin/python3 is 3.9: no newer syntax, and no `X | Y` annotations evaluated at runtime.
         for name in ("fleet_monitor", "fleet_monitor_probe", "fleet_quota_chart", "fleetctl",
-                     "fleet_routing", "claude_usage_resets"):
+                     "fleet_mac", "fleet_routing", "claude_usage_resets"):
             source = (monitor.OPS / (name + ".py")).read_text(encoding="utf-8")
             tree = ast.parse(source, feature_version=(3, 9))
             if "from __future__ import annotations" in source:
