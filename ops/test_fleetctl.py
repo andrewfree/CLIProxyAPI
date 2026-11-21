@@ -993,6 +993,20 @@ class MacCommandsTest(unittest.TestCase):
                          ["ps", "eww", "-p", "11", "-o", "command="])
         self.assertIsNone(fleet_mac.read_marker(self.root))
 
+    def test_session_scan_ignores_the_t3_shell_wrapper_that_names_the_launcher(self):
+        # T3's per-session /bin/sh wrapper names the launcher in its arguments, but ps eww shows it
+        # no environment. Only node running the launcher is inspected.
+        launcher = "node /test/claude_account_launcher.mjs --resume=abc"
+        wrapper = ("/bin/sh -c read -r _ <&4 || exit 1\\012exec 4<&-\\012 sh "
+                   "/test/claude_account_launcher.mjs --resume=abc")
+        self.run.side_effect = [
+            self.result(f"21 00:10 {wrapper}\n22 00:10 {launcher}\n"),
+            self.result(launcher + " CLIPROXY_BASE_URL=http://127.0.0.1:8317 PRIVATE=" + CANARY),
+        ]
+        self.assertEqual(fleet_mac.mac_only_sessions(8317), [("22", "00:10", "Claude via Mac proxy")])
+        self.assertEqual(self.run.call_count, 2)
+        self.assertEqual(self.run.call_args_list[1].args[0], ["ps", "eww", "-p", "22", "-o", "command="])
+
     def test_pause_lists_containers_and_can_be_declined(self):
         self.run.side_effect = [self.result(), self.result("cli-proxy-api\nother-service\n")]
         with patch("builtins.input", return_value="n") as confirm:

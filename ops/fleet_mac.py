@@ -19,7 +19,9 @@ DESKTOP = ["docker", "--context", "desktop-linux"]
 DOCKER_TIMEOUT = 45
 ENGINE_WAIT = 120
 HEALTH_WAIT = 240
-CLAUDE_LAUNCHER = re.compile(r"(?:^|[\s/])claude_account_launcher\.mjs(?=\s|$)")
+# Only node running the launcher carries its routing environment. T3 also runs a /bin/sh
+# wrapper per session whose arguments name the launcher but whose environment ps cannot show.
+CLAUDE_LAUNCHER = re.compile(r"^(?:\S*/)?node\s+(?:\S*/)?claude_account_launcher\.mjs(?=\s|$)")
 CODEX = re.compile(r"^(?:\S*/)?codex(?:-[\w.-]+)?\s")
 
 
