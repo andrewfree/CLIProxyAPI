@@ -53,7 +53,7 @@ function routePlan(willOrigin) {
 const usage = [
   "Usage: set_t3_profile_routes.mjs [plan] --base-dir <dir> --will-origin <origin>",
   "       set_t3_profile_routes.mjs apply --base-dir <dir> --will-origin <origin> --steps <comma-separated list> --backup-dir <dir> [--named-account-keys-stdin | --no-key-check]",
-  "       set_t3_profile_routes.mjs rollback --base-dir <dir> --record <file>",
+  "       set_t3_profile_routes.mjs rollback --base-dir <dir> --record <file> [--steps <comma-separated list>]",
   "For redacted named-account keys, pass a JSON object keyed by profile ID on stdin. The keys are used only for verification.",
 ].join("\n");
 
@@ -92,7 +92,8 @@ function options(args) {
   };
   if (extra.length || !Object.hasOwn(flags, mode)) throw new RouteError(usage);
   const required = flags[mode];
-  const accepted = mode === "apply" ? [...required, "named-account-keys-stdin", "no-key-check"] : required;
+  const optional = { apply: ["named-account-keys-stdin", "no-key-check"], rollback: ["steps"] };
+  const accepted = [...required, ...(optional[mode] ?? [])];
   if (required.some((name) => !values[name]) || Object.keys(values).some((name) => !accepted.includes(name))) {
     throw new RouteError(usage);
   }
@@ -395,15 +396,18 @@ export async function runCli(args, {
     const rollback = mode === "rollback";
     const willOrigin = rollback ? undefined : willHTTPOrigin(values["will-origin"]);
     const record = rollback ? readRecord(values.record) : undefined;
-    const plan = routePlan(willOrigin);
-    const selected = record?.steps ?? Object.fromEntries((steps ?? Object.keys(plan)).map((step) => [step, plan[step]]));
+    const available = record?.steps ?? routePlan(willOrigin);
+    const selected = (steps ?? Object.keys(available)).map((step) => {
+      if (!Object.hasOwn(available, step)) throw new RouteError(`Rollback record has no changes for step ${step}.`);
+      return [step, available[step]];
+    });
     client = await connect(values["base-dir"], mode === "plan" ? ["orchestration:read"] : undefined);
     const read = async () => (await client.rpc("server.getConfig")).settings;
     const before = await read();
     if (!rollback) report.macReferences = macReferences(before);
     const changes = [];
     report.steps = {};
-    for (const [step, fields] of Object.entries(selected)) {
+    for (const [step, fields] of selected) {
       try {
         const prepared = prepareStep(before, step, fields, { rollback, willOrigin });
         report.steps[step] = prepared.map(({ label, from, to, needed }) => ({ field: label, from, to, needed }));
@@ -440,8 +444,6 @@ export async function runCli(args, {
       // T3's server patch replaces the full selection and the full provider map.
       if (changes.some(({ edit }) => edit.id === null)) patch.defaultModelSelection = next.defaultModelSelection;
       if (changes.some(({ edit }) => edit.id !== null)) patch.providerInstances = next.providerInstances;
-      const latest = await read();
-      if (!isDeepStrictEqual(latest, before)) throw new RouteError("T3 settings changed during preflight. Run the command again.");
       if (!rollback) {
         const dir = values["backup-dir"];
         fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -458,6 +460,8 @@ export async function runCli(args, {
         });
         report.record = recordFile;
       }
+      const latest = await read();
+      if (!isDeepStrictEqual(latest, before)) throw new RouteError("T3 settings changed during preflight. Run the command again.");
       await client.rpc("server.updateSettings", { patch });
       const after = await read();
       report.mismatches = Object.keys(patch).filter((key) => !isDeepStrictEqual(after[key], patch[key]));

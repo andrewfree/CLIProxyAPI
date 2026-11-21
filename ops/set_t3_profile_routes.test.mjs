@@ -152,7 +152,7 @@ function harness(t, settings = fixture(), options = {}) {
   return {
     ...service, ...network, backupDir, run,
     apply: (steps, extra = []) => run("apply", ["--steps", steps, "--backup-dir", backupDir, ...extra]),
-    rollback: (record) => run("rollback", ["--record", record]),
+    rollback: (record, extra = []) => run("rollback", ["--record", record, ...extra]),
   };
 }
 
@@ -470,6 +470,46 @@ test("rollback restores only recorded changes and leaves later unrelated changes
   assert.equal(h.requests.length, 3);
 });
 
+test("rollback --steps restores just the selected fields and checks those fields for drift", async (t) => {
+  const before = fixture();
+  const h = harness(t, before);
+  const { code, report } = await h.apply(allSteps, ["--no-key-check"]);
+  assert.equal(code, 0);
+  const names = h.saved.providerInstances.codex_cliproxy;
+  names.displayName = "Later unrelated edit";
+  const kimi = h.saved.providerInstances.codex_kimi_mac;
+  const appliedName = kimi.displayName;
+  kimi.displayName = "Later selected edit";
+
+  const selected = ["--steps", "default, kimi-fallback"];
+  const refused = await h.rollback(report.record, selected);
+  assert.equal(refused.code, 1);
+  assert.match(refused.report.steps["kimi-fallback"].error, /codex_kimi_mac.displayName: unexpected/);
+  assert.equal(h.writes.length, 1);
+
+  kimi.displayName = appliedName;
+  const expected = structuredClone(h.saved);
+  expected.defaultModelSelection = before.defaultModelSelection;
+  expected.providerInstances.codex_kimi_mac = before.providerInstances.codex_kimi_mac;
+  const rolledBack = await h.rollback(report.record, selected);
+  assert.equal(rolledBack.code, 0);
+  assert.deepEqual(Object.keys(rolledBack.report.steps), ["default", "kimi-fallback"]);
+  assert.deepEqual(h.saved, expected);
+  assert.equal((await h.rollback(report.record, selected)).code, 0);
+  assert.equal(h.writes.length, 2);
+});
+
+test("rollback --steps rejects a step missing from the record before connecting", async (t) => {
+  const h = harness(t);
+  const { code, report } = await h.apply("names");
+  assert.equal(code, 0);
+  const refused = await h.rollback(report.record, ["--steps", "names,default"]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.report.error, /Rollback record has no changes for step default/);
+  assert.equal(h.sessions.length, 1);
+  assert.equal(h.writes.length, 1);
+});
+
 test("rollback refuses unexpected state and records that request fields outside the plan", async (t) => {
   const h = harness(t);
   const { report } = await h.apply("names");
@@ -503,13 +543,18 @@ test("rollback retains the original step grouping for old records and enforces t
   assert.deepEqual(h.saved, settings);
 });
 
-test("preflight refuses settings drift before sending a replacement map", async (t) => {
+test("preflight writes both recovery files before the final read and refuses settings drift", async (t) => {
+  let filesAtSecondRead;
   const h = harness(t, fixture(), { onRead(saved, count) {
-    if (count === 2) saved.providerInstances.other.displayName = "Concurrent edit";
+    if (count === 2) {
+      filesAtSecondRead = fs.existsSync(h.backupDir) ? fs.readdirSync(h.backupDir).sort() : [];
+      saved.providerInstances.other.displayName = "Concurrent edit";
+    }
   } });
   const { code, report } = await h.apply("names");
   assert.equal(code, 1);
   assert.match(report.error, /changed during preflight/);
+  assert.deepEqual(filesAtSecondRead, [path.basename(report.record), path.basename(report.backup)]);
   assert.deepEqual(h.writes, []);
 });
 
