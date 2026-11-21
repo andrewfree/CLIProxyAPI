@@ -42,10 +42,12 @@ TEXT_SENT, TEXT_NOT_SENT, TEXT_UNCONFIRMED = 0, 20, 21
 MAC_DOWN = "Mac proxy down. Check the local fallback."
 MAC_RECOVERED = "Mac proxy reachable again."
 WILL_SSH_DOWN = "Will is not reachable over SSH from the Mac."
-RESUME_MAC = "Run `python3 ops/fleetctl.py mac resume` on the Mac."
+RESUME_MAC = ("Run `python3 ops/fleetctl.py mac resume` on the Mac. "
+              "Open Codex sessions and named-account profiles stay on Will.")
 WILL_DOWN_MAC_PAUSED = "Will proxy unreachable and the Mac fallback is paused. " + RESUME_MAC
-EGRESS_FALLBACK = "Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults."
+EGRESS_FALLBACK = "Select codex_cliproxy_mac for Codex sessions. claude_cliproxy fails over on network faults."
 EGRESS_MAC_PAUSED = "The Mac fallback is paused. " + RESUME_MAC
+WILL_SSH_MAC_PAUSED = WILL_SSH_DOWN + " " + EGRESS_MAC_PAUSED
 SSH_ARGS = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
             "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
             "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes"]
@@ -267,10 +269,11 @@ def quota_records(observed, previous, captured_at):
 
 
 def will_down_message(will, mac):
-    if mac["reachability"] == "paused":
-        return WILL_DOWN_MAC_PAUSED
+    mac_paused = mac["reachability"] == "paused"
     if will.get("ssh_unreachable"):
-        return WILL_SSH_DOWN
+        return WILL_SSH_MAC_PAUSED if mac_paused else WILL_SSH_DOWN
+    if mac_paused and unreachable(will) is True:
+        return WILL_DOWN_MAC_PAUSED
     if unreachable(mac) is not False:
         return "Will proxy unreachable."
     # The wrapper picks a host only when a Codex session starts.
@@ -323,17 +326,17 @@ def refresh_pending_health_alerts(state, hosts):
         return
     if mac_paused:
         pending.get("health_alerts", {}).pop("mac-unreachable", None)
-    old_fallback, new_fallback = ((EGRESS_FALLBACK, EGRESS_MAC_PAUSED) if mac_paused else
-                                  (EGRESS_MAC_PAUSED, EGRESS_FALLBACK))
+    fallback = EGRESS_MAC_PAUSED if mac_paused else EGRESS_FALLBACK
     messages = []
     for message in pending["messages"]:
         if mac_paused and message in (MAC_DOWN, MAC_RECOVERED):
             continue
-        if (message == WILL_DOWN_MAC_PAUSED or
-                (mac_paused and (message == WILL_SSH_DOWN or message.startswith("Will proxy unreachable.")))):
+        if (message.startswith("Will proxy unreachable and the Mac fallback is paused.")
+                or message == WILL_SSH_MAC_PAUSED
+                or (mac_paused and (message == WILL_SSH_DOWN or message.startswith("Will proxy unreachable.")))):
             message = will_down_message(hosts["will"], mac)
-        if message.startswith("Will egress down for ") and message.endswith(old_fallback):
-            message = message[:-len(old_fallback)] + new_fallback
+        if message.startswith("Will egress down for "):
+            message = message.partition(". ")[0] + ". " + fallback
         messages.append(message)
     pending["messages"] = messages
 
@@ -437,8 +440,12 @@ def daily_message(day, records, hosts, parity, seen_outages):
             lines.append(f"{'Will' if name == 'will' else 'Mac'} quota inventory incomplete.")
         if report["status"] == "unknown":
             lines.append(f"{'Will' if name == 'will' else 'Mac'} health incomplete.")
-    lines.extend([f"Parity: {parity.get('status', 'unknown')}.",
-                  "Outages since last summary: " + (", ".join(seen_outages) if seen_outages else "none observed") + "."])
+    mac = hosts.get("m5", {})
+    if mac.get("status") == "paused":
+        lines.append(f"Mac: paused since {display_time(mac['paused_at'])}; parity not checked")
+    else:
+        lines.append(f"Parity: {parity.get('status', 'unknown')}.")
+    lines.append("Outages since last summary: " + (", ".join(seen_outages) if seen_outages else "none observed") + ".")
     return "\n".join(lines)
 
 
@@ -592,7 +599,7 @@ def main(argv=None):
     args = parser.parse_args(args_in)
     try:
         command = shlex.split(os.environ.get("CLIPROXY_FLEET_NOTIFY_COMMAND", ""))
-        runtime = args.root / "ops/runtime/fleet"
+        runtime = fleet_mac.runtime_dir(args.root)
         runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
         with os.fdopen(os.open(runtime / "monitor.lock", os.O_CREAT | os.O_WRONLY, 0o600), "w") as lock:
             try:

@@ -769,7 +769,7 @@ def report(command, snapshots, exceptions, today):
     return output, int(failed)
 
 
-def main(argv=None):
+def main(argv=None, *, settings_path=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="check tracked pins or verify a shipped bundle (P0)")
@@ -787,7 +787,8 @@ def main(argv=None):
     mac_commands = mac.add_subparsers(dest="mac_command", required=True)
     pause = mac_commands.add_parser("pause", help="stop Docker Desktop and pause Mac recovery")
     pause.add_argument("--reason")
-    pause.add_argument("--force", action="store_true", help="bypass Will and session preflight refusals")
+    pause.add_argument("--will-origin", help="override the Will origin from the T3 Claude pool profile")
+    pause.add_argument("--force", action="store_true", help="bypass Will, session, and bundle preflight refusals")
     pause.add_argument("--yes", action="store_true", help="skip the Docker Desktop confirmation")
     mac_commands.add_parser("resume", help="start Docker Desktop and restore Mac recovery")
     mac_commands.add_parser("status", help="show the pause marker, Docker engine, and proxy health")
@@ -808,8 +809,13 @@ def main(argv=None):
                 from . import fleet_mac
             else:
                 import fleet_mac
-            return fleet_mac.command(args, hosts["m5"],
-                                     lambda name: probe(name, hosts, None, None, None, "health")["status"])
+            if settings_path is None:
+                settings_path = Path.home() / ".t3/userdata/settings.json"
+            return fleet_mac.command(
+                args, hosts["m5"],
+                lambda name: probe(name, hosts, None, None, None, "health").get("status"),
+                settings_path=settings_path,
+            )
         paths = read_json(OPS / "fleet/paths.json")
         release = read_json(OPS / "fleet-release.json")
         exceptions = read_json(OPS / "fleet/exceptions.json")
