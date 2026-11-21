@@ -93,7 +93,7 @@ private deployment backup after confirming no task-owned client uses it.
 
 `CLIPROXY_FALLBACK_URL` names a second CLIProxy origin for a shared-pool
 profile. On the Mac, `claude_cliproxy` uses it for Will-to-Mac failover,
-and `codex_cliproxy` has used it for session-start failover since November 18 (see [Codex failover](#codex-failover)).
+and `codex_cliproxy` has used it for session-start failover since November 18, and `codex_kimi_mac` since November 21 (see [Codex failover](#codex-failover)).
 The Claude launcher refuses it on a named account route, because a pinned
 account must never move to another host. Without the variable, the Claude
 launcher keeps the default connection agent and starts no timers or probes.
@@ -298,7 +298,8 @@ rollout, closed-port drill and rollback.
 `com.rever.cliproxy-watchdog` runs at login and every 120 seconds. While
 `ops/runtime/fleet/mac-paused.json` exists under the Mac instance root, the
 watchdog skips every check and recovery action. The marker stays in place
-until `mac resume` confirms the Docker engine is up. See
+until `mac resume` confirms the Docker engine is up. A cycle that starts while
+`mac pause` or `mac resume` holds the transition lock is skipped. See
 [Quitting Docker on the Mac](FLEET.md#quitting-docker-on-the-mac).
 
 During normal operation the watchdog performs these checks in order:

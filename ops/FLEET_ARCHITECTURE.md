@@ -37,10 +37,10 @@ secrets and logs.
                                                                       |   by address: M1 only        OpenAI Codex
                                                                       +-> Mac   (fallback)           Kimi
    claude_cliproxy_mac (shared pool) -> launcher, pool mode ------------> Mac                        Z.ai Coding Plan
-                                                                          Docker Desktop, arm64     Cursor plugin
-   3 named Claude profiles -----------> launcher, account prefix -------> Will (no fallback)        NVIDIA
-   codex_cliproxy, codex_kimi_mac -----> codex_fallback_launcher.mjs ---> Will  (tailnet name);
-                                        picks a host at session start      Mac if Will fails at start
+                                                                          Docker Desktop, arm64      Cursor plugin
+   3 named Claude profiles -----------> launcher, account prefix -------> Will (no fallback)         NVIDIA
+   codex_cliproxy, codex_kimi_mac ----> codex_fallback_launcher.mjs ----> Will  (tailnet name);
+                                        picks a host at session start     Mac if Will fails at start
    codex_cliproxy_mac ----------------- (no launcher, one base_url) ----> Mac   127.0.0.1:8317
 
  Will, T3
@@ -568,7 +568,7 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | Location | What it is | Consequence |
 | --- | --- | --- |
 | `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. Since the November 18 cutover the installed jobs and new T3 sessions use the bundle, not its checkout paths. | A pull, checkout, or uncommitted edit no longer changes a job or new session. Compose inputs here are still live. |
-| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`, and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
 | `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
@@ -696,11 +696,11 @@ command share a lock so a recovery cannot race the shutdown. The marker tells la
 cycles to skip all checks and recovery, even if the stop fails. It also tells the monitor to
 report the Mac as paused, skip collection from the Mac and parity, and suppress Mac-down
 alerts. `mac resume` waits for Docker before clearing the marker so recovery can run again.
+A watchdog cycle that starts while `mac pause` or `mac resume` holds the lock is skipped.
 
 The engine state is `unknown` when the Docker probe could not complete. A running engine
 can be slow under memory pressure. Pause requires a definite engine state at its final check
-and skips the stop only when Docker is `down`. Resume waits for the engine to report `up`
-before clearing the marker. See
+and skips the stop only when Docker is `down`. See
 [Quitting Docker on the Mac](FLEET.md#quitting-docker-on-the-mac).
 
 ## 3. Problem, fix, location, evidence
