@@ -17,7 +17,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from ops import fleet_monitor as monitor, fleet_monitor_probe as probe
+from ops import fleet_mac, fleet_monitor as monitor, fleet_monitor_probe as probe
 
 
 NOW = datetime(2026, 11, 18, 18, tzinfo=timezone.utc)
@@ -504,13 +504,16 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("New codex_cliproxy sessions start on the Mac", opening)
         # The wrapper picks a host only at session start, so open sessions need a restart.
         self.assertIn("restart open ones or use codex_cliproxy_mac", opening)
-        self.assertNotIn("Select the _mac profile", opening)
+        self.assertNotIn("Select codex_cliproxy_mac for Codex sessions", opening)
         self.assertEqual(alerts(clean), [])
         self.assertEqual(alerts(clean), ["Will health checks recovered."])
         # Egress loss leaves /healthz green, which the Codex wrapper cannot see.
         egress_down = host_report(egress="down")
         self.assertEqual(alerts(egress_down), [])
-        self.assertIn("Select the _mac profile for Codex-family", alerts(egress_down)[0])
+        self.assertEqual(alerts(egress_down), [
+            "Will egress down for api.anthropic.com. "
+            "Select codex_cliproxy_mac for Codex sessions. claude_cliproxy fails over on network faults."
+        ])
 
     def test_will_down_text_promises_the_mac_only_when_the_mac_is_healthy(self):
         state = {}
@@ -524,6 +527,87 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(monitor.status_alerts(state, both_down, None), [])
         self.assertEqual(monitor.status_alerts(state, both_down, None),
                          ["Will proxy unreachable.", "Mac proxy down. Check the local fallback."])
+
+    def test_paused_ticks_skip_mac_collection_and_resume_without_recovery_text(self):
+        with (tempfile.TemporaryDirectory() as directory,
+              patch.object(monitor, "DAILY_AT", time(23, 59)),
+              patch.object(monitor, "run_host") as run,
+              patch.object(monitor, "run_parity", return_value={"status": "equal"}) as parity,
+              patch.object(monitor, "notify_message", return_value=monitor.TEXT_SENT) as notify):
+            root = Path(directory)
+            fleet_mac.write_marker(root, None, ["cli-proxy-api"])
+            marker = fleet_mac.read_marker(root)
+            monitor.write_json(root / "monitor-state.json", {
+                "salt": SALT, "health_alerts": {"mac-unreachable": True},
+                "pending_alerts": {"messages": [monitor.MAC_DOWN],
+                                   "health_alerts": {"mac-unreachable": True}},
+            })
+            run.return_value = dict(host_report(state="unreachable"), ssh_unreachable=True)
+            for offset in (0, 300):
+                with patch.object(monitor, "now_utc", return_value=NOW + timedelta(seconds=offset)):
+                    monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
+            self.assertEqual([call.args[0]["name"] for call in run.call_args_list], ["will", "will"])
+            parity.assert_not_called()
+            notify.assert_called_once_with(
+                "Will is not reachable over SSH from the Mac. The Mac fallback is paused. "
+                "Run `python3 ops/fleetctl.py mac resume` on the Mac. "
+                "Open Codex sessions and named-account profiles stay on Will.", [])
+            health = monitor.read_json(root / "health.json", {})["hosts"]["m5"]
+            self.assertEqual(health["status"], "paused")
+            self.assertEqual(health["reachability"], "paused")
+            self.assertEqual(health["paused_at"], marker["paused_at"])
+            self.assertEqual(health["quota_errors"], [])
+
+            fleet_mac.marker_path(root).unlink()
+            run.return_value = host_report()
+            for offset in (600, 900):
+                with patch.object(monitor, "now_utc", return_value=NOW + timedelta(seconds=offset)):
+                    monitor.tick(root, deepcopy(HOSTS), root, [], no_notify=False)
+            self.assertEqual([call.args[0] for call in notify.call_args_list][1:],
+                             ["Will health checks recovered."])
+            self.assertEqual(monitor.read_json(root / "health.json", {})["hosts"]["m5"]["status"], "ok")
+            parity.assert_called_once()
+
+    def test_pause_rewrites_a_pending_will_alert_that_promised_the_mac(self):
+        pending = {"messages": ["Will proxy unreachable. New codex_cliproxy sessions start on the Mac.",
+                                monitor.MAC_RECOVERED, "other alert"]}
+        state = {"pending_alerts": pending}
+        will = host_report(state="unreachable")
+        monitor.refresh_pending_health_alerts(state, {"m5": host_report(state="paused"), "will": will})
+        self.assertEqual(pending["messages"], [
+            "Will proxy unreachable and the Mac fallback is paused. "
+            "Run `python3 ops/fleetctl.py mac resume` on the Mac. "
+            "Open Codex sessions and named-account profiles stay on Will.", "other alert",
+        ])
+        monitor.refresh_pending_health_alerts(state, {"m5": host_report(), "will": will})
+        self.assertEqual(pending["messages"],
+                         [monitor.will_down_message(will, host_report()), "other alert"])
+
+    def test_pause_updates_and_clears_pending_ssh_and_egress_hints(self):
+        egress = "Will egress down for claude. "
+        pending = {"messages": [
+            "Will is not reachable over SSH from the Mac.",
+            egress + "Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults.",
+        ]}
+        state = {"pending_alerts": pending}
+        will = dict(host_report(state="unreachable"), ssh_unreachable=True)
+        monitor.refresh_pending_health_alerts(state, {"m5": host_report(state="paused"), "will": will})
+        self.assertEqual(pending["messages"], [
+            monitor.WILL_SSH_MAC_PAUSED, egress + monitor.EGRESS_MAC_PAUSED,
+        ])
+        monitor.refresh_pending_health_alerts(state, {"m5": host_report(), "will": will})
+        self.assertEqual(pending["messages"], [monitor.WILL_SSH_DOWN, egress + monitor.EGRESS_FALLBACK])
+
+    def test_daily_summary_reports_pause_time_instead_of_a_previous_parity_result(self):
+        paused_at = probe.iso(NOW)
+        mac = monitor.host_health(monitor.paused_report({"paused_at": paused_at}))
+        parity = {"status": "equal"}
+        summary = monitor.daily_message("fixture day", [], {"m5": mac}, parity, [])
+        self.assertIn(f"Mac: paused since {monitor.display_time(paused_at)}; parity not checked", summary)
+        self.assertNotIn("Parity: equal.", summary)
+        summary = monitor.daily_message("fixture day", [], {"m5": monitor.host_health(host_report())}, parity, [])
+        self.assertIn("Parity: equal.", summary)
+        self.assertNotIn("Mac: paused", summary)
 
     def test_short_cooldowns_share_one_episode_until_an_hour_quiet(self):
         state = {}
@@ -724,7 +808,7 @@ class MonitorTests(unittest.TestCase):
     def test_monitor_modules_stay_compatible_with_apple_python_39(self):
         # /usr/bin/python3 is 3.9: no newer syntax, and no `X | Y` annotations evaluated at runtime.
         for name in ("fleet_monitor", "fleet_monitor_probe", "fleet_quota_chart", "fleetctl",
-                     "fleet_routing", "claude_usage_resets"):
+                     "fleet_mac", "fleet_routing", "claude_usage_resets"):
             source = (monitor.OPS / (name + ".py")).read_text(encoding="utf-8")
             tree = ast.parse(source, feature_version=(3, 9))
             if "from __future__ import annotations" in source:

@@ -1,21 +1,18 @@
 from contextlib import redirect_stderr, redirect_stdout
 import copy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
-import importlib.util
 import io
 import json
 from pathlib import Path
+import stat
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
-
-SPEC = importlib.util.spec_from_file_location("fleetctl", Path(__file__).with_name("fleetctl.py"))
-fleet = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(fleet)
+from ops import fleet_mac, fleetctl as fleet
 
 NONCE = b"private fixture nonce"
 TODAY = date(2026, 11, 18)
@@ -930,3 +927,459 @@ class FleetCTLTest(unittest.TestCase):
         report, code = self.report(mac, will)
         self.assertEqual(code, 1)
         self.assertIn("P3/max-retry-interval", {row["surface"] for row in report["drift"]})
+
+
+class MacCommandsTest(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.hosts = fleet.read_json(fleet.OPS / "fleet/hosts.json")
+        self.hosts["m5"]["instance_root"] = str(self.root)
+        self.bundle = self.root / "bundle"
+        self.bundle.mkdir()
+        self.hosts["m5"]["bundle_root"] = str(self.bundle)
+        (self.bundle / "fleet_mac.py").touch()
+        for name in ("cliproxy_watchdog.py", "fleet_monitor.py"):
+            (self.bundle / name).write_text("fleet_mac.read_marker(root)", encoding="utf-8")
+        self.settings = self.root / "settings.json"
+        self.settings.write_text(json.dumps({"providerInstances": {"claude_cliproxy": {"environment": [
+            {"name": "CLIPROXY_FALLBACK_URL", "value": "http://localhost:8317"},
+            {"name": "ANTHROPIC_API_KEY", "value": CANARY, "sensitive": True},
+            {"name": "CLIPROXY_BASE_URL", "value": "https://will.invalid:8317/", "sensitive": False},
+        ]}}}), encoding="utf-8")
+        for mock in (patch.object(fleet, "read_json", return_value=self.hosts),
+                     patch.object(fleet_mac.sys, "platform", "darwin")):
+            mock.start()
+            self.addCleanup(mock.stop)
+        probe = patch.object(fleet, "probe", return_value={"status": "ok"})
+        self.probe = probe.start()
+        self.addCleanup(probe.stop)
+        run = patch.object(fleet_mac.subprocess, "run", side_effect=AssertionError("Unexpected process"))
+        self.run = run.start()
+        self.addCleanup(run.stop)
+        for protocol in ("HTTP", "HTTPS"):
+            connect = patch.object(fleet_mac.http.client, protocol + "Connection")
+            connection = connect.start()
+            self.addCleanup(connect.stop)
+            response = connection.return_value.getresponse.return_value
+            response.status = 200
+            response.read.return_value = b'{"status":"ok","extra":true}'
+
+    def invoke(self, *args):
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            code = fleet.main(["mac", *args], settings_path=self.settings)
+        return code, out.getvalue()
+
+    @staticmethod
+    def result(stdout="", code=0):
+        return subprocess.CompletedProcess([], code, stdout, "private subprocess output")
+
+    def write_monitor_health(self, checked_at, status):
+        runtime = fleet_mac.runtime_dir(self.root)
+        runtime.mkdir(parents=True, exist_ok=True)
+        (runtime / "health.json").write_text(json.dumps({
+            "checked_at": checked_at.isoformat(), "hosts": {"will": {"status": status}},
+        }), encoding="utf-8")
+
+    def test_pause_refuses_when_will_is_down(self):
+        self.probe.return_value = {"status": "unreachable"}
+        self.run.side_effect = [self.result()]
+        code, output = self.invoke("pause", "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Will proxy", output)
+        self.assertIn("--force", output)
+        self.probe.assert_called_once_with("will", self.hosts, None, None, None, "health")
+        self.assertEqual(self.run.call_args.args[0][0], "ps")
+        self.assertIn("Mac-only sessions: none.", output)
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+
+    def test_pause_probes_the_will_client_origin_from_settings(self):
+        self.run.side_effect = [self.result(), self.result(code=1), self.result(code=1), self.result()]
+        code, output = self.invoke("pause", "--yes")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(output.count("Will proxy at client origin: ok"), 2)
+        self.assertNotIn(CANARY, output)
+        connect = fleet_mac.http.client.HTTPSConnection
+        self.assertEqual(connect.call_count, 2)
+        connect.assert_called_with("will.invalid", 8317, timeout=3)
+        connect.return_value.request.assert_called_with("GET", "/healthz", headers={"Accept": "application/json"})
+        self.assertEqual(connect.return_value.close.call_count, 2)
+        fleet_mac.http.client.HTTPConnection.assert_not_called()
+
+    def test_pause_explicit_will_origin_overrides_settings(self):
+        self.settings.unlink()
+        self.run.side_effect = [self.result(), self.result(code=1), self.result(code=1), self.result()]
+        code, output = self.invoke("pause", "--yes", "--will-origin", "http://other-will.invalid")
+        self.assertEqual(code, 0, output)
+        fleet_mac.http.client.HTTPConnection.assert_called_with("other-will.invalid", None, timeout=3)
+        fleet_mac.http.client.HTTPSConnection.assert_not_called()
+
+    def test_pause_requires_a_non_loopback_http_origin(self):
+        for origin in ("http://127.1:8317", "http://localhost.:8317", "http://[::1]:8317",
+                       "http://[::ffff:127.0.0.1]:8317", "ftp://will.invalid",
+                       "https://will.invalid:bad", "https://will.invalid/v1",
+                       "https://will.invalid?query", f"https://{CANARY}@will.invalid"):
+            with self.subTest(origin=origin):
+                self.run.side_effect = [self.result()]
+                code, output = self.invoke("pause", "--yes", "--will-origin", origin)
+                self.assertNotEqual(code, 0)
+                self.assertIn("Will client origin unavailable or invalid", output)
+                self.assertNotIn(CANARY, output)
+        fleet_mac.http.client.HTTPConnection.assert_not_called()
+        fleet_mac.http.client.HTTPSConnection.assert_not_called()
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+
+    def test_pause_does_not_read_a_sensitive_origin_value(self):
+        data = json.loads(self.settings.read_text(encoding="utf-8"))
+        data["providerInstances"]["claude_cliproxy"]["environment"][-1]["sensitive"] = True
+        self.settings.write_text(json.dumps(data), encoding="utf-8")
+        self.run.side_effect = [self.result()]
+        code, output = self.invoke("pause", "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Will client origin unavailable or invalid", output)
+        fleet_mac.http.client.HTTPSConnection.assert_not_called()
+
+    def test_pause_refuses_when_client_health_response_fails_launcher_rule(self):
+        connection = fleet_mac.http.client.HTTPSConnection.return_value
+        response = connection.getresponse.return_value
+        for status, body in ((302, b'{"status":"ok"}'), (503, b'{"status":"ok"}'),
+                             (200, b'{"status":"down"}'), (200, b'{}'), (200, b'not json'),
+                             (200, b'null'), (200, b'{"status":"ok"}' + b" " * 4096),
+                             (200, TimeoutError())):
+            with self.subTest(status=status, body=type(body)):
+                self.run.side_effect = [self.result()]
+                response.status = status
+                response.read.side_effect = [body]
+                code, output = self.invoke("pause", "--yes")
+                self.assertNotEqual(code, 0)
+                self.assertIn("Will proxy at client origin: unhealthy", output)
+                self.assertIn("--force", output)
+                self.assertIsNone(fleet_mac.read_marker(self.root))
+        response.read.assert_called_with(4097)
+
+    def test_pause_refuses_fresh_unhealthy_monitor_report_and_accepts_stale_report(self):
+        now = datetime(2026, 11, 21, tzinfo=timezone.utc)
+        with patch.object(fleet_mac, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            self.write_monitor_health(now - timedelta(minutes=20), "egress-down")
+            self.run.side_effect = [self.result()]
+            code, output = self.invoke("pause", "--yes")
+            self.assertNotEqual(code, 0)
+            self.assertIn("Fleet monitor Will status: unhealthy", output)
+            self.assertIsNone(fleet_mac.read_marker(self.root))
+
+            self.write_monitor_health(now - timedelta(minutes=20, seconds=1), "egress-down")
+            self.run.side_effect = [self.result(), self.result(code=1), self.result(code=1), self.result()]
+            code, output = self.invoke("pause", "--yes")
+            self.assertEqual(code, 0, output)
+            self.assertIn("Fleet monitor health report is stale", output)
+            self.assertIsNotNone(fleet_mac.read_marker(self.root))
+
+    def test_pause_records_already_down_engine_without_listing_or_stopping(self):
+        self.run.side_effect = [self.result(), self.result(code=1), self.result(code=1), self.result()]
+        code, output = self.invoke("pause", "--yes")
+        self.assertEqual(code, 0, output)
+        self.assertIn("Docker engine was already down", output)
+        self.assertIn("Fleet monitor health report is missing", output)
+        self.assertIsNone(fleet_mac.read_marker(self.root)["containers"])
+        self.assertEqual([call.args[0][:4] for call in self.run.call_args_list], [
+            ["ps", "-axww", "-o", "pid="],
+            ["docker", "--context", "desktop-linux", "info"],
+            ["docker", "--context", "desktop-linux", "info"],
+            ["ps", "-axww", "-o", "pid="],
+        ])
+
+    def test_engine_probe_timeout_and_os_error_are_unknown_not_down(self):
+        self.run.side_effect = [subprocess.TimeoutExpired("docker info", 5), FileNotFoundError(),
+                                self.result(code=1), self.result()]
+        self.assertEqual(fleet_mac.engine_state(), "unknown")
+        self.assertEqual(fleet_mac.engine_state(), "unknown")
+        self.assertEqual(fleet_mac.engine_state(), "down")
+        self.assertEqual(fleet_mac.engine_state(), "up")
+        self.run.side_effect = [subprocess.TimeoutExpired("docker info", 5)]
+        self.assertFalse(fleet_mac.engine_up())
+
+    def test_pause_refuses_when_the_engine_is_too_slow_to_answer_inside_the_lock(self):
+        # A running engine that times out on docker info must not be recorded as already down.
+        self.run.side_effect = [self.result(), self.result(), self.result("cli-proxy-api\n"),
+                                subprocess.TimeoutExpired("docker info", 5)]
+        code, output = self.invoke("pause", "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Could not tell whether the Docker engine is running", output)
+        self.assertNotIn("already down", output)
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+        self.assertNotIn(["docker", "desktop", "stop"], [call.args[0] for call in self.run.call_args_list])
+
+    def test_pause_refuses_when_the_engine_stops_after_its_containers_were_listed(self):
+        self.run.side_effect = [self.result(), self.result(), self.result("cli-proxy-api\n"),
+                                self.result(code=1)]
+        code, output = self.invoke("pause", "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Docker engine stopped during preflight", output)
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+
+    def test_pause_leaves_a_newly_started_engine_up_for_container_review(self):
+        self.run.side_effect = [self.result(), self.result(code=1), self.result()]
+        with patch("builtins.input", return_value="yes") as confirm:
+            code, output = self.invoke("pause")
+        self.assertNotEqual(code, 0)
+        confirm.assert_called_once_with("Pause Mac fallback while Docker is down? [y/N] ")
+        self.assertIn("Docker engine started during preflight", output)
+        self.assertEqual(self.run.call_count, 3)
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+
+    def test_pause_refuses_mac_only_sessions_and_only_displays_safe_fields(self):
+        launcher = "/opt/homebrew/bin/node /test/claude_account_launcher.mjs"
+        self.run.side_effect = [
+            self.result(
+                f"11 01:15 {launcher}\n12 00:22 {launcher}\n"
+                '13 03:00 /opt/homebrew/bin/codex -c '
+                'model_providers.cliproxy.base_url="http://127.0.0.1:8317/v1" app-server\n'
+                '14 03:01 /opt/homebrew/bin/codex -c '
+                'model_providers.cliproxy.base_url="https://will.invalid:8317/v1" app-server\n'
+                '15 03:02 /opt/homebrew/bin/codex -c base_url="http://127.0.0.1:8317/v1" exec\n'
+            ),
+            self.result(launcher + " CLIPROXY_BASE_URL=http://[::1]:8317 PRIVATE=" + CANARY),
+            self.result(launcher + " CLIPROXY_BASE_URL=http://localhost:8317 "
+                        "CLIPROXY_FALLBACK_URL=https://will.invalid:8317 PRIVATE=" + CANARY),
+        ]
+        code, output = self.invoke("pause", "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("11 01:15 Claude", output)
+        self.assertIn("13 03:00 Codex", output)
+        for item in ("12 00:22", "14 03:01", "15 03:02", CANARY, "CLIPROXY_BASE_URL"):
+            self.assertNotIn(item, output)
+        self.assertEqual(self.run.call_count, 3)
+        self.assertEqual(self.run.call_args_list[1].args[0],
+                         ["ps", "eww", "-p", "11", "-o", "command="])
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+
+    def test_session_scan_ignores_the_t3_shell_wrapper_that_names_the_launcher(self):
+        # T3's per-session /bin/sh wrapper names the launcher in its arguments, but ps eww shows it
+        # no environment. Only node running the launcher is inspected.
+        launcher = "node /test/claude_account_launcher.mjs --resume=abc"
+        wrapper = ("/bin/sh -c read -r _ <&4 || exit 1\\012exec 4<&-\\012 sh "
+                   "/test/claude_account_launcher.mjs --resume=abc")
+        self.run.side_effect = [
+            self.result(f"21 00:10 {wrapper}\n22 00:10 {launcher}\n"),
+            self.result(launcher + " CLIPROXY_BASE_URL=http://127.0.0.1:8317 PRIVATE=" + CANARY),
+        ]
+        self.assertEqual(fleet_mac.mac_only_sessions(8317), [("22", "00:10", "Claude via Mac proxy")])
+        self.assertEqual(self.run.call_count, 2)
+        self.assertEqual(self.run.call_args_list[1].args[0], ["ps", "eww", "-p", "22", "-o", "command="])
+
+    def test_codex_scan_matches_loopback_variants_on_mac_port(self):
+        urls = (
+            '"http://localhost:8317/v1/"',
+            "'http://[::1]:8317/v1'",
+            "http://127.0.0.2:8317/v1/",
+            '"http://127.1:8317/v1"',
+            '"http://[::ffff:127.0.0.1]:8317/v1"',
+            '"http://localhost:8318/v1"',
+            '"http://will.invalid:8317/v1/"',
+            '"http://127.0.0.1:8317/v10"',
+            '"http://localhost:invalid/v1"',
+        )
+        self.run.side_effect = [self.result("".join(
+            f"{pid} 00:10 /opt/homebrew/bin/codex -c model_providers.cliproxy.base_url={url} app-server\n"
+            for pid, url in enumerate(urls, 11)
+        ))]
+        self.assertEqual(fleet_mac.mac_only_sessions(8317),
+                         [(str(pid), "00:10", "Codex via Mac proxy") for pid in range(11, 16)])
+
+    def test_pause_lists_containers_and_can_be_declined(self):
+        self.run.side_effect = [self.result(), self.result(), self.result("cli-proxy-api\nother-service\n")]
+        with (patch("builtins.input", return_value="n") as confirm,
+              patch.object(fleet_mac, "transition_lock") as transition):
+            code, output = self.invoke("pause")
+        self.assertNotEqual(code, 0)
+        self.assertIn("cli-proxy-api", output)
+        self.assertIn("other-service", output)
+        confirm.assert_called_once()
+        transition.assert_not_called()
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+        self.assertEqual(self.run.call_count, 3)
+
+    def test_pause_rechecks_will_and_sessions_under_lock_after_confirmation(self):
+        for failure in ("Will", "new Mac-only session"):
+            with self.subTest(failure=failure):
+                events = []
+                old_lock = fleet_mac.transition_lock
+
+                def probe(name, *args):
+                    events.append("will")
+                    with old_lock(self.root, blocking=False) as acquired:
+                        self.assertEqual(acquired, "confirm" not in events)
+                    return {"status": "unreachable" if failure == "Will" and not acquired else "ok"}
+
+                def run(argv, **kwargs):
+                    if argv[0] == "ps":
+                        events.append("sessions")
+                        if "confirm" in events:
+                            with old_lock(self.root, blocking=False) as acquired:
+                                self.assertFalse(acquired)
+                            if failure == "new Mac-only session":
+                                return self.result("13 00:01 codex -c base_url=http://localhost:8317/v1/ app-server")
+                        return self.result()
+                    if argv[3:4] == ["info"]:
+                        return self.result()
+                    self.assertEqual(argv[3:4], ["ps"])
+                    events.append("containers")
+                    return self.result("cli-proxy-api")
+
+                def confirm(prompt):
+                    transition.assert_not_called()
+                    events.append("confirm")
+                    return "yes"
+
+                self.probe.side_effect = probe
+                self.run.side_effect = run
+                with (patch.object(fleet_mac, "transition_lock", wraps=old_lock) as transition,
+                      patch("builtins.input", side_effect=confirm)):
+                    code, output = self.invoke("pause")
+                self.assertNotEqual(code, 0)
+                self.assertIn("Rechecking Will and session routes", output)
+                self.assertEqual(events, ["will", "sessions", "containers", "confirm", "will", "sessions"])
+                transition.assert_called_once_with(self.root)
+                self.assertIsNone(fleet_mac.read_marker(self.root))
+
+    def test_pause_requires_marker_support_in_all_bundle_files(self):
+        for name in ("fleet_mac.py", "cliproxy_watchdog.py", "fleet_monitor.py"):
+            with self.subTest(name=name):
+                bundle_file = self.bundle / name
+                original = bundle_file.read_text(encoding="utf-8")
+                if name == "fleet_mac.py":
+                    bundle_file.unlink()
+                else:
+                    bundle_file.write_text("# Old bundle script", encoding="utf-8")
+                self.run.side_effect = [self.result(), self.result(code=1), self.result(code=1)]
+                code, output = self.invoke("pause", "--yes")
+                self.assertNotEqual(code, 0)
+                self.assertIn("Ship the bundle first", output)
+                self.assertIsNone(fleet_mac.read_marker(self.root))
+                bundle_file.write_text(original, encoding="utf-8")
+
+    def test_forced_pause_writes_private_marker_before_graceful_stop(self):
+        self.probe.return_value = {"status": "unreachable"}
+        fleet_mac.http.client.HTTPSConnection.return_value.getresponse.return_value.status = 503
+        self.write_monitor_health(datetime.now(timezone.utc), "egress-down")
+        (self.bundle / "fleet_mac.py").unlink()
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if argv[0] == "ps":
+                return self.result('13 03:00 codex app-server -c base_url="http://127.0.0.1:8317/v1"\n')
+            if argv[3:4] == ["ps"]:
+                return self.result("cli-proxy-api\nother-service\n")
+            if argv == ["docker", "desktop", "stop"]:
+                marker = fleet_mac.read_marker(self.root)
+                self.assertEqual(marker["containers"], ["cli-proxy-api", "other-service"])
+                self.assertEqual(marker["reason"], "maintenance")
+                self.assertEqual(datetime.fromisoformat(marker["paused_at"]).utcoffset(),
+                                 timezone.utc.utcoffset(None))
+                self.assertEqual(stat.S_IMODE(fleet_mac.marker_path(self.root).stat().st_mode), 0o600)
+                self.assertGreater(kwargs["timeout"], 0)
+                return self.result()
+            self.assertEqual(argv[:4], ["docker", "--context", "desktop-linux", "info"])
+            return self.result(code=int(["docker", "desktop", "stop"] in calls))
+
+        self.run.side_effect = run
+        code, output = self.invoke("pause", "--force", "--yes", "--reason", "maintenance")
+        self.assertEqual(code, 0, output)
+        self.assertIn("Docker engine is down", output)
+        self.assertIn("13 03:00 Codex", output)
+        self.assertIn("Ship the bundle first", output)
+        self.assertEqual(output.count("Will proxy at client origin: unhealthy"), 2)
+        self.assertEqual(output.count("Fleet monitor Will status: unhealthy"), 2)
+        self.assertEqual(len(calls), 7)
+
+    def test_stop_failure_keeps_marker_for_retry(self):
+        self.run.side_effect = [self.result(), self.result(), self.result("cli-proxy-api\n"),
+                                self.result(), self.result(),
+                                subprocess.TimeoutExpired(["docker", "desktop", "stop"], 45)]
+        code, output = self.invoke("pause", "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("marker remains", output)
+        self.assertEqual(fleet_mac.read_marker(self.root)["containers"], ["cli-proxy-api"])
+
+    def test_resume_waits_for_engine_then_clears_marker_before_health(self):
+        fleet_mac.write_marker(self.root, None, ["cli-proxy-api"])
+        calls = []
+
+        def run(argv, **kwargs):
+            self.assertIsNotNone(fleet_mac.read_marker(self.root))
+            if argv == ["docker", "desktop", "start", "--detach"]:
+                calls.append("start")
+                return self.result()
+            self.assertEqual(argv[:4], ["docker", "--context", "desktop-linux", "info"])
+            calls.append("engine")
+            return self.result(code=0 if len(calls) == 4 else 1)
+
+        def health(name, *args):
+            calls.append("health")
+            self.assertIsNone(fleet_mac.read_marker(self.root))
+            self.assertEqual(name, "m5")
+            with fleet_mac.transition_lock(self.root, blocking=False) as acquired:
+                self.assertTrue(acquired)
+            return {"status": "ok"}
+
+        self.run.side_effect = run
+        self.probe.side_effect = health
+        with patch.object(fleet_mac.time, "sleep") as sleep:
+            code, output = self.invoke("resume")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, ["engine", "start", "engine", "engine", "health"])
+        sleep.assert_called_once()
+        self.assertIn("Mac proxy is healthy", output)
+
+    def test_resume_engine_wait_expiry_leaves_marker(self):
+        fleet_mac.write_marker(self.root, None, [])
+        self.run.side_effect = [self.result(code=1), self.result(), self.result(code=1)]
+        with patch.object(fleet_mac.time, "monotonic", side_effect=[0, 1, 1_000]):
+            code, output = self.invoke("resume")
+        self.assertNotEqual(code, 0)
+        self.assertIn("marker remains", output)
+        self.assertIsNotNone(fleet_mac.read_marker(self.root))
+        self.probe.assert_not_called()
+
+    def test_resume_waits_for_a_slow_engine_without_starting_it_again(self):
+        fleet_mac.write_marker(self.root, None, [])
+        self.run.side_effect = [subprocess.TimeoutExpired("docker info", 5), self.result()]
+        code, output = self.invoke("resume")
+        self.assertEqual(code, 0, output)
+        self.assertNotIn(["docker", "desktop", "start", "--detach"],
+                         [call.args[0] for call in self.run.call_args_list])
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+
+    def test_resume_skips_start_when_engine_is_already_up(self):
+        fleet_mac.write_marker(self.root, None, [])
+        self.run.side_effect = [self.result()]
+        code, output = self.invoke("resume")
+        self.assertEqual(code, 0, output)
+        self.run.assert_called_once()
+        self.assertEqual(self.run.call_args.args[0][:4], ["docker", "--context", "desktop-linux", "info"])
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+        self.probe.assert_called_once_with("m5", self.hosts, None, None, None, "health")
+
+    def test_status_reports_pause_timestamp_engine_and_both_hosts(self):
+        fleet_mac.write_marker(self.root, None, [])
+        marker = fleet_mac.read_marker(self.root)
+        self.run.side_effect = [self.result(code=1)]
+        self.probe.side_effect = [{"status": "unreachable"}, {"status": "ok"}]
+        code, output = self.invoke("status")
+        self.assertEqual(code, 0, output)
+        self.assertIn("Mac paused since " + marker["paused_at"], output)
+        self.assertIn("Docker engine: down", output)
+        self.assertNotIn("Docker is running while paused", output)
+        self.assertIn("Mac proxy: unreachable", output)
+        self.assertIn("Will proxy: ok", output)
+
+    def test_status_warns_when_the_engine_is_up_with_a_marker(self):
+        fleet_mac.write_marker(self.root, None, [])
+        self.run.side_effect = [self.result()]
+        code, output = self.invoke("status")
+        self.assertEqual(code, 0, output)
+        self.assertIn("Docker is running while paused; run mac resume or mac pause again", output)
