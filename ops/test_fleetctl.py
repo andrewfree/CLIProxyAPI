@@ -1091,10 +1091,34 @@ class MacCommandsTest(unittest.TestCase):
             ["ps", "-axww", "-o", "pid="],
         ])
 
-    def test_engine_probe_timeout_and_os_error_mean_down(self):
-        self.run.side_effect = [subprocess.TimeoutExpired("docker info", 5), FileNotFoundError()]
+    def test_engine_probe_timeout_and_os_error_are_unknown_not_down(self):
+        self.run.side_effect = [subprocess.TimeoutExpired("docker info", 5), FileNotFoundError(),
+                                self.result(code=1), self.result()]
+        self.assertEqual(fleet_mac.engine_state(), "unknown")
+        self.assertEqual(fleet_mac.engine_state(), "unknown")
+        self.assertEqual(fleet_mac.engine_state(), "down")
+        self.assertEqual(fleet_mac.engine_state(), "up")
+        self.run.side_effect = [subprocess.TimeoutExpired("docker info", 5)]
         self.assertFalse(fleet_mac.engine_up())
-        self.assertFalse(fleet_mac.engine_up())
+
+    def test_pause_refuses_when_the_engine_is_too_slow_to_answer_inside_the_lock(self):
+        # A running engine that times out on docker info must not be recorded as already down.
+        self.run.side_effect = [self.result(), self.result(), self.result("cli-proxy-api\n"),
+                                subprocess.TimeoutExpired("docker info", 5)]
+        code, output = self.invoke("pause", "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Could not tell whether the Docker engine is running", output)
+        self.assertNotIn("already down", output)
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+        self.assertNotIn(["docker", "desktop", "stop"], [call.args[0] for call in self.run.call_args_list])
+
+    def test_pause_refuses_when_the_engine_stops_after_its_containers_were_listed(self):
+        self.run.side_effect = [self.result(), self.result(), self.result("cli-proxy-api\n"),
+                                self.result(code=1)]
+        code, output = self.invoke("pause", "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Docker engine stopped during preflight", output)
+        self.assertIsNone(fleet_mac.read_marker(self.root))
 
     def test_pause_leaves_a_newly_started_engine_up_for_container_review(self):
         self.run.side_effect = [self.result(), self.result(code=1), self.result()]
@@ -1320,6 +1344,15 @@ class MacCommandsTest(unittest.TestCase):
         self.assertIn("marker remains", output)
         self.assertIsNotNone(fleet_mac.read_marker(self.root))
         self.probe.assert_not_called()
+
+    def test_resume_waits_for_a_slow_engine_without_starting_it_again(self):
+        fleet_mac.write_marker(self.root, None, [])
+        self.run.side_effect = [subprocess.TimeoutExpired("docker info", 5), self.result()]
+        code, output = self.invoke("resume")
+        self.assertEqual(code, 0, output)
+        self.assertNotIn(["docker", "desktop", "start", "--detach"],
+                         [call.args[0] for call in self.run.call_args_list])
+        self.assertIsNone(fleet_mac.read_marker(self.root))
 
     def test_resume_skips_start_when_engine_is_already_up(self):
         fleet_mac.write_marker(self.root, None, [])

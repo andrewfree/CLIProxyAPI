@@ -162,11 +162,21 @@ def mac_only_sessions(port):
     return sessions
 
 
-def engine_up():
+ENGINE_UP, ENGINE_DOWN, ENGINE_UNKNOWN = "up", "down", "unknown"
+
+
+def engine_state():
+    # A docker info that does not answer in time is "unknown", never "down": under memory
+    # pressure a running engine can be slow, and pause must not mistake it for a stopped one.
     try:
-        return run([*DESKTOP, "info", "--format", "{{.ServerVersion}}"], 5).returncode == 0
+        result = run([*DESKTOP, "info", "--format", "{{.ServerVersion}}"], 5)
     except (subprocess.TimeoutExpired, OSError):
-        return False
+        return ENGINE_UNKNOWN
+    return ENGINE_UP if result.returncode == 0 else ENGINE_DOWN
+
+
+def engine_up():
+    return engine_state() == ENGINE_UP
 
 
 def wait_for(check, timeout):
@@ -294,7 +304,12 @@ def bundle_supports_pause(bundle_root):
 def pause(root, port, health, args, *, settings_path, bundle_root):
     check_pause(root, port, health, args, settings_path)
     containers = None
-    if engine_up():
+    state = engine_state()
+    if state == ENGINE_DOWN and read_marker(root) is not None:
+        print("Mac is already paused. Docker engine is down.")
+        return 0
+    if state != ENGINE_DOWN:
+        # An engine that did not answer docker info in time is treated as running.
         result = run([*DESKTOP, "ps", "--format", "{{.Names}}"], 10)
         if result.returncode:
             raise MacError("Could not list running Docker Desktop containers")
@@ -302,9 +317,6 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
         print("Quitting Docker Desktop stops all running containers:")
         for name in containers or ["(none)"]:
             print(f"  {name}")
-    elif read_marker(root) is not None:
-        print("Mac is already paused. Docker engine is down.")
-        return 0
     if not args.yes:
         prompt = ("Pause Mac fallback while Docker is down?" if containers is None else "Quit Docker Desktop?")
         try:
@@ -316,12 +328,17 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
             return 1
 
     with transition_lock(root):
-        running = engine_up()
+        state = engine_state()
+        if state == ENGINE_UNKNOWN:
+            raise MacError("Could not tell whether the Docker engine is running. Run mac pause again")
+        running = state == ENGINE_UP
         if not running and read_marker(root) is not None:
             print("Mac is already paused. Docker engine is down.")
             return 0
         if running and containers is None:
             raise MacError("Docker engine started during preflight. Run mac pause again to review its containers")
+        if not running and containers is not None:
+            raise MacError("Docker engine stopped during preflight. Run mac pause again")
         if not bundle_supports_pause(bundle_root):
             message = "Ship the bundle first so the Mac watchdog and monitor honor the pause marker"
             if not args.force:
@@ -335,7 +352,7 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
             return 0
         try:
             desktop("stop")
-            if not wait_for(lambda: not engine_up(), DOCKER_TIMEOUT):
+            if not wait_for(lambda: engine_state() == ENGINE_DOWN, DOCKER_TIMEOUT):
                 raise MacError("Docker engine is still up")
         except MacError as error:
             raise MacError(f"{error}. The pause marker remains in place") from None
@@ -347,10 +364,12 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
 
 def resume(root, health):
     with transition_lock(root):
-        if not engine_up():
+        state = engine_state()
+        if state == ENGINE_DOWN:
             desktop("start", "--detach")
-            if not wait_for(engine_up, ENGINE_WAIT):
-                raise MacError("Docker engine did not come up. Any pause marker remains in place")
+        # A slow engine ("unknown") is already starting or running, so it gets the wait but no second start.
+        if state != ENGINE_UP and not wait_for(engine_up, ENGINE_WAIT):
+            raise MacError("Docker engine did not come up. Any pause marker remains in place")
         marker_path(root).unlink(missing_ok=True)
     if not wait_for(lambda: health("m5") == "ok", HEALTH_WAIT):
         raise MacError("Docker engine is up and the watchdog is enabled. Mac proxy is still unhealthy")
@@ -370,9 +389,9 @@ def command(args, host, health, *, settings_path):
             return resume(root, health)
         marker = read_marker(root)
         print(f"Mac paused since {marker['paused_at']}." if marker is not None else "Mac is not paused.")
-        running = engine_up()
-        print("Docker engine: " + ("up" if running else "down"))
-        if marker is not None and running:
+        state = engine_state()
+        print(f"Docker engine: {state}")
+        if marker is not None and state == ENGINE_UP:
             print("Warning: Docker is running while paused; run mac resume or mac pause again")
         print(f"Mac proxy: {health('m5')}")
         print(f"Will proxy: {health('will')}")
