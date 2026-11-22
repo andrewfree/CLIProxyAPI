@@ -562,34 +562,45 @@ and investigate before changing the manifest.
   set -o pipefail
   label=com.rever.cliproxy-log-archive
   domain="gui/$(id -u)"
-  instance="$HOME/cliproxy"
+  export instance="$HOME/cliproxy"
   bundle="$HOME/cliproxy-live/ops"
   mount=/Volumes/Innie
-  archive="$mount/backups/llm-logs/cliproxy/m5/live"
+  export archive="$mount/backups/llm-logs/cliproxy/m5/live"
   launchctl disable "$domain/$label"
   if launchctl print "$domain/$label" >/dev/null 2>&1; then
     launchctl bootout "$domain/$label"
   fi
+  # bootout can return before the job exits, so wait until launchd no longer lists it.
+  for _ in {1..60}; do
+    launchctl print "$domain/$label" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  ! launchctl print "$domain/$label" >/dev/null 2>&1
 
-  (
-    cd "$archive"
-    test -f SHA256SUMS && test ! -L SHA256SUMS && test -s SHA256SUMS || exit 1
-    test "$(stat -f '%l' SHA256SUMS)" -eq 1
-    test "$(tail -c 1 SHA256SUMS | od -An -tu1 | tr -d '[:space:]')" != 10
-    backup=$(mktemp -d "$instance/ops/runtime/archive-repair.XXXXXXXX")
-    cp -p SHA256SUMS "$backup/SHA256SUMS"
-    printf 'Saved manifest backup at %s\n' "$backup/SHA256SUMS"
-
-    repaired=$(mktemp "$archive/.SHA256SUMS.repair.XXXXXXXX")
-    trap 'rm -f -- "$repaired"' EXIT
-    complete_lines=$(wc -l < SHA256SUMS)
-    if [ "$((complete_lines))" -gt 0 ]; then
-      head -n "$((complete_lines))" SHA256SUMS > "$repaired"
-      shasum -a 256 --strict -c "$repaired"
-    fi
-    chmod "$(stat -f '%Lp' SHA256SUMS)" "$repaired"
-    mv -f "$repaired" SHA256SUMS
-  )
+  repair=$(cat <<'EOS'
+set -e
+set -o pipefail
+cd "$archive"
+test -f SHA256SUMS && test ! -L SHA256SUMS && test -s SHA256SUMS || exit 1
+test "$(stat -f '%l' SHA256SUMS)" -eq 1
+test "$(tail -c 1 SHA256SUMS | od -An -tu1 | tr -d '[:space:]')" != 10
+backup=$(mktemp -d "$instance/ops/runtime/archive-repair.XXXXXXXX")
+cp -p SHA256SUMS "$backup/SHA256SUMS"
+printf 'Saved manifest backup at %s\n' "$backup/SHA256SUMS"
+repaired=$(mktemp "$archive/.SHA256SUMS.repair.XXXXXXXX")
+trap 'rm -f -- "$repaired"' EXIT
+complete_lines=$(wc -l < SHA256SUMS)
+if [ "$((complete_lines))" -gt 0 ]; then
+  head -n "$((complete_lines))" SHA256SUMS > "$repaired"
+  shasum -a 256 --strict -c "$repaired"
+fi
+chmod "$(stat -f '%Lp' SHA256SUMS)" "$repaired"
+mv -f "$repaired" SHA256SUMS
+EOS
+)
+  # Hold the archiver's own lock (-k keeps the lock file), so no run can write
+  # to the manifest during the repair. A busy lock fails after 60 seconds.
+  /usr/bin/lockf -k -t 60 "$instance/ops/runtime/archive.lock" /bin/zsh -c "$repair"
 
   CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 "$bundle/archive_logs.py" \
     --archive-only --verbose --source "$instance/logs" \
