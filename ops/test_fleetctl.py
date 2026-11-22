@@ -939,9 +939,11 @@ class MacCommandsTest(unittest.TestCase):
         self.bundle = self.root / "bundle"
         self.bundle.mkdir()
         self.hosts["m5"]["bundle_root"] = str(self.bundle)
-        (self.bundle / "fleet_mac.py").touch()
+        (self.bundle / "fleet_mac.py").write_text("def read_leases(root): pass", encoding="utf-8")
         for name in ("cliproxy_watchdog.py", "fleet_monitor.py"):
             (self.bundle / name).write_text("fleet_mac.read_marker(root)", encoding="utf-8")
+        with (self.bundle / "cliproxy_watchdog.py").open("a", encoding="utf-8") as watchdog:
+            watchdog.write("\nfleet_mac.read_leases(root)\n")
         self.settings = self.root / "settings.json"
         self.settings.write_text(json.dumps({"providerInstances": {"claude_cliproxy": {"environment": [
             {"name": "CLIPROXY_FALLBACK_URL", "value": "http://localhost:8317"},
@@ -975,6 +977,29 @@ class MacCommandsTest(unittest.TestCase):
     @staticmethod
     def result(stdout="", code=0):
         return subprocess.CompletedProcess([], code, stdout, "private subprocess output")
+
+    def acquire_lease(self, **overrides):
+        fields = dict(thread="ae4ac55e", project="omxlapi", purpose="agent benchmark", why_mac="local sandbox")
+        return fleet_mac.acquire_lease(self.root, self.bundle, **{**fields, **overrides})
+
+    def docker_pause_runner(self, argv, **kwargs):
+        if argv[0] == "ps":
+            return self.result()
+        if argv[:3] == fleet_mac.DESKTOP:
+            if argv[3] == "info":
+                return self.result(code=int(getattr(self, "desktop_stopped", False)))
+            if argv[3] == "ps":
+                return self.result("cli-proxy-api\nother-service\n")
+            if argv[3] == "inspect":
+                return self.result(getattr(self, "restart_policy_json", '{"Name":"on-failure","MaximumRetryCount":5}'))
+            if argv[3:] == ["update", "--restart=no", "cli-proxy-api"]:
+                self.assertEqual(fleet_mac.read_marker(self.root)["restart_policy"], "on-failure:5")
+                self.restart_policy_json = '{"Name":"no","MaximumRetryCount":0}'
+                return self.result()
+        if argv == ["docker", "desktop", "stop"]:
+            self.desktop_stopped = True
+            return self.result()
+        self.fail(f"Unexpected command: {argv}")
 
     def write_monitor_health(self, checked_at, status):
         runtime = fleet_mac.runtime_dir(self.root)
@@ -1274,10 +1299,16 @@ class MacCommandsTest(unittest.TestCase):
                 return self.result('13 03:00 codex app-server -c base_url="http://127.0.0.1:8317/v1"\n')
             if argv[3:4] == ["ps"]:
                 return self.result("cli-proxy-api\nother-service\n")
+            if argv[3:4] == ["inspect"]:
+                return self.result('{"Name":"always","MaximumRetryCount":0}')
+            if argv == [*fleet_mac.DESKTOP, "update", "--restart=no", "cli-proxy-api"]:
+                self.assertEqual(fleet_mac.read_marker(self.root)["restart_policy"], "always")
+                return self.result()
             if argv == ["docker", "desktop", "stop"]:
                 marker = fleet_mac.read_marker(self.root)
                 self.assertEqual(marker["containers"], ["cli-proxy-api", "other-service"])
                 self.assertEqual(marker["reason"], "maintenance")
+                self.assertEqual(marker["restart_policy"], "always")
                 self.assertEqual(datetime.fromisoformat(marker["paused_at"]).utcoffset(),
                                  timezone.utc.utcoffset(None))
                 self.assertEqual(stat.S_IMODE(fleet_mac.marker_path(self.root).stat().st_mode), 0o600)
@@ -1294,16 +1325,18 @@ class MacCommandsTest(unittest.TestCase):
         self.assertIn("Ship the bundle first", output)
         self.assertEqual(output.count("Will proxy at client origin: unhealthy"), 2)
         self.assertEqual(output.count("Fleet monitor Will status: unhealthy"), 2)
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 9)
 
     def test_stop_failure_keeps_marker_for_retry(self):
         self.run.side_effect = [self.result(), self.result(), self.result("cli-proxy-api\n"),
-                                self.result(), self.result(),
+                                self.result(), self.result(), self.result('{"Name":"always","MaximumRetryCount":0}'),
+                                self.result(),
                                 subprocess.TimeoutExpired(["docker", "desktop", "stop"], 45)]
         code, output = self.invoke("pause", "--yes")
         self.assertNotEqual(code, 0)
         self.assertIn("marker remains", output)
         self.assertEqual(fleet_mac.read_marker(self.root)["containers"], ["cli-proxy-api"])
+        self.assertEqual(fleet_mac.read_marker(self.root)["restart_policy"], "always")
 
     def test_resume_waits_for_engine_then_clears_marker_before_health(self):
         fleet_mac.write_marker(self.root, None, ["cli-proxy-api"])
@@ -1382,4 +1415,163 @@ class MacCommandsTest(unittest.TestCase):
         self.run.side_effect = [self.result()]
         code, output = self.invoke("status")
         self.assertEqual(code, 0, output)
-        self.assertIn("Docker is running while paused; run mac resume or mac pause again", output)
+        self.assertIn("Docker is running while paused with no live lease", output)
+        self.assertIn("THREADS.md and the running containers before stopping it. mac pause stops every container.", output)
+
+    def test_lease_cli_acquire_renew_list_and_release(self):
+        self.run.return_value = self.result()
+        self.run.side_effect = None
+        code, output = self.invoke("lease", "acquire", "--thread", "ae4ac55e", "--project", "omxlapi",
+                                   "--purpose", "benchmark", "--why-mac", "local sandbox", "--approved", "private quote")
+        self.assertEqual(code, 0, output)
+        lease, = fleet_mac.read_leases(self.root)
+        lease_id = lease["id"]
+        self.assertIn(lease_id, output)
+        self.assertNotIn("private quote", output)
+        self.assertIn("Docker work defaults to Will; this lease is a Mac failover.", output)
+        self.assertEqual(self.run.call_args.args[0][-3:], ["will.local", "docker", "info"])
+        code, output = self.invoke("lease", "renew", lease_id, "--hours", "12")
+        self.assertEqual(code, 0, output)
+        code, output = self.invoke("lease", "list")
+        self.assertEqual(code, 0, output)
+        self.assertIn(f'Docker lease {lease_id} (omxlapi, thread ae4ac55e) "benchmark"', output)
+        fleet_mac.write_marker(self.root, None, [])
+        code, output = self.invoke("lease", "release", lease_id)
+        self.assertEqual(code, 0, output)
+        self.assertIn("No live leases. Docker is still running while the Mac is paused", output)
+        self.assertEqual(fleet_mac.read_leases(self.root), [])
+        self.assertEqual([call.args[0] for call in self.run.call_args_list[1:]], [
+            [*fleet_mac.DESKTOP, "info", "--format", "{{.ServerVersion}}"],
+        ])
+
+    def test_pause_refuses_a_live_lease_even_with_force(self):
+        lease = self.acquire_lease()
+        for flags in ((), ("--force",), ("--force", "--break-lease", lease["id"])):
+            with self.subTest(flags=flags):
+                code, output = self.invoke("pause", "--yes", *flags)
+                self.assertEqual(code, 1, output)
+                self.assertIn("--break-reason" if len(flags) > 1 else lease["id"], output)
+        self.run.assert_not_called()
+        self.assertTrue(fleet_mac.read_leases(self.root)[0]["live"])
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+
+    def test_pause_rechecks_a_lease_acquired_after_preflight(self):
+        lease_id = None
+
+        def confirm(prompt):
+            nonlocal lease_id
+            lease_id = self.acquire_lease()["id"]
+            return "yes"
+
+        self.run.side_effect = self.docker_pause_runner
+        with patch("builtins.input", side_effect=confirm):
+            code, output = self.invoke("pause", "--force")
+        self.assertEqual(code, 1, output)
+        self.assertIn(lease_id, output)
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+        self.assertFalse(getattr(self, "desktop_stopped", False))
+
+    def test_pause_breaks_only_named_leases_and_records_them(self):
+        first, second = self.acquire_lease(), self.acquire_lease(project="CodeOne")
+        flags = ("--break-lease", first["id"], "--break-reason", "planned maintenance")
+        code, output = self.invoke("pause", "--force", "--yes", *flags)
+        self.assertEqual(code, 1, output)
+        self.assertIn(second["id"], output)
+        self.run.assert_not_called()
+        self.run.side_effect = self.docker_pause_runner
+        code, output = self.invoke("pause", "--yes", *flags, "--break-lease", second["id"])
+        self.assertEqual(code, 0, output)
+        self.assertTrue(self.desktop_stopped)
+        self.assertEqual(fleet_mac.read_leases(self.root), [])
+        marker = fleet_mac.read_marker(self.root)
+        self.assertEqual({record["id"] for record in marker["broken_leases"]}, {first["id"], second["id"]})
+        for record in marker["broken_leases"]:
+            archived = fleet_mac.lease_dir(self.root) / "broken" / (record["id"] + ".json")
+            self.assertEqual(json.loads(archived.read_text()), record)
+            self.assertEqual(record["broken_by_reason"], "planned maintenance")
+            self.assertEqual(record["containers"], ["cli-proxy-api", "other-service"])
+            self.assertIn("broken_at", record)
+
+    def test_pause_requires_a_named_break_for_a_malformed_lease(self):
+        lease = self.acquire_lease()
+        filename = f"{lease['id']}.json"
+        directory = fleet_mac.lease_dir(self.root)
+        (directory / filename).write_text("{")
+        code, output = self.invoke("pause", "--force", "--yes")
+        self.assertEqual(code, 1, output)
+        self.assertIn("unreadable (unknown owner)", output)
+        self.run.assert_not_called()
+
+        self.run.side_effect = self.docker_pause_runner
+        code, output = self.invoke("pause", "--yes", "--break-lease", lease["id"], "--break-reason", "invalid record")
+        self.assertEqual(code, 0, output)
+        self.assertFalse((directory / filename).exists())
+        self.assertEqual(json.loads((directory / "broken" / filename).read_text())["owner"], "unknown")
+
+    def test_pause_again_keeps_the_original_restart_policy(self):
+        self.run.side_effect = self.docker_pause_runner
+        code, output = self.invoke("pause", "--yes")
+        self.assertEqual(code, 0, output)
+        self.desktop_stopped = False
+        code, output = self.invoke("pause", "--yes")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(fleet_mac.read_marker(self.root)["restart_policy"], "on-failure:5")
+
+    def test_resume_requires_lease_acknowledgment_and_restores_policy_before_recovery(self):
+        lease = self.acquire_lease()
+        fleet_mac.write_marker(self.root, None, [], restart_policy="on-failure:5")
+        code, output = self.invoke("resume")
+        self.assertEqual(code, 1, output)
+        self.assertIn(lease["id"], output)
+        self.assertIn("--yes-leases", output)
+        self.run.assert_not_called()
+
+        events = []
+
+        def run(argv, **kwargs):
+            self.assertIsNotNone(fleet_mac.read_marker(self.root))
+            if argv == ["docker", "desktop", "start", "--detach"]:
+                events.append("desktop start")
+                return self.result()
+            if argv == [*fleet_mac.DESKTOP, "update", "--restart=on-failure:5", "cli-proxy-api"]:
+                self.assertIn("desktop start", events)
+                events.append("restore policy")
+                return self.result()
+            self.assertEqual(argv[:4], [*fleet_mac.DESKTOP, "info"])
+            return self.result(code=int("desktop start" not in events))
+
+        def health(name, *args):
+            self.assertIsNone(fleet_mac.read_marker(self.root))
+            events.append("health")
+            return {"status": "ok"}
+
+        self.run.side_effect = run
+        self.probe.side_effect = health
+        code, output = self.invoke("resume", "--yes-leases")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(events, ["desktop start", "restore policy", "health"])
+        self.assertEqual(fleet_mac.read_leases(self.root)[0]["id"], lease["id"])
+
+    def test_resume_policy_update_failure_preserves_pause(self):
+        fleet_mac.write_marker(self.root, None, [], restart_policy="always")
+        self.run.side_effect = [self.result(), self.result(code=1)]
+        code, output = self.invoke("resume")
+        self.assertEqual(code, 1, output)
+        self.assertIn("pause marker remains", output)
+        self.assertEqual(fleet_mac.read_marker(self.root)["restart_policy"], "always")
+        self.probe.assert_not_called()
+
+    def test_status_names_a_live_lease_and_displays_expired_lease(self):
+        now = datetime(2026, 11, 22, 5, 4, tzinfo=timezone.utc)
+        with patch.object(fleet_mac, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = now - timedelta(hours=4)
+            expired = self.acquire_lease(project="CodeOne")
+            clock.now.return_value = now
+            live = self.acquire_lease()
+            fleet_mac.write_marker(self.root, None, [])
+            self.run.side_effect = [self.result()]
+            code, output = self.invoke("status")
+        self.assertEqual(code, 0, output)
+        self.assertIn(f'Docker is running for lease {live["id"]} (omxlapi, thread ae4ac55e, "agent benchmark") '
+                      'until 12:04 AM PST. The Mac CLIProxy fallback stays paused.', output)
+        self.assertIn(f'Lease {expired["id"]} expired at 2026-11-21 8:04 PM PST; ask thread ae4ac55e to renew or release it.', output)

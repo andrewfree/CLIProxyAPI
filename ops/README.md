@@ -404,7 +404,14 @@ curl -fsS --max-time 3 http://127.0.0.1:8317/healthz
 docker inspect cli-proxy-api --format '{{.State.Status}} {{.State.Health.Status}}'
 ```
 
-A controlled engine-recovery drill uses the same non-reset command as the incident recovery:
+A controlled engine-recovery drill starts by listing Mac Docker leases. Stop
+the drill if any lease is live, including one with an unknown owner.
+
+```bash
+python3 ~/cliproxy-live/ops/fleetctl.py mac lease list
+```
+
+With a clear lease list, use the same recovery command as the incident drill.
 
 ```bash
 docker desktop stop --force --timeout 30

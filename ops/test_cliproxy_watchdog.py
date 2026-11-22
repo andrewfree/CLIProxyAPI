@@ -100,6 +100,60 @@ class WatchdogTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def acquire_lease(self) -> str:
+        with patch.object(fleet_mac, "bundle_supports_leases", return_value=True):
+            lease = fleet_mac.acquire_lease(self.root, self.root, thread="thread-1", project="omxlapi",
+                                            purpose="benchmark", why_mac="local sandbox")
+        return lease["id"]
+
+    def test_live_lease_allows_desktop_start_only_on_positive_stopped_status(self) -> None:
+        lease_id = self.acquire_lease()
+        status = [self.config.docker, "desktop", "status", "--format", "json"]
+        start = [self.config.docker, "desktop", "start", "--detach"]
+        responses = (
+            (CommandResult(0, '{"status":"stopped"}'), True),
+            (CommandResult(0, '{"Status":"stopped"}'), True),
+            (CommandResult(0, '{"status":"running"}'), False),
+            (CommandResult(0, '{"status":"starting"}'), False),
+            (CommandResult(0, '{"status":"stopping"}'), False),
+            (CommandResult(0, '{"Status":"paused"}'), False),
+            (CommandResult(0, 'unexpected stopped'), False),
+            (CommandResult(1, stderr="Could not retrieve status. Is Docker Desktop running?"), False),
+            (CommandResult(124, '{"status":"stopped"}'), False),
+        )
+        for response, should_start in responses:
+            with self.subTest(response=response):
+                logger = logging.getLogger("watchdog-test")
+                watchdog = Watchdog(self.config, logger=logger, clock=lambda: 5000)
+                watchdog.save_state({"engine_consecutive_failures": 2, "last_engine_failure": 4900})
+                engine_results = [False, False, True] if should_start else [False, False]
+                health_results = [False, False, True] if should_start else [False, False]
+                with (patch.object(watchdog, "engine_ok", side_effect=engine_results),
+                      patch.object(watchdog, "health_ok", side_effect=health_results),
+                      patch.object(watchdog, "outbound_probe", return_value=self.ok_probe),
+                      patch.object(watchdog, "run_command", side_effect=[response, CommandResult(0)]) as run,
+                      self.assertLogs(logger, "WARNING") as logs):
+                    self.assertEqual(watchdog.run_once(skip_auth=True), 0 if should_start else 1)
+                self.assertEqual([call.args[0] for call in run.call_args_list],
+                                 [status, start] if should_start else [status])
+                if not should_start:
+                    self.assertIn(f"Docker Desktop restart skipped: lease {lease_id} (omxlapi)", "\n".join(logs.output))
+
+    def test_live_lease_preserves_proxy_container_recovery(self) -> None:
+        self.acquire_lease()
+        watchdog = Watchdog(self.config, logger=logging.getLogger("watchdog-test"), clock=lambda: 5000)
+        watchdog.save_state({"dns_consecutive_failures": 1})
+        dns_failed = ProbeResult(dns_failures=self.config.probe_hosts)
+        with (patch.object(watchdog, "engine_ok", return_value=True),
+              patch.object(watchdog, "health_ok", side_effect=[False, True, True]),
+              patch.object(watchdog, "outbound_probe", side_effect=[dns_failed, self.ok_probe]),
+              patch.object(watchdog, "run_command", return_value=CommandResult(0)) as run):
+            self.assertEqual(watchdog.run_once(skip_auth=True), 0)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            [self.config.docker, "compose", "up", "-d", "--no-deps", "cli-proxy-api"],
+            [self.config.docker, "compose", "restart", "--no-deps", "cli-proxy-api"],
+        ])
+
     def test_mac_pause_skips_all_checks_and_recovery(self) -> None:
         fleet_mac.write_marker(self.root, "maintenance", ["cli-proxy-api"])
         marker = fleet_mac.read_marker(self.root)
