@@ -33,12 +33,12 @@ class LogArchiverTest(unittest.TestCase):
         os.utime(path, (timestamp, timestamp))
         return path
 
-    def archiver(self, *, prune: bool = True) -> LogArchiver:
+    def archiver(self, *, prune: bool = True, min_age_seconds: int = 3_600) -> LogArchiver:
         config = ArchiveConfig(
             source_dir=self.source,
             archive_root=self.archive,
             mount_point=self.root,
-            min_age_seconds=3_600,
+            min_age_seconds=min_age_seconds,
             prune=prune,
             require_mounted_destination=False,
             index_path=self.index,
@@ -122,11 +122,13 @@ class LogArchiverTest(unittest.TestCase):
 
         with (patch.object(LogArchiver, "_sha256", wraps=LogArchiver._sha256) as sha256,
               patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as read_text,
+              patch.object(archive_logs.os, "open", wraps=os.open) as open_file,
               self.assertLogs(self.logger, level="INFO") as logs):
             result = self.archiver(prune=False).run()
 
         sha256.assert_not_called()
         self.assertEqual([call.args[0] for call in read_text.call_args_list], [self.index])
+        self.assertNotIn(self.archive / "SHA256SUMS", [call.args[0] for call in open_file.call_args_list])
         self.assertEqual((result.skipped_by_index, result.failures), (1, 0))
         self.assertIn("skipped_by_index=1", logs.output[-1])
         self.assertEqual(self.index.stat().st_ino, inode)
@@ -143,6 +145,58 @@ class LogArchiverTest(unittest.TestCase):
         self.assertIn(source, [call.args[0] for call in sha256.call_args_list])
         self.assertEqual((result.archived, result.skipped_by_index, result.failures), (1, 0, 0))
         self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 1)
+
+    def test_same_size_source_rewrite_with_restored_mtime_is_archived(self) -> None:
+        source = self.write_log("rewrite.log", b"before\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        original = source.stat()
+        source.write_bytes(b"after!\n")
+        os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+        self.assertNotEqual(source.stat().st_ctime_ns, original.st_ctime_ns)
+
+        result = self.archiver(prune=False).run()
+
+        self.assertEqual((result.archived, result.skipped_by_index, result.failures), (1, 0, 0))
+        updated = next((self.archive / "requests").rglob(f"{source.name}.sha256-*"))
+        self.assertEqual(updated.read_bytes(), source.read_bytes())
+
+    def test_same_size_archive_changes_are_reverified(self) -> None:
+        for change in ("replacement", "rewrite"):
+            with self.subTest(change=change):
+                source = self.write_log(f"{change}.log", b"before\n", age_seconds=7_200)
+                self.assertEqual(self.archiver(prune=False).run().archived, 1)
+                destination = next((self.archive / "requests").rglob(source.name))
+                original = destination.stat()
+                updated = destination.with_name("replacement") if change == "replacement" else destination
+                updated.write_bytes(b"after!\n")
+                os.utime(updated, ns=(original.st_atime_ns, original.st_mtime_ns))
+                if updated != destination:
+                    updated.replace(destination)
+
+                result = self.archiver(prune=False).run()
+
+                self.assertEqual((result.archived, result.failures), (1, 0))
+                repaired = next(destination.parent.glob(f"{source.name}.sha256-*"))
+                self.assertEqual(repaired.read_bytes(), source.read_bytes())
+                self.assertEqual(destination.read_bytes(), b"after!\n")
+
+    def test_archive_device_change_reverifies_existing_copy(self) -> None:
+        self.write_log("existing.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        root = self.archive.resolve()
+        stat = Path.stat
+
+        def observe(path, *args, **kwargs):
+            metadata = stat(path, *args, **kwargs)
+            if path == root:
+                mode, inode, device, *rest = metadata
+                return os.stat_result((mode, inode, device + 1, *rest))
+            return metadata
+
+        with patch.object(Path, "stat", autospec=True, side_effect=observe):
+            result = self.archiver(prune=False).run()
+
+        self.assertEqual((result.already_archived, result.skipped_by_index, result.failures), (1, 0, 0))
 
     def test_missing_or_short_archive_copy_is_rearchived(self) -> None:
         source = self.write_log("repair.log", b"closed\n", age_seconds=7_200)
@@ -169,16 +223,134 @@ class LogArchiverTest(unittest.TestCase):
         self.assertIn("archive-index.json", logs.output[0])
         self.index.write_text("{broken", encoding="utf-8")
 
+        job = self.archiver(prune=False)
         with (self.assertLogs(self.logger, level="WARNING") as logs,
-              patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as read_text):
-            result = self.archiver(prune=False).run()
+              patch.object(job, "_load_manifest", wraps=job._load_manifest) as load_manifest):
+            result = job.run()
 
         self.assertIn("archive-index.json", logs.output[0])
         manifest = self.archive / "SHA256SUMS"
-        self.assertEqual([call.args[0] for call in read_text.call_args_list].count(manifest), 1)
+        load_manifest.assert_called_once()
         self.assertEqual((result.already_archived, result.skipped_by_index, result.failures), (2, 0, 0))
         self.assertEqual(len(manifest.read_text(encoding="utf-8").splitlines()), 2)
         self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 2)
+
+    def test_missing_replaced_or_shortened_manifest_rebuilds_records(self) -> None:
+        self.write_log("record.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        manifest = self.archive / "SHA256SUMS"
+        record = manifest.read_bytes()
+        for change in ("missing", "replaced", "shortened"):
+            with self.subTest(change=change):
+                if change == "missing":
+                    manifest.unlink()
+                elif change == "replaced":
+                    replacement = manifest.with_name("replacement")
+                    replacement.write_bytes(b"x" * (len(record) - 1) + b"\n")
+                    replacement.replace(manifest)
+                else:
+                    manifest.write_bytes(b"")
+
+                result = self.archiver(prune=False).run()
+
+                self.assertEqual((result.already_archived, result.skipped_by_index, result.failures), (1, 0, 0))
+                self.assertTrue(manifest.read_bytes().endswith(record))
+                self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 1)
+
+    def test_unterminated_manifest_record_is_separated_from_next_record(self) -> None:
+        self.write_log("a.log", b"first\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        manifest = self.archive / "SHA256SUMS"
+        first = manifest.read_bytes().removesuffix(b"\n")
+        manifest.write_bytes(first)
+        self.write_log("b.log", b"second\n", age_seconds=7_200)
+
+        result = self.archiver(prune=False).run()
+
+        self.assertEqual((result.archived, result.failures), (1, 0))
+        records = manifest.read_bytes().splitlines()
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0], first)
+        self.assertTrue(records[1].endswith(b"/b.log"))
+
+    def test_grown_manifest_allows_an_index_hit(self) -> None:
+        self.write_log("existing.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        with (self.archive / "SHA256SUMS").open("ab") as manifest:
+            manifest.write(b"fixture append\n")
+        with patch.object(LogArchiver, "_sha256", wraps=LogArchiver._sha256) as sha256:
+            result = self.archiver(prune=False).run()
+
+        sha256.assert_not_called()
+        self.assertEqual((result.skipped_by_index, result.failures), (1, 0))
+
+    def test_symlink_manifest_keeps_its_source_target_untouched(self) -> None:
+        source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)
+        self.archive.mkdir()
+        manifest = self.archive / "SHA256SUMS"
+        manifest.symlink_to(source)
+
+        result = self.archiver().run()
+
+        self.assertEqual((result.pruned, result.failures), (0, 1))
+        self.assertTrue(manifest.is_symlink())
+        self.assertEqual(source.read_bytes(), b"closed\n")
+
+    def test_manifest_symlink_created_after_initial_check_is_refused(self) -> None:
+        source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)
+        manifest = self.archive / "SHA256SUMS"
+        open_file = os.open
+
+        def install_symlink(path, *args, **kwargs):
+            if path == manifest:
+                manifest.symlink_to(source)
+            return open_file(path, *args, **kwargs)
+
+        with patch.object(archive_logs.os, "open", side_effect=install_symlink):
+            result = self.archiver().run()
+
+        self.assertEqual((result.pruned, result.failures), (0, 1))
+        self.assertTrue(manifest.is_symlink())
+        self.assertEqual(source.read_bytes(), b"closed\n")
+
+    def test_failed_source_listing_keeps_existing_index(self) -> None:
+        self.write_log("retained.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        hidden = self.source.rename(self.root / "temporarily-unavailable")
+        try:
+            result = self.archiver(prune=False).run()
+        finally:
+            hidden.rename(self.source)
+
+        self.assertEqual(result.failures, 1)
+        self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 1)
+
+    def test_raised_minimum_age_keeps_index_for_present_logs(self) -> None:
+        self.write_log("retained.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+
+        result = self.archiver(prune=False, min_age_seconds=10_000).run()
+
+        self.assertEqual((result.archived, result.skipped_by_index, result.failures), (0, 0, 0))
+        self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 1)
+
+    def test_concurrent_publication_does_not_overwrite_existing_copy(self) -> None:
+        source = self.write_log("race.log", b"mine\n", age_seconds=7_200)
+        link = os.link
+
+        def publish(temporary, destination):
+            if destination.name == source.name:
+                destination.write_bytes(b"theirs\n")
+            link(temporary, destination)
+
+        with patch.object(archive_logs.os, "link", side_effect=publish):
+            result = self.archiver(prune=False).run()
+
+        self.assertEqual((result.archived, result.failures), (1, 0))
+        destination = next((self.archive / "requests").rglob(source.name))
+        self.assertEqual(destination.read_bytes(), b"theirs\n")
+        collision = next(destination.parent.glob(f"{source.name}.sha256-*"))
+        self.assertEqual(collision.read_bytes(), source.read_bytes())
 
     def test_archive_only_cli_never_unlinks_source(self) -> None:
         source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)

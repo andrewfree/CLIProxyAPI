@@ -530,11 +530,15 @@ Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/c
 Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`.
 Each new copy is SHA-256 verified and recorded in the append-only `SHA256SUMS`
 manifest. Archive-only runs keep a verification index in
-`ops/runtime/archive-index.json` under the instance root. If the source
-fingerprint matches and the archive copy still has the recorded size, the job
-skips rehashing it and counts it as `skipped_by_index`. A missing or corrupt
-index is rebuilt from verified copies. An unavailable drive is reported in
-`ops/runtime/archive.log`.
+`ops/runtime/archive-index.json` under the instance root. The job counts a
+file as `skipped_by_index` when the source and archive metadata still match,
+the archive device is unchanged, and `SHA256SUMS` is the same file at least as
+long as recorded. A missing or corrupt index or a missing, replaced, or
+shortened manifest triggers fresh verification. The first index miss in a
+run reads the full manifest. A run with only index hits checks metadata.
+Publishing a new archive copy requires hard-link support on the archive
+filesystem so competing writers can preserve both copies. Archive failures
+are reported in `ops/runtime/archive.log`.
 
 ### Install or resume the log archive job
 
@@ -548,24 +552,51 @@ enabling, so use this sequence for the log archive job.
 (
   set -e
   commit=$(git rev-parse HEAD)
-  python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
   label=com.rever.cliproxy-log-archive
-  bundled="$HOME/cliproxy-live/ops/$label.plist"
-  installed="$HOME/Library/LaunchAgents/$label.plist"
-  /usr/bin/plutil -lint "$bundled"
+  launchctl disable "gui/501/$label"
   if launchctl print "gui/501/$label" >/dev/null 2>&1; then
     launchctl bootout "gui/501/$label"
   fi
+
+  python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+  bundled="$HOME/cliproxy-live/ops/$label.plist"
+  installed="$HOME/Library/LaunchAgents/$label.plist"
+  /usr/bin/plutil -lint "$bundled"
   /usr/bin/install -m 0644 "$bundled" "$installed"
+  /opt/homebrew/bin/python3 - "$installed" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as plist:
+    arguments = plistlib.load(plist)["ProgramArguments"]
+expected = [
+    "/opt/homebrew/bin/python3",
+    "/Users/rever/cliproxy-live/ops/archive_logs.py",
+    "--archive-only",
+]
+if arguments != expected:
+    raise SystemExit("Unexpected log archive ProgramArguments")
+PY
   launchctl enable "gui/501/$label"
   launchctl bootstrap gui/501 "$installed"
   launchctl print "gui/501/$label"
 )
 ```
 
-Confirm the loaded arguments include `--archive-only`. After a completed run,
-check `ops/runtime/archive.log` under the Mac instance root for `pruned=0`.
-When an eligible new log is available, confirm both the archive copy and its
+Confirm the loaded arguments include `--archive-only`. Require a fresh
+completed run after `bootstrap` with both `pruned=0` and `failures=0` in the
+same summary line in `ops/runtime/archive.log` under the Mac instance root.
+When an eligible new log is available, confirm the archive copy and its
 manifest entry appear and the Mac copy remains.
+
+To roll back the activation, return the job to its disabled and unloaded state.
+
+```sh
+label=com.rever.cliproxy-log-archive
+launchctl disable "gui/501/$label"
+if launchctl print "gui/501/$label" >/dev/null 2>&1; then
+  launchctl bootout "gui/501/$label"
+fi
+```
 
 The August 27 recovery set and downstream reconstruction are described in `ops/RECOVERY-2026-08-27.md`.
