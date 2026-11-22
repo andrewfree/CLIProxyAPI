@@ -267,6 +267,21 @@ class LogArchiver:
         os.fsync(handle.fileno())
         return self._manifest_fingerprint(os.fstat(handle.fileno()))
 
+    def _manifest_tail_matches_archive(self, tail: bytes) -> bool:
+        record = re.fullmatch(rb"([0-9a-fA-F]{64})  (requests/[^\x00\r\n]+)", tail)
+        if record is None or any(part in (b"", b".", b"..") for part in record[2].split(b"/")):
+            return False
+        try:
+            archive = self.config.archive_root.resolve(strict=True)
+            destination = archive / os.fsdecode(record[2])
+            if destination.resolve(strict=True) != destination:
+                return False
+            fingerprint = self._fingerprint(destination)
+            digest = self._sha256(destination)
+            return digest == record[1].decode("ascii").lower() and self._fingerprint(destination) == fingerprint
+        except (OSError, RuntimeError):
+            return False
+
     def _prepare_manifest(self, handle: BinaryIO) -> set[bytes]:
         state = self._manifest_fingerprint(os.fstat(handle.fileno()))
         if self._manifest_state is not None and not self._manifest_covers(state, self._manifest_state):
@@ -276,8 +291,7 @@ class LogArchiver:
 
         lines, tail = self._load_manifest(handle)
         if tail:
-            match = re.fullmatch(rb"[0-9a-fA-F]{64}  (requests/[^\x00\r\n]+)", tail)
-            if match is None or any(part in (b"", b".", b"..") for part in match[1].split(b"/")):
+            if not self._manifest_tail_matches_archive(tail):
                 raise OSError("SHA256SUMS has a malformed unterminated final record; repair it before archiving")
             state = self._append_manifest(handle, b"\n")
         self._manifest_state = state

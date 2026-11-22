@@ -540,11 +540,66 @@ A missing or corrupt index or a missing, replaced, or
 shortened manifest triggers fresh verification. The first index miss in a
 run reads the full manifest. A run with only index hits checks metadata and
 the manifest's final byte. The job reports an unterminated tail as a failure
-and completes it with a newline only when it is a valid record. A malformed
-tail blocks index hits and new archive records until the manifest is repaired.
+and completes it with a newline only when the record names a regular archive
+file with a matching SHA-256. A malformed tail blocks index hits and new
+archive records until the manifest is repaired.
 Publishing a new archive copy requires hard-link support on the archive
 filesystem so competing writers can preserve both copies. Archive failures
 are reported in `ops/runtime/archive.log`.
+
+### Repair a malformed manifest tail
+
+Use this procedure for a reported malformed unterminated final record. Keep
+every archive copy during repair. Confirm the configured archive mount is
+present and adjust `mount` and `archive` below if the job's settings differ.
+The checksum check runs from the archive root over every complete record
+before the damaged last line. If a complete record fails verification, stop
+and investigate before changing the manifest.
+
+```sh
+(
+  set -e
+  set -o pipefail
+  label=com.rever.cliproxy-log-archive
+  domain="gui/$(id -u)"
+  instance="$HOME/cliproxy"
+  bundle="$HOME/cliproxy-live/ops"
+  mount=/Volumes/Innie
+  archive="$mount/backups/llm-logs/cliproxy/m5/live"
+  launchctl disable "$domain/$label"
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then
+    launchctl bootout "$domain/$label"
+  fi
+
+  (
+    cd "$archive"
+    test -f SHA256SUMS && test ! -L SHA256SUMS && test -s SHA256SUMS || exit 1
+    test "$(stat -f '%l' SHA256SUMS)" -eq 1
+    test "$(tail -c 1 SHA256SUMS | od -An -tu1 | tr -d '[:space:]')" != 10
+    backup=$(mktemp -d "$instance/ops/runtime/archive-repair.XXXXXXXX")
+    cp -p SHA256SUMS "$backup/SHA256SUMS"
+    printf 'Saved manifest backup at %s\n' "$backup/SHA256SUMS"
+
+    repaired=$(mktemp "$archive/.SHA256SUMS.repair.XXXXXXXX")
+    trap 'rm -f -- "$repaired"' EXIT
+    complete_lines=$(wc -l < SHA256SUMS)
+    if [ "$((complete_lines))" -gt 0 ]; then
+      head -n "$((complete_lines))" SHA256SUMS > "$repaired"
+      shasum -a 256 --strict -c "$repaired"
+    fi
+    chmod "$(stat -f '%Lp' SHA256SUMS)" "$repaired"
+    mv -f "$repaired" SHA256SUMS
+  )
+
+  CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 "$bundle/archive_logs.py" \
+    --archive-only --verbose --source "$instance/logs" \
+    --destination "$archive" --mount-point "$mount"
+)
+```
+
+The manual run verifies and records an already-published copy from its retained
+source. Confirm that run reports `pruned=0` and `failures=0`, then resume with
+[Install the archive plist from the active bundle](#install-the-archive-plist-from-the-active-bundle).
 
 ### Install or resume the log archive job
 

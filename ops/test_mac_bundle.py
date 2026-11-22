@@ -126,6 +126,29 @@ class BundleLaunchAgentsTest(unittest.TestCase):
                 self.assertEqual((root / "Library/LaunchAgents" / original.name).read_bytes(), original.read_bytes())
             self.assertEqual(list(tmp.iterdir()), [])
 
+    @unittest.skipUnless(sys.platform == "darwin", "needs macOS mktemp and zsh")
+    def test_installer_cleans_staging_when_interrupted(self):
+        ops = Path(__file__).resolve().parent
+        for signal, exit_code in (("INT", 130), ("TERM", 143)):
+            with self.subTest(signal=signal), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tmp = root / "tmp"
+                tmp.mkdir()
+                installer = root / "install_watchdog.sh"
+                installer.write_text((ops / installer.name).read_text()
+                                     .replace("/bin/launchctl", "/usr/bin/false")
+                                     .replace("/bin/cp ", 'kill -s "$TEST_SIGNAL" "$$"; /bin/cp ', 1))
+
+                result = subprocess.run(
+                    ["/bin/zsh", "-f", str(installer), str(root)],
+                    env={"HOME": str(root), "TMPDIR": str(tmp), "TEST_SIGNAL": signal},
+                    capture_output=True, text=True, check=False,
+                )
+
+                self.assertEqual(result.returncode, exit_code, result)
+                self.assertEqual(list(tmp.iterdir()), [])
+                self.assertFalse((root / "Library").exists())
+
 
 class BundleJobsTest(unittest.TestCase):
     def setUp(self):

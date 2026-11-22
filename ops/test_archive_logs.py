@@ -281,6 +281,8 @@ class LogArchiverTest(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0], first)
         self.assertTrue(records[1].endswith(b"/b.log"))
+        self.assertTrue(manifest.read_bytes().endswith(b"\n"))
+        self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 2)
 
     def test_grown_manifest_allows_an_index_hit(self) -> None:
         self.write_log("existing.log", b"closed\n", age_seconds=7_200)
@@ -315,6 +317,29 @@ class LogArchiverTest(unittest.TestCase):
         result = self.archiver(prune=False).run()
         self.assertEqual((result.archived, result.skipped_by_index, result.failures), (1, 1, 0))
         self.assertTrue(manifest.read_bytes().endswith(b"/new.log\n"))
+
+    def test_parseable_truncated_name_tail_requires_a_matching_archive_copy(self) -> None:
+        source = self.write_log("almost-complete.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        manifest = self.archive / "SHA256SUMS"
+        original = manifest.read_bytes()
+        self.assertTrue(original.endswith(b"/almost-complete.log\n"))
+        truncated = original[:-2]
+        manifest.write_bytes(truncated)
+        copy = next((self.archive / "requests").rglob(source.name))
+
+        for wrong_copy_exists in (False, True):
+            with self.subTest(wrong_copy_exists=wrong_copy_exists):
+                if wrong_copy_exists:
+                    copy.with_suffix(".lo").write_bytes(b"wrong!\n")
+
+                with self.assertLogs(self.logger, level="ERROR") as logs:
+                    result = self.archiver(prune=False).run()
+
+                self.assertEqual((result.skipped_by_index, result.failures), (0, 1))
+                self.assertIn("malformed unterminated final record", "\n".join(logs.output))
+                self.assertEqual(manifest.read_bytes(), truncated)
+                self.assertTrue(source.exists())
 
     def test_symlink_manifest_keeps_its_source_target_untouched(self) -> None:
         source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)

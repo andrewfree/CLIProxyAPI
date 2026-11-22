@@ -9,6 +9,8 @@ labels=(com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive)
 
 staging_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cliproxy-agents.XXXXXXXX")
 trap '/bin/rm -rf -- "$staging_dir"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 for label in "${labels[@]}"; do
     /bin/cp "$source_dir/$label.plist" "$staging_dir/$label.plist"
 done
