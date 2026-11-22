@@ -1,12 +1,16 @@
+import json
 import plistlib
 import unittest
 from pathlib import Path
 
 
 class LaunchdPlistTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ops = Path(__file__).resolve().parent
+        self.host = json.loads((self.ops / "fleet/hosts.json").read_text(encoding="utf-8"))["m5"]
+
     def test_watchdog_runs_frequently_with_bounded_output(self) -> None:
-        root = Path(__file__).resolve().parent.parent
-        path = root / "ops" / "com.rever.cliproxy-watchdog.plist"
+        path = self.ops / "com.rever.cliproxy-watchdog.plist"
 
         with path.open("rb") as handle:
             plist = plistlib.load(handle)
@@ -14,10 +18,10 @@ class LaunchdPlistTest(unittest.TestCase):
         self.assertEqual(plist["Label"], "com.rever.cliproxy-watchdog")
         self.assertTrue(plist["RunAtLoad"])
         self.assertLessEqual(plist["StartInterval"], 180)
-        self.assertEqual(plist["WorkingDirectory"], str(root))
-        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], str(root))
+        self.assertEqual(plist["WorkingDirectory"], self.host["instance_root"])
+        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], self.host["instance_root"])
         self.assertIn(
-            str(root.with_name("cliproxy-live") / "ops" / "cliproxy_watchdog.py"),
+            str(Path(self.host["bundle_root"]) / "cliproxy_watchdog.py"),
             plist["ProgramArguments"],
         )
         self.assertEqual(plist["StandardOutPath"], "/dev/null")
@@ -28,8 +32,7 @@ class LaunchdPlistTest(unittest.TestCase):
         )
 
     def test_archive_job_runs_frequently_and_targets_innie(self) -> None:
-        root = Path(__file__).resolve().parent.parent
-        path = root / "ops" / "com.rever.cliproxy-log-archive.plist"
+        path = self.ops / "com.rever.cliproxy-log-archive.plist"
 
         with path.open("rb") as handle:
             plist = plistlib.load(handle)
@@ -37,11 +40,12 @@ class LaunchdPlistTest(unittest.TestCase):
         self.assertEqual(plist["Label"], "com.rever.cliproxy-log-archive")
         self.assertTrue(plist["RunAtLoad"])
         self.assertLessEqual(plist["StartInterval"], 600)
-        self.assertEqual(plist["WorkingDirectory"], str(root))
-        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], str(root))
-        self.assertIn(
-            str(root.with_name("cliproxy-live") / "ops" / "archive_logs.py"),
+        self.assertEqual(plist["WorkingDirectory"], self.host["instance_root"])
+        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], self.host["instance_root"])
+        self.assertEqual(
             plist["ProgramArguments"],
+            ["/opt/homebrew/bin/python3", str(Path(self.host["bundle_root"]) / "archive_logs.py"),
+             "--archive-only"],
         )
         environment = plist["EnvironmentVariables"]
         self.assertEqual(
