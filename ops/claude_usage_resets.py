@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Inspect, watch, and redeem Anthropic usage resets for CLIProxy Claude accounts.
 
-Every upstream call goes through the local proxy's management `api-call` route,
-so the account's OAuth token never leaves CLIProxy. `status` and `watch` are
-read-only. `claim` consumes a reset grant and requires `--yes` (or `--dry-run`).
+Every upstream call goes through a proxy's management `api-call` route, so the
+account's OAuth token never leaves CLIProxy. `status` and `watch` are read-only
+and ask Will first: this script runs there over SSH stdin against Will's own
+proxy and .env, and falls back to the local proxy only when SSH or Will's proxy
+is unreachable. `claim` consumes a reset grant, requires `--yes` (or
+`--dry-run`), and runs only on the host it is given, never falling back.
 
 The claim request mirrors Claude Code 2.1.322: POST
 /api/organizations/{org}/reset_rate_limits with {program, grant_id, request_id}.
@@ -30,6 +33,14 @@ from typing import Any, Callable
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 STATE_DIR = ROOT / "ops" / "runtime" / "claude-resets"
+HOSTS_FILE = pathlib.Path(__file__).resolve().parent / "fleet" / "hosts.json"
+# The fleet monitor's SSH options, plus keepalives so a dropped link ends a long watch.
+SSH_ARGS = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+            "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
+            "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes",
+            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"]
+SSH_FAILED = 255
+PROXY_UNREACHABLE = 3
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 CLAIM_URL = "https://api.anthropic.com/api/organizations/{org}/reset_rate_limits"
@@ -67,6 +78,7 @@ class Proxy:
     def __init__(self, base_url: str, key: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.key = key
+        self.answered = False
 
     def mgmt(self, route: str, payload: dict[str, Any] | None = None) -> Any:
         req = urllib.request.Request(
@@ -75,6 +87,7 @@ class Proxy:
             headers={"Authorization": "Bearer " + self.key, "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=60) as resp:
+            self.answered = True
             return json.load(resp)
 
     def claude_accounts(self) -> list[dict[str, Any]]:
@@ -277,7 +290,16 @@ def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
     return 0 if report else 1
 
 
+def notify(message: str) -> None:
+    subprocess.run(["osascript", "-e", f'display notification "{message}" with title "Claude usage watch"'],
+                   check=False)
+
+
 def cmd_watch(proxy: Proxy, args: argparse.Namespace) -> int:
+    # Polls below count failures and retry, so check the proxy once first. An
+    # unreachable proxy then exits PROXY_UNREACHABLE before any output, which
+    # is what lets `--host auto` fall back.
+    proxy.claude_accounts()
     failures = 0
     while True:
         try:
@@ -290,8 +312,7 @@ def cmd_watch(proxy: Proxy, args: argparse.Namespace) -> int:
             if percent >= args.threshold:
                 print(f"{now_iso()} TRIGGER {args.limit} reached {percent}% (threshold {args.threshold}%)", flush=True)
                 if args.notify:
-                    subprocess.run(["osascript", "-e", f'display notification "{args.account}: {args.limit} '
-                                    f'at {percent}%" with title "Claude usage watch"'], check=False)
+                    notify(f"{args.account}: {args.limit} at {percent}%")
                 return 0
         except (ResetError, urllib.error.URLError, OSError) as err:
             failures += 1
@@ -314,17 +335,110 @@ def cmd_claim(proxy: Proxy, args: argparse.Namespace) -> int:
     return 0 if receipt["result"] in ("reset", "dry_run") else 1
 
 
-def main(argv: list[str] | None = None) -> int:
+def will_host() -> dict[str, Any] | None:
+    """Return Will's fleet entry, or None when this process cannot or need not reach Will over SSH."""
+    try:
+        host = json.loads(HOSTS_FILE.read_text(encoding="utf-8"))["will"]
+        destination, root, port = host["ssh"], pathlib.PurePosixPath(host["instance_root"]), int(host["port"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None  # no fleet hosts file, as in Will's hand-copied ops subset
+    if not isinstance(destination, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", destination):
+        return None
+    if str(root) == str(ROOT):
+        return None  # already running in Will's instance
+    return {"ssh": destination, "instance_root": str(root), "port": port}
+
+
+def remote_program(argv: list[str], host: dict[str, Any]) -> str:
+    """Source for `python3 -` on Will: this file, run as if it lived in Will's instance root."""
+    source = pathlib.Path(__file__).read_text(encoding="utf-8")
+    remote_file = str(pathlib.PurePosixPath(host["instance_root"]) / "ops" / "claude_usage_resets.py")
+    return (
+        "import sys, types\n"
+        "module = types.ModuleType('claude_usage_resets')\n"
+        f"module.__file__ = {remote_file!r}\n"
+        "sys.modules[module.__name__] = module\n"
+        f"exec(compile({source!r}, module.__file__, 'exec'), module.__dict__)\n"
+        f"sys.exit(module.run_remote({argv!r}, {'http://127.0.0.1:%d' % host['port']!r}, "
+        f"{'Will (%s)' % host['ssh']!r}))\n"
+    )
+
+
+def ask_will(argv: list[str], host: dict[str, Any], live: bool) -> tuple[int, str, bool]:
+    """Run the command on Will. Returns its exit code, its stdout, and whether Will was unreachable.
+
+    Will's stderr passes straight through. With `live`, stdout is also shown as
+    it arrives, for `watch`. The management key never leaves Will: the remote
+    process reads Will's own .env.
+    """
+    try:
+        proc = subprocess.Popen([*SSH_ARGS, "--", host["ssh"], "python3", "-I", "-B", "-"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, encoding="utf-8")
+    except OSError:
+        return SSH_FAILED, "", True
+    try:
+        proc.stdin.write(remote_program(argv, host))
+        proc.stdin.close()
+    except OSError:
+        pass  # ssh exited early; its exit status says why
+    lines = []
+    for line in proc.stdout:
+        lines.append(line)
+        if live:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+    code = proc.wait()
+    return code, "".join(lines), code in (SSH_FAILED, PROXY_UNREACHABLE)
+
+
+def run_local(args: argparse.Namespace, label: str = "the local proxy") -> int:
+    """Run the command against the proxy at `--base-url`, with the key from `--root`/.env."""
+    try:
+        key = load_management_key(args.root)
+    except FileNotFoundError:
+        print(f"error: {args.root / '.env'} not found; pass --root with the instance root", file=sys.stderr)
+        return 1
+    proxy = Proxy(args.base_url, key)
+    try:
+        return {"status": cmd_status, "watch": cmd_watch, "claim": cmd_claim}[args.command](proxy, args)
+    except ResetError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    except urllib.error.HTTPError as err:
+        print(f"error: the management API at {args.base_url} returned HTTP {err.code}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as err:
+        print(f"error: no CLIProxy answered at {args.base_url} ({getattr(err, 'reason', err)})", file=sys.stderr)
+        return PROXY_UNREACHABLE
+    finally:
+        if proxy.answered:
+            print(f"answered by {label} at {args.base_url}", file=sys.stderr)
+
+
+def run_remote(argv: list[str], base_url: str, label: str) -> int:
+    """Entry point on Will: the same command against Will's own proxy and .env."""
+    args = build_parser().parse_args(argv)
+    args.host, args.root, args.base_url = "local", ROOT, base_url
+    args.notify = False  # Will has no notification centre; the Mac shows it
+    return run_local(args, label)
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--root", type=pathlib.Path, default=ROOT, help="deployment root holding .env")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8317")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8317", help="the local proxy")
+    host = argparse.ArgumentParser(add_help=False)
+    host.add_argument("--host", choices=("auto", "will", "local"),
+                      help="auto (status and watch default): ask Will over SSH, and use the local proxy only "
+                           "if SSH or Will's proxy is unreachable. will or local: that host only. "
+                           "claim defaults to local and never falls back")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("status", help="read-only usage, scoped limits, and reset grants")
+    p = sub.add_parser("status", parents=[host], help="read-only usage, scoped limits, and reset grants")
     p.add_argument("--account", help="Claude account email; default all")
     p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("watch", help="poll one limit and exit 0 when it reaches the threshold")
+    p = sub.add_parser("watch", parents=[host], help="poll one limit and exit 0 when it reaches the threshold")
     p.add_argument("--account", required=True)
     p.add_argument("--limit", default="Fable", help="scoped model name, or 'all' for the weekly total")
     p.add_argument("--threshold", type=int, default=99)
@@ -332,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-failures", type=int, default=10)
     p.add_argument("--notify", action="store_true", help="show a macOS notification on trigger")
 
-    p = sub.add_parser("claim", help="redeem one reset grant (consumes it)")
+    p = sub.add_parser("claim", parents=[host], help="redeem one reset grant (consumes it)")
     p.add_argument("--account", required=True)
     p.add_argument("--grant", required=True, help="grant id from `status`, e.g. launch-2610-fable")
     p.add_argument("--receipt", type=pathlib.Path)
@@ -341,20 +455,44 @@ def main(argv: list[str] | None = None) -> int:
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--yes", action="store_true", help="really redeem the grant")
     mode.add_argument("--dry-run", action="store_true", help="run every check but do not send the claim")
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    args = build_parser().parse_args(argv)
     if ".fleet-releases" in ROOT.parts:
         # The ops bundle ships this module only for the fleet monitor's imports.
         # Run as a command there, its .env lookup, receipts and request IDs would
         # resolve inside a release that the next ship replaces.
         print("error: run ops/claude_usage_resets.py from the checkout, not the ops bundle", file=sys.stderr)
         return 2
-    proxy = Proxy(args.base_url, load_management_key(args.root))
-    try:
-        return {"status": cmd_status, "watch": cmd_watch, "claim": cmd_claim}[args.command](proxy, args)
-    except ResetError as err:
-        print(f"error: {err}", file=sys.stderr)
-        return 1
+    host = args.host or ("local" if args.command == "claim" else "auto")
+    if args.command == "claim" and host == "auto":
+        # A claim's request ID and receipt stay on the host that sends it, so
+        # switching hosts after a failure could spend a second grant.
+        print("error: claim runs on one named host: pass --host will or --host local", file=sys.stderr)
+        return 2
+    will = None if host == "local" else will_host()
+    if host == "will" and will is None:
+        print(f"error: --host will needs Will's entry in {HOSTS_FILE} and must run outside Will's instance",
+              file=sys.stderr)
+        return 2
+    if will is not None:
+        live = args.command == "watch"
+        code, output, unreachable = ask_will(argv, will, live)
+        # Fall back only before Will has shown anything, so a watch never
+        # switches hosts halfway, and never when the host was named.
+        if not unreachable or (live and output) or host == "will":
+            if not live:
+                sys.stdout.write(output)
+            if code == SSH_FAILED:
+                print(f"error: the SSH session to Will ({will['ssh']}) failed", file=sys.stderr)
+            if code == 0 and live and args.notify:
+                notify(f"{args.account}: {args.limit} reached {args.threshold}%")
+            return code
+        print(f"Will ({will['ssh']}) did not answer; asking the local proxy at {args.base_url}", file=sys.stderr)
+    return run_local(args)
 
 
 if __name__ == "__main__":

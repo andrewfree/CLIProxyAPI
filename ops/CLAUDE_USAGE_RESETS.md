@@ -10,6 +10,31 @@ OAuth token stays inside CLIProxy. The tool sends each upstream request through
 Redeeming a grant consumes it. Andrew must approve each redemption: the
 account, the grant ID, and the timing. Reading status needs no approval.
 
+## Which host answers
+
+Will is the primary proxy, so `status` and `watch` ask Will first. The tool
+sends its own source to Will over SSH stdin (`python3 -I -B -`), using the
+SSH destination, instance root, and port in `fleet/hosts.json`. On Will it reads
+Will's own `.env` and calls Will's proxy at `127.0.0.1`, so no management key
+leaves its host. The tool falls back to the local proxy only when SSH fails or
+Will's proxy cannot be reached, and only before Will has printed
+anything, so a `watch` never switches hosts partway through. Any other error
+from Will, such as an HTTP 429 from the usage endpoint, is the answer. The last
+stderr line names the host and URL that answered, for example
+`answered by Will (will.local) at http://127.0.0.1:8317`.
+
+- `--host auto` is the default for `status` and `watch`.
+- `--host will` or `--host local` asks only that host and never falls back.
+  From a worktree, `--host local` also needs `--root ~/cliproxy`, because the
+  key is read from `<root>/.env`.
+- `claim` runs only on the host it is given. It defaults to `local`, refuses
+  `--host auto`, and never falls back, because its request ID and receipt stay
+  on the host that sent it. A rerun on another host would carry a new request
+  ID and could spend a second grant.
+- On Will, a hand-copied `ops/` without `fleet/hosts.json` answers from Will's
+  own proxy, as before.
+- Exit status 3 means no proxy answered at the URL tried.
+
 ## Read limits and grants
 
 ```sh
@@ -56,19 +81,25 @@ when the limit triggers, chain a claim that Andrew approved:
 
 ```sh
 python3 ops/claude_usage_resets.py watch --account <email> --threshold 99 --notify \
-  && python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> \
+  && python3 ops/claude_usage_resets.py claim --host will --account <email> --grant <grant-id> \
        --min-fable-percent 99 --yes
 ```
 
 `--min-fable-percent 99` makes the claim check the threshold again on a fresh
-read, so a stale or wrong trigger cannot spend the grant.
+read, so a stale or wrong trigger cannot spend the grant. Name the claim's
+host explicitly. `--notify` shows the notification on the machine that runs
+the command, even when Will answered the watch.
 
 ## Redeem a grant
 
 ```sh
-python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --dry-run
-python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --yes
+python3 ops/claude_usage_resets.py claim --host will --account <email> --grant <grant-id> --dry-run
+python3 ops/claude_usage_resets.py claim --host will --account <email> --grant <grant-id> --yes
 ```
+
+Run the dry run and the real claim on the same host. With `--host will`, the
+request ID and receipt are written under Will's
+`~/cliproxy/ops/runtime/claude-resets/`, and a `--receipt` path is a path on Will.
 
 For a conditional redemption, add `--min-fable-percent 99` to the claim.
 The claim checks the account profile and reads usage again before spending
