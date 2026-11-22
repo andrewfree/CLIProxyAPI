@@ -498,14 +498,16 @@ docker exec -it cli-proxy-api \
 
 `claude_usage_resets.py` reads each Claude account's weekly and per-model
 limits, plus its Anthropic reset grants. It can also watch a limit or redeem a
-grant. Every request goes through this proxy's management API, so tokens never
-leave CLIProxy. `status` and `watch` are read-only. `claim` consumes a grant
-and needs Andrew's approval for that account and grant.
+grant. Every request goes through a proxy's management API, so tokens never
+leave CLIProxy. `status` and `watch` are read-only and ask Will first over SSH,
+falling back to the local proxy only when Will is unreachable. `claim` consumes
+a grant, runs only on the host it names, and needs Andrew's approval for that
+account and grant.
 
 ```sh
 python3 ops/claude_usage_resets.py status
 python3 ops/claude_usage_resets.py watch --account <email> --limit Fable --threshold 99 --notify
-python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --dry-run
+python3 ops/claude_usage_resets.py claim --host will --account <email> --grant <grant-id> --dry-run
 python3 -m unittest -v ops.test_claude_usage_resets
 ```
 

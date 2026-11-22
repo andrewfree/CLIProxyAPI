@@ -14,7 +14,14 @@ and covers the Go server. Keep fork-only operational rules here.
   current.
 - Run the tool from the checkout. The ops bundle ships a copy only for the
   fleet monitor's imports, and that copy refuses to run as a command.
+- `status` and `watch` ask Will first and fall back to the local proxy only
+  when Will is unreachable. The last stderr line names the host that answered;
+  report it with the numbers.
 - `status`, `watch`, and `claim --dry-run` are read-only and need no approval.
+- `claim` runs only on the host it names and never falls back. `claim --yes`
+  requires `--host will` or `--host local`. Run a dry run and its real claim on
+  the same host. After an `indeterminate` receipt, check `status` on that host
+  before any rerun, and rerun only there.
 - `claim --yes` consumes a grant. Run it only with Andrew's explicit approval
   for that account and grant ID. A conditional approval counts, for example
   "when it hits 99%, reset Fable". Never substitute a different grant when the

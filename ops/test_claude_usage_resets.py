@@ -1,10 +1,12 @@
 import contextlib
+import http.server
 import io
 import json
 import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from typing import Any
 from unittest import mock
@@ -218,11 +220,20 @@ class CliGuardTest(unittest.TestCase):
 
     def test_cli_min_fable_percent_reaches_claim_and_refuses(self):
         proxy = FakeProxy([(200, usage_body(fable=98))])
-        code, spy, err = self.run_claim_cli(proxy, ["--yes", "--min-fable-percent", "99"])
+        code, spy, err = self.run_claim_cli(proxy, ["--host", "local", "--yes", "--min-fable-percent", "99"])
         self.assertEqual(code, 1)
         self.assertEqual(spy.call_args.kwargs["min_fable_percent"], 99)
         self.assertIn("below required 99%", err)
         self.assertEqual(proxy.posts(), [])
+
+    def test_status_hint_repeats_the_claims_proxy(self):
+        parse = resets.build_parser().parse_args
+        self.assertEqual(resets.status_hint(parse(["claim", "--host", "will", "--account", EMAIL,
+                                                   "--grant", "g", "--yes"])), "status --host will")
+        args = parse(["--root", "/srv/x", "--base-url", "http://127.0.0.2:8327", "claim", "--host", "local",
+                      "--account", EMAIL, "--grant", "g", "--yes"])
+        self.assertEqual(resets.status_hint(args),
+                         "--root /srv/x --base-url http://127.0.0.2:8327 status --host local")
 
     def test_bundled_copy_refuses_to_run_as_a_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -243,6 +254,343 @@ class CliGuardTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIsNone(spy.call_args.kwargs["min_fable_percent"])
         self.assertEqual(proxy.posts(), [])
+
+
+WILL = {"ssh": "will.local", "instance_root": "/home/andrew/cliproxy", "port": 8317}
+UNREACHABLE = (resets.SSH_FAILED, "", True)
+
+
+class HostSelectionTest(unittest.TestCase):
+    def run_main(self, argv, will_result=(0, "", False), will=WILL):
+        """Run `main` with Will's SSH session and the local proxy replaced by recorders."""
+        calls = {"will": [], "local": []}
+
+        def ask_will(argv_, host, live):
+            calls["will"].append(live)
+            return will_result
+
+        def run_local(args, label="the local proxy"):
+            calls["local"].append(label)
+            self.local_args = args
+            return 0
+
+        with mock.patch.object(resets, "will_entry", return_value=will), \
+                mock.patch.object(resets, "ask_will", side_effect=ask_will), \
+                mock.patch.object(resets, "run_local", side_effect=run_local), \
+                mock.patch.object(resets, "notify") as notify, \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = resets.main(argv)
+        return code, calls, out.getvalue(), err.getvalue(), notify
+
+    def test_status_is_answered_by_will_without_the_local_proxy(self):
+        code, calls, out, _, _ = self.run_main(["status"], (0, "report\n", False))
+        self.assertEqual((code, out), (0, "report\n"))
+        self.assertEqual(calls, {"will": [False], "local": []})
+
+    def test_status_falls_back_only_when_will_is_unreachable(self):
+        for result in (UNREACHABLE, (resets.PROXY_UNREACHABLE, "partial\n", True)):
+            with self.subTest(code=result[0]):
+                code, calls, out, err, _ = self.run_main(["status"], result)
+                self.assertEqual((code, calls["local"]), (0, ["the local proxy"]))
+                self.assertNotIn("partial", out)
+                self.assertIn("asking the local proxy", err)
+                self.assertIn("the SSH session failed" if result[0] == resets.SSH_FAILED
+                              else "its proxy did not answer", err)
+        code, calls, out, _, _ = self.run_main(["status"], (1, "", False))
+        self.assertEqual((code, calls["local"]), (1, []))
+
+    def test_named_hosts_never_fall_back(self):
+        code, calls, _, err, _ = self.run_main(["status", "--host", "will"], UNREACHABLE)
+        self.assertEqual((code, calls["local"]), (resets.SSH_FAILED, []))
+        self.assertIn("SSH session to Will (will.local) failed", err)
+        code, calls, _, _, _ = self.run_main(["status", "--host", "local"])
+        self.assertEqual(calls, {"will": [], "local": ["the local proxy"]})
+
+    def test_on_will_itself_will_is_the_local_proxy(self):
+        here = dict(WILL, instance_root=str(resets.ROOT), port=8327)
+        for host in ("auto", "will"):
+            with self.subTest(host=host):
+                code, calls, _, _, _ = self.run_main(["status", "--host", host], will=here)
+                self.assertEqual((code, calls), (0, {"will": [], "local": ["Will (this host)"]}))
+                self.assertEqual((self.local_args.root, self.local_args.base_url),
+                                 (resets.ROOT, "http://127.0.0.1:8327"))
+        code, calls, _, err, _ = self.run_main(["--base-url", "http://10.0.0.9:1", "status", "--host", "will"],
+                                               will=here)
+        self.assertEqual((code, calls), (2, {"will": [], "local": []}))
+
+    def test_claim_runs_only_on_the_named_host(self):
+        claim = ["claim", "--account", EMAIL, "--grant", "launch-2610-fable", "--yes"]
+        code, calls, _, err, _ = self.run_main(claim)
+        self.assertEqual((code, calls), (2, {"will": [], "local": []}))
+        self.assertIn("claim --yes needs --host will or --host local", err)
+        code, calls, _, _, _ = self.run_main(claim[:-1] + ["--dry-run"])
+        self.assertEqual((code, calls), (0, {"will": [], "local": ["the local proxy"]}))
+        code, calls, _, _, _ = self.run_main(claim + ["--host", "local"])
+        self.assertEqual((code, calls), (0, {"will": [], "local": ["the local proxy"]}))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.run_main(claim + ["--host", "auto"])
+        code, calls, _, err, _ = self.run_main(claim + ["--host", "will"], UNREACHABLE)
+        self.assertEqual((code, calls), (resets.SSH_FAILED, {"will": [False], "local": []}))
+        self.assertIn("rerun the same command with --host will", err)
+
+    def test_host_will_refuses_without_an_entry_or_with_local_options(self):
+        cases = ((["status", "--host", "will"], None, "needs Will's entry"),
+                 (["--root", "/tmp", "status", "--host", "will"], WILL, "drop them with --host will"),
+                 (["--base-url", "http://127.0.0.1:1", "claim", "--host", "will", "--account", EMAIL,
+                   "--grant", "launch-2610-fable", "--dry-run"], WILL, "drop them with --host will"))
+        for argv, will, message in cases:
+            with self.subTest(argv=argv):
+                code, calls, _, err, _ = self.run_main(argv, will=will)
+                self.assertEqual((code, calls), (2, {"will": [], "local": []}))
+                self.assertIn(message, err)
+
+    def test_watch_streams_and_never_switches_hosts_after_output(self):
+        code, calls, _, _, _ = self.run_main(["watch", "--account", EMAIL], (resets.SSH_FAILED, "poll\n", True))
+        self.assertEqual((code, calls), (resets.SSH_FAILED, {"will": [True], "local": []}))
+        code, calls, _, _, _ = self.run_main(["watch", "--account", EMAIL], UNREACHABLE)
+        self.assertEqual((code, calls), (0, {"will": [True], "local": ["the local proxy"]}))
+
+    def test_watch_trigger_on_will_notifies_on_this_host(self):
+        argv = ["watch", "--account", EMAIL, "--notify"]
+        _, _, _, _, notify = self.run_main(argv, (0, "TRIGGER\n", False))
+        notify.assert_called_once()
+        _, _, _, _, notify = self.run_main(argv, (2, "poll failed\n", False))
+        notify.assert_not_called()
+
+
+class WillEntryTest(unittest.TestCase):
+    def test_reads_will_from_the_fleet_hosts_file(self):
+        self.assertEqual(resets.will_entry(), WILL)
+
+    def test_missing_hosts_file_is_silent_and_a_bad_entry_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts = pathlib.Path(tmp) / "hosts.json"
+            with mock.patch.object(resets, "HOSTS_FILE", hosts), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertIsNone(resets.will_entry())
+                self.assertEqual(err.getvalue(), "")
+                hosts.write_text(json.dumps({"will": dict(WILL, ssh="-oProxyCommand=x")}))
+                self.assertIsNone(resets.will_entry())
+                self.assertIn("no usable Will entry", err.getvalue())
+
+    def test_loopback_urls_are_recognised(self):
+        for url in ("http://127.0.0.1:8317", "http://localhost:8317", "http://[::1]:8317",
+                    "http://[0:0:0:0:0:0:0:1]:8317", "https://127.0.0.2"):
+            with self.subTest(url=url):
+                self.assertTrue(resets.is_loopback(url))
+
+    def test_a_non_loopback_base_url_never_receives_the_key(self):
+        for url in ("http://10.0.0.9:8317", "http://will.local:8317", "file:///etc/passwd", "http://[::1",
+                    "http://127.0.0.1@evil.example", "http://user@127.0.0.1:8317", "http://@127.0.0.2:8317",
+                    "http://127.0.0.2:bad"):
+            args = resets.build_parser().parse_args(["--base-url", url, "status"])
+            with self.subTest(url=url), mock.patch.object(resets, "load_management_key") as key, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(resets.run_local(args), 2)
+                key.assert_not_called()
+                self.assertIn("must be a loopback URL", err.getvalue())
+
+    def test_worktree_without_env_uses_the_mac_instance_root_except_for_claims(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(resets, "ROOT", pathlib.Path(tmp)):
+            self.assertEqual(resets.local_root("status"), pathlib.Path("/Users/rever/cliproxy"))
+            self.assertEqual(resets.local_root("claim"), pathlib.Path(tmp))
+            pathlib.Path(tmp, ".env").write_text("MANAGEMENT_PASSWORD=x\n")
+            self.assertEqual(resets.local_root("status"), pathlib.Path(tmp))
+
+
+class AskWillTest(unittest.TestCase):
+    def ask(self, code, lines=(), live=False, stdin_error=None):
+        sent = {}
+
+        class FakePopen:
+            def __init__(self, argv, **kwargs):
+                sent["argv"] = argv
+                self.stdin = mock.Mock()
+                self.stdin.write.side_effect = stdin_error or (lambda text: sent.setdefault("program", text))
+                self.stdout = iter(lines)
+
+            def wait(self):
+                return code
+
+        with mock.patch.object(resets.subprocess, "Popen", FakePopen), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            result = resets.ask_will(["watch", "--account", EMAIL], WILL, live=live)
+        return result, out.getvalue(), sent
+
+    def test_sends_this_source_over_ssh_stdin_and_streams_watch_output(self):
+        result, out, sent = self.ask(0, ["poll 1\n", "poll 2\n"], live=True)
+        self.assertEqual(result, (0, "poll 1\npoll 2\n", False))
+        self.assertEqual(out, "poll 1\npoll 2\n")
+        self.assertEqual(sent["argv"][-6:], ["--", "will.local", "python3", "-I", "-B", "-"])
+        self.assertIn("'/home/andrew/cliproxy/ops/claude_usage_resets.py'", sent["program"])
+        self.assertIn("run_remote(*(['watch', '--account', 'person@example.com'], "
+                      "'http://127.0.0.1:8317', 'Will (will.local)', '/home/andrew/cliproxy'))", sent["program"])
+        self.assertNotIn(EMAIL, " ".join(sent["argv"]))
+
+    def test_only_ssh_failure_and_an_unreachable_proxy_count_as_unreachable(self):
+        for code, unreachable in ((255, True), (3, True), (1, False), (2, False)):
+            with self.subTest(code=code):
+                self.assertEqual(self.ask(code, ["x\n"])[0], (code, "x\n", unreachable))
+        self.assertEqual(self.ask(255, stdin_error=BrokenPipeError())[0], UNREACHABLE)
+
+    def test_ssh_that_cannot_start_counts_as_unreachable(self):
+        with mock.patch.object(resets.subprocess, "Popen", side_effect=FileNotFoundError("ssh")):
+            self.assertEqual(resets.ask_will(["status"], WILL, live=False), UNREACHABLE)
+
+
+class FakeManagementAPI:
+    """A loopback management API that answers auth-files and api-call routes."""
+
+    def __init__(self, files=(), api_call=None, redirect_to=None):
+        seen = self.seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def reply(self, body):
+                data = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                if redirect_to:
+                    self.send_response(302)
+                    self.send_header("Location", redirect_to)
+                    self.end_headers()
+                    return
+                self.reply({"files": list(files)})
+
+            def do_POST(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                result = None if api_call is None else api_call(payload)
+                if result is None:
+                    self.close_connection = True  # drop the connection without a response
+                    return
+                if isinstance(result, int):
+                    self.send_response(result)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.reply(result)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_port
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class RemoteProgramTest(unittest.TestCase):
+    """Run the program Will would receive, here, against a fake management API."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        pathlib.Path(self.root, ".env").write_text("MANAGEMENT_PASSWORD=remote-key\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_program(self, argv, port, dead_proxy=None):
+        program = resets.remote_program(argv, dict(WILL, instance_root=self.root, port=port))
+        env = None
+        if dead_proxy is not None:  # a management key must never go to an ambient HTTP proxy
+            env = {"PATH": "/usr/bin:/bin", "http_proxy": dead_proxy, "HTTP_PROXY": dead_proxy, "no_proxy": ""}
+        return subprocess.run([sys.executable, "-I", "-B", "-"], input=program, env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_uses_the_remote_roots_key_and_reports_an_unreachable_proxy(self):
+        api = FakeManagementAPI()
+        try:
+            answered = self.run_program(["status", "--host", "auto"], api.port, dead_proxy="http://127.0.0.1:9")
+        finally:
+            api.close()
+        refused = self.run_program(["status"], api.port)
+        watch = self.run_program(["watch", "--account", EMAIL, "--max-failures", "1"], api.port)
+        self.assertEqual(answered.returncode, 1, answered.stderr)  # the fake proxy has no Claude accounts
+        self.assertEqual(api.seen, [("/v0/management/auth-files", "Bearer remote-key")])
+        self.assertIn(f"answered by Will (will.local) at http://127.0.0.1:{api.port}", answered.stderr)
+        for result in (refused, watch):
+            self.assertEqual((result.returncode, result.stdout), (resets.PROXY_UNREACHABLE, ""), result.stderr)
+            self.assertIn(f"Will (will.local) did not answer at http://127.0.0.1:{api.port}", result.stderr)
+        self.assertNotIn("Traceback", answered.stderr + refused.stderr + watch.stderr)
+
+    def test_a_redirect_is_refused_with_the_key_kept_on_the_loopback_api(self):
+        target = FakeManagementAPI()
+        api = FakeManagementAPI(redirect_to=f"http://127.0.0.1:{target.port}/v0/management/auth-files")
+        try:
+            result = self.run_program(["status"], api.port)
+        finally:
+            api.close()
+            target.close()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("returned HTTP 302", result.stderr)
+        self.assertEqual(target.seen, [])
+
+    def claim_against(self, on_claim, after=None):
+        """Run a Will claim whose POST gets `on_claim` and whose usage reread gets `after`."""
+        reads = []
+
+        def api_call(payload):
+            if payload["url"] == resets.PROFILE_URL:
+                body = {"account": {"email": EMAIL}, "organization": {"uuid": "org-1"}}
+            elif payload["url"] == resets.USAGE_URL:
+                reads.append(1)
+                if len(reads) > 1 and after is not None:
+                    return after
+                body = usage_body()
+            else:
+                return on_claim
+            return {"status_code": 200, "body": json.dumps(body)}
+
+        api = FakeManagementAPI(files=[{"provider": "claude", "email": EMAIL, "auth_index": 0}], api_call=api_call)
+        try:
+            result = self.run_program(["claim", "--host", "will", "--account", EMAIL,
+                                       "--grant", "launch-2610-fable", "--yes"], api.port)
+        finally:
+            api.close()
+        [receipt] = pathlib.Path(self.root, "ops", "runtime", "claude-resets").glob("claim-*.json")
+        self.assertNotIn("org-1", receipt.read_text())
+        return result, json.loads(receipt.read_text())
+
+    def test_a_claim_whose_answer_is_lost_is_indeterminate_and_pinned_to_its_host(self):
+        for on_claim in (None, 502, 303):  # dropped, failed after forwarding, or redirected: all unknown
+            with self.subTest(on_claim=on_claim):
+                result, saved = self.claim_against(on_claim)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("the claim may have been sent", result.stderr)
+                self.assertIn("Check `status --host will`", result.stderr)
+                self.assertIn("same command on the same host", result.stderr)
+                self.assertEqual((saved["result"], saved["host"]), ("indeterminate", "Will (will.local)"))
+                for receipt in pathlib.Path(self.root, "ops", "runtime", "claude-resets").glob("claim-*.json"):
+                    receipt.unlink()
+
+    def test_a_proxy_rejection_before_forwarding_is_a_refusal(self):
+        result, saved = self.claim_against(400)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("refused the claim before sending it", result.stderr)
+        self.assertEqual(saved["result"], "refused")
+
+    def test_a_confirmed_claim_survives_a_failed_or_unreadable_reread(self):
+        reset = {"status_code": 200, "body": json.dumps({"result": "reset", "resets_left": 0})}
+        html = {"status_code": 200, "body": "<html>upstream error</html>"}
+        for after, error in ((403, "management HTTP 403"), (html, "unreadable body")):
+            with self.subTest(error=error):
+                result, saved = self.claim_against(reset, after=after)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["result"], "reset")
+                self.assertEqual(saved["result"], "reset")
+                self.assertIn(error, saved["after_error"])
+                for receipt in pathlib.Path(self.root, "ops", "runtime", "claude-resets").glob("claim-*.json"):
+                    receipt.unlink()
 
 
 if __name__ == "__main__":
