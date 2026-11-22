@@ -381,49 +381,79 @@ class LogMoverTests(unittest.TestCase):
         self.assertEqual(status["unfinished"], 0)
         self.assertFalse(status["source_watch_active"])
 
-    def test_publication_deadline_fails_when_submitted_work_is_unresolved(self):
-        for blocked_probe in (False, True):
-            with self.subTest(blocked_probe=blocked_probe):
-                self.pilot = self.start_pilot()
-                if not blocked_probe:
-                    self.offer()
-                pilot = self.pilot
-                pilot.stop_watch()
-                now = time.monotonic()
-                pilot.admission_cutoff, pilot.publication_deadline = now + 2, now + 4
-                pending_job = Future()
-                submitted = []
+    def test_shutdown_counts_unfinished_probe_or_capture_once(self):
+        for ending in ("deadline", "interrupted", "interrupted_then_settled"):
+            for blocked_probe in (False, True):
+                with self.subTest(ending=ending, blocked_probe=blocked_probe):
+                    self.check_unfinished_work(ending, blocked_probe)
 
-                def submit(function, *args):
-                    submitted.append(function)
-                    if function == self.archive.probe:
-                        if blocked_probe:
-                            return pending_job
-                        probe_job = Future()
-                        probe_job.completed_at = now
-                        probe_job.set_result((None, 0, False))
-                        return probe_job
-                    os.close(args[1])
+    def check_unfinished_work(self, ending, blocked_probe):
+        self.pilot = self.start_pilot()
+        if not blocked_probe:
+            self.offer()
+        pilot = self.pilot
+        pilot.stop_watch()
+        now = started = time.monotonic()
+        interrupted = ending != "deadline"
+        pilot.admission_cutoff = started + 2
+        pilot.publication_deadline = started + (30 if interrupted else 4)
+        pending_job = Future()
+        submitted = []
+
+        def submit(function, *args):
+            submitted.append(function)
+            if function == self.archive.probe:
+                if blocked_probe:
                     return pending_job
+                probe_job = Future()
+                probe_job.completed_at = now
+                probe_job.set_result((None, 0, False))
+                return probe_job
+            os.close(args[1])
+            return pending_job
 
-                def tick(*_args):
-                    nonlocal now
-                    now += 1
+        def tick(*_args):
+            nonlocal now
+            now += 1
+            if ending == "interrupted_then_settled" and pilot.phase == "interrupted":
+                pending_job.completed_at = now
+                if blocked_probe:
+                    pending_job.set_result((None, 0, False))
+                else:
+                    pending_job.set_exception(mover.CaptureCancelled())
 
-                worker = SimpleNamespace(submit=submit, close=lambda: None)
-                with (
-                    mover.directory(self.root) as fd,
-                    patch.object(pilot, "reconcile"),
-                    patch.object(mover, "DiskWorker", return_value=worker),
-                    patch.object(mover.time, "monotonic", side_effect=lambda: now),
-                    patch.object(mover.select, "select", side_effect=tick),
-                ):
-                    self.assertEqual(pilot.run(self.source, fd, lambda: False), 1)
-                    status = mover.read_json(fd, mover.STATUS_NAME)
-                self.assertEqual(status["phase"], "failed")
-                self.assertEqual(status["unfinished"], 1)
-                self.assertEqual(len(submitted), 1 if blocked_probe else 2)
-                self.assertFalse(pending_job.done())
+        worker = SimpleNamespace(submit=submit, close=lambda: None)
+        with (
+            mover.directory(self.root) as fd,
+            patch.object(pilot, "reconcile"),
+            patch.object(mover, "DiskWorker", return_value=worker),
+            patch.object(mover.time, "monotonic", side_effect=lambda: now),
+            patch.object(mover.select, "select", side_effect=tick),
+        ):
+            result = pilot.run(self.source, fd, lambda: interrupted and now >= started + 3)
+            status = mover.read_json(fd, mover.STATUS_NAME)
+        self.assertEqual(result, 3 if interrupted else 1)
+        self.assertEqual(status["phase"], "interrupted" if interrupted else "failed")
+        self.assertEqual(status["unfinished"], 1)
+        self.assertEqual(len(submitted), 1 if blocked_probe else 2)
+        self.assertEqual(pending_job.done(), ending == "interrupted_then_settled")
+
+    def test_queued_capture_abandoned_on_interrupt_prevents_success(self):
+        self.offer()
+        self.pilot.admission_cutoff = time.monotonic() - 1
+        with mover.directory(self.root) as fd:
+            self.assertEqual(self.pilot.run(self.source, fd, lambda: True), 3)
+            status = mover.read_json(fd, mover.STATUS_NAME)
+        self.assertEqual(status["phase"], "interrupted")
+        self.assertEqual(status["unfinished"], 1)
+        self.assertEqual(status["abandoned_pending"]["files"], 1)
+
+    def test_clean_interruption_with_no_work_returns_zero(self):
+        with mover.directory(self.root) as fd:
+            self.assertEqual(self.pilot.run(self.source, fd, lambda: True), 0)
+            status = mover.read_json(fd, mover.STATUS_NAME)
+        self.assertEqual(status["phase"], "interrupted")
+        self.assertEqual(status["unfinished"], 0)
 
     def test_stop_signal_after_publication_deadline_cannot_hide_pending_work(self):
         self.offer()
@@ -588,35 +618,44 @@ class LogMoverTests(unittest.TestCase):
         self.assertEqual(len(history.read_bytes().splitlines()), 2)
 
     def test_watchdog_uses_manager_exit_timestamps_and_result(self):
-        started = 1_700_000_000
+        started = 1_234_567
         cutoff = started + mover.ADMISSION_WINDOW
-
-        def timestamp(value):
-            return time.strftime("%a %Y-%m-%d %H:%M:%S UTC", time.gmtime(value))
-
         properties = {
             "ActiveState": "inactive",
             "Result": "success",
-            "ActiveEnterTimestamp": timestamp(started),
-            "InactiveEnterTimestamp": timestamp(cutoff - 1),
+            "ExecMainStatus": "0",
+            "ActiveEnterTimestampMonotonic": str(started * 1_000_000),
+            "ExecMainExitTimestampMonotonic": str(cutoff * 1_000_000 - 1),
+            # Conflicting wall-clock values cannot affect the decision.
+            "ActiveEnterTimestamp": "2034-01-02",
+            "InactiveEnterTimestamp": "2003-01-01",
         }
-        # A fresh heartbeat cannot make an early manager-recorded exit clean.
         self.assertEqual(mover.watchdog_alerts(properties, cutoff + 20, cutoff + 20),
                          {"inactive"})
-        properties["InactiveEnterTimestamp"] = timestamp(cutoff)
+        properties["ExecMainExitTimestampMonotonic"] = str(cutoff * 1_000_000)
         self.assertEqual(mover.watchdog_alerts(properties, None, cutoff + 20), set())
-        properties.update(ActiveState="failed", Result="exit-code")
-        self.assertEqual(mover.watchdog_alerts(properties, None, cutoff + 20), {"inactive"})
+        for failure in ({"ExecMainStatus": "3"}, {"Result": "timeout"},
+                        {"ActiveState": "failed"}):
+            with self.subTest(failure=failure):
+                self.assertEqual(mover.watchdog_alerts(properties | failure, None, cutoff + 20),
+                                 {"failed"})
         self.assertEqual(mover.watchdog_alerts({}, None, cutoff + 20), {"manager"})
 
+    def test_watchdog_zero_start_reports_not_started_even_after_startup_failure(self):
+        properties = {
+            "ActiveState": "inactive", "Result": "success", "ExecMainStatus": "0",
+            "ActiveEnterTimestampMonotonic": "0", "ExecMainExitTimestampMonotonic": "0",
+        }
+        self.assertEqual(mover.watchdog_alerts(properties, None, 100), {"not_started"})
+        properties.update(ActiveState="failed", Result="exit-code", ExecMainStatus="1")
+        self.assertEqual(mover.watchdog_alerts(properties, None, 100), {"not_started", "failed"})
+
     def test_watchdog_alert_hook_only_fires_on_state_changes(self):
-        started = 1_700_000_000
+        started = 7_200
         now = started + mover.STALE_AFTER + 1
         active = {
             "ActiveState": "active", "Result": "success",
-            "ActiveEnterTimestamp": time.strftime(
-                "%a %Y-%m-%d %H:%M:%S UTC", time.gmtime(started)
-            ),
+            "ActiveEnterTimestampMonotonic": str(started * 1_000_000),
         }
         self.mount.reason = "mount_unavailable"
         messages = []
@@ -628,6 +667,24 @@ class LogMoverTests(unittest.TestCase):
         alerts = mover.watchdog_poll(self.mount, active, now, now, alerts, messages.append)
         self.assertEqual(alerts, set())
         self.assertEqual(len(messages), 4)
+
+    def test_watchdog_loop_reads_monotonic_heartbeat_without_consulting_wall_time(self):
+        now = 7_499
+        active = {"ActiveState": "active", "ActiveEnterTimestampMonotonic": "7300000000"}
+        stopped = threading.Event()
+        status = {"heartbeat_monotonic": now - 1, "heartbeat_unix": 1_900_000_000}
+        with mover.directory(self.root) as fd:
+            mover.replace_json(fd, mover.STATUS_NAME, status)
+        with (
+            patch.object(mover, "STATUS_PATH", self.root),
+            patch.object(mover, "manager_properties", return_value=active),
+            patch.object(mover, "watchdog_poll", wraps=mover.watchdog_poll) as poll,
+            patch.object(mover.time, "monotonic", return_value=now),
+            patch.object(mover.time, "time", side_effect=AssertionError("wall clock consulted")),
+            patch.object(stopped, "wait", side_effect=lambda _: stopped.set()),
+        ):
+            mover.watchdog_loop(self.mount, "synthetic.service", stopped)
+        poll.assert_called_once_with(self.mount, active, now - 1, now, set())
 
     @unittest.skipUnless(mover.zstd is not None, "in-process zstd requires Python 3.14")
     def test_production_codec_round_trip(self):

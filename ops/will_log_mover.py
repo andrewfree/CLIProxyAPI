@@ -592,6 +592,7 @@ class Pilot:
         self.max_bytes = max_bytes
         self.started_at = time.time()
         start = time.monotonic()
+        self.started_at_monotonic = start
         self.admission_cutoff = (start + ADMISSION_WINDOW
                                  if admission_cutoff is None else admission_cutoff)
         self.publication_deadline = (start + PUBLICATION_WINDOW
@@ -969,9 +970,11 @@ class Pilot:
         oldest = self.observe_age(now)
         return {
             "started_at_unix": self.started_at,
+            "started_at_monotonic": self.started_at_monotonic,
             "admission_cutoff_unix": self.admission_cutoff_unix,
             "publication_deadline_unix": self.publication_deadline_unix,
             "heartbeat_unix": time.time(),
+            "heartbeat_monotonic": now,
             "phase": self.phase,
             "unfinished": self.unfinished,
             "paused_reason": self.paused,
@@ -991,6 +994,11 @@ class Pilot:
             **{key: value.copy() for key, value in self.counts.items()},
         }
 
+    def unfinished_work(self, job, record):
+        # A pending capture already accounts for its worker job. A probe or
+        # a detached capture is separate work.
+        return self.pending_files + (job is not None and (record is None or not record.pending))
+
     def run(self, source, status_fd, stop):
         scan_due = heartbeat_due = probe_due = history_due = 0
         worker = DiskWorker()
@@ -1000,18 +1008,8 @@ class Pilot:
         try:
             while True:
                 now = time.monotonic()
-                if now < shutdown_deadline and stop() and self.phase != "interrupted":
-                    self.phase = "interrupted"
-                    shutdown_deadline = min(shutdown_deadline, now + 20)
-                    self.disarm()
-                    self.discard_pending()
-                    heartbeat_due = 0
-                elif self.phase == "capturing" and now >= self.admission_cutoff:
-                    self.phase = "draining"
-                    self.stop_watch()
-                    heartbeat_due = 0
-
-                if job is not None and job.done() and job.completed_at < shutdown_deadline:
+                settled = job is not None and job.done() and job.completed_at < shutdown_deadline
+                if settled:
                     if record is not None:
                         self.capture_result(record, job, now)
                     else:
@@ -1021,18 +1019,31 @@ class Pilot:
                         if history_requested and wrote_history:
                             history_due = now + HISTORY_INTERVAL
                     job = record = None
-                    if now < shutdown_deadline and self.phase != "interrupted":
-                        self.refill()
+                    now = time.monotonic()
+
+                if now < shutdown_deadline and stop() and self.phase != "interrupted":
+                    self.phase = "interrupted"
+                    self.unfinished = self.unfinished_work(job, record)
+                    shutdown_deadline = min(shutdown_deadline, now + 20)
+                    self.disarm()
+                    self.discard_pending()
+                    heartbeat_due = 0
+                elif self.phase == "capturing" and now >= self.admission_cutoff:
+                    self.phase = "draining"
+                    self.stop_watch()
+                    heartbeat_due = 0
 
                 if now >= shutdown_deadline:
-                    self.unfinished = self.pending_files
-                    if job is not None and (record is None or not record.pending):
-                        self.unfinished += 1
+                    self.unfinished = max(self.unfinished, self.unfinished_work(job, record))
+                    if self.phase == "interrupted":
+                        break
                     if self.unfinished:
                         self.phase = "failed"
                     elif self.phase == "draining":
                         self.phase = "finished"
                     break
+                if settled and self.phase != "interrupted":
+                    self.refill()
                 if job is None:
                     if self.phase == "interrupted":
                         break
@@ -1062,11 +1073,10 @@ class Pilot:
                 watch_fd = [self.watch.fd] if self.watch is not None else []
                 select.select(watch_fd, [], [], 0.05 if job is not None else 0.5)
         except Exception:
-            self.phase = "failed"
-            self.unfinished = self.pending_files + (
-                job is not None and (record is None or not record.pending)
-            )
-            raise
+            self.unfinished = max(self.unfinished, self.unfinished_work(job, record))
+            if self.phase != "interrupted" or not self.unfinished:
+                self.phase = "failed"
+                raise
         finally:
             # A stuck I/O must not keep this process or its inotify loop alive.
             if job is None or job.done():
@@ -1074,11 +1084,15 @@ class Pilot:
             self.discard_pending()
             self.close()
             replace_json(status_fd, STATUS_NAME, self.status(time.monotonic()))
+        if self.phase == "interrupted" and self.unfinished:
+            return 3
         return 1 if self.phase == "failed" else 0
 
 
 ALERTS = {
-    "inactive": "pilot service exited early or failed",
+    "inactive": "pilot service exited before the admission cutoff",
+    "failed": "pilot service ended with an unsuccessful result or exit status",
+    "not_started": "pilot service has not started",
     "heartbeat": "heartbeat is missing or stale",
     "mount": "expected disk12 mount is unavailable",
     "manager": "systemd mover status is unavailable",
@@ -1090,12 +1104,15 @@ def journal_alert(message):
 
 
 def manager_properties(pilot_unit):
-    properties = ("ActiveState", "Result", "ActiveEnterTimestamp", "InactiveEnterTimestamp")
+    properties = (
+        "ActiveState", "Result", "ExecMainStatus",
+        "ActiveEnterTimestampMonotonic", "ExecMainExitTimestampMonotonic",
+    )
     try:
         result = subprocess.run(
             ["/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(properties),
              "--", pilot_unit],
-            env=dict(os.environ, LC_ALL="C", TZ="UTC"), text=True, stdout=subprocess.PIPE,
+            text=True, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, check=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
@@ -1103,13 +1120,12 @@ def manager_properties(pilot_unit):
     return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
 
 
-def manager_timestamp(value):
+def manager_monotonic_seconds(value):
     try:
-        return datetime.strptime(value, "%a %Y-%m-%d %H:%M:%S UTC").replace(
-            tzinfo=timezone.utc
-        ).timestamp()
+        microseconds = int(value)
     except (TypeError, ValueError):
         return None
+    return microseconds / 1_000_000 if microseconds >= 0 else None
 
 
 def watchdog_alerts(properties, heartbeat, now):
@@ -1117,25 +1133,34 @@ def watchdog_alerts(properties, heartbeat, now):
     if not active:
         return {"manager"}
 
-    started = manager_timestamp(properties.get("ActiveEnterTimestamp"))
+    alerts = set()
+    if active in ("inactive", "failed") and (
+        active == "failed" or properties.get("Result") != "success"
+        or properties.get("ExecMainStatus") != "0"
+    ):
+        alerts.add("failed")
+
+    started = manager_monotonic_seconds(properties.get("ActiveEnterTimestampMonotonic"))
+    if started is None:
+        return alerts | {"manager"}
+    if started == 0:
+        return alerts | {"not_started"}
     if active in ("activating", "deactivating"):
         return set()
     if active in ("active", "reloading"):
         if (isinstance(heartbeat, (int, float))
-                and 0 <= now - heartbeat <= STALE_AFTER
-                and (started is None or heartbeat >= started)):
+                and 0 <= now - heartbeat <= STALE_AFTER and heartbeat >= started):
             return set()
-        if started is None or now - started >= STALE_AFTER:
+        if now - started >= STALE_AFTER:
             return {"heartbeat"}
         return set()
 
-    stopped = manager_timestamp(properties.get("InactiveEnterTimestamp"))
-    # systemctl prints both timestamps at one-second resolution.
-    if (active == "inactive" and properties.get("Result") == "success"
-            and started is not None and stopped is not None
-            and stopped - started >= ADMISSION_WINDOW):
-        return set()
-    return {"inactive"}
+    stopped = manager_monotonic_seconds(properties.get("ExecMainExitTimestampMonotonic"))
+    if stopped is None or stopped < started:
+        return alerts | {"manager"}
+    if stopped - started < ADMISSION_WINDOW:
+        alerts.add("inactive")
+    return alerts
 
 
 def watchdog_poll(mount, properties, heartbeat, now, previous, alert=journal_alert):
@@ -1158,10 +1183,10 @@ def watchdog_loop(mount, pilot_unit, stopping):
         properties = manager_properties(pilot_unit)
         try:
             with directory(STATUS_PATH) as fd:
-                heartbeat = read_json(fd, STATUS_NAME).get("heartbeat_unix")
+                heartbeat = read_json(fd, STATUS_NAME).get("heartbeat_monotonic")
         except (OSError, IntegrityError):
             heartbeat = None
-        previous = watchdog_poll(mount, properties, heartbeat, time.time(), previous)
+        previous = watchdog_poll(mount, properties, heartbeat, time.monotonic(), previous)
         stopping.wait(WATCHDOG_INTERVAL)
 
 

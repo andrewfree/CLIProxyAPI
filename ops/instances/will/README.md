@@ -147,7 +147,7 @@ find "$archive_dir" \
 
 ```sh
 start_and_verify_pilot() {
-  start_time=$(date +%s.%N) || return
+  start_time=$(/usr/bin/python3.14 -I -c 'import time; print(time.monotonic())') || return
   sudo systemctl start "$pilot_service" "$pilot_watchdog" || return
   /usr/bin/python3.14 -I - "$status_file" "$start_time" <<'PYTHON' || return
 import json
@@ -161,8 +161,8 @@ deadline = time.monotonic() + 30
 while time.monotonic() < deadline:
     try:
         status = json.loads(path.read_text())
-        if (status["heartbeat_unix"] > start_time
-                and status["started_at_unix"] >= start_time
+        if (status["heartbeat_monotonic"] > start_time
+                and status["started_at_monotonic"] >= start_time
                 and status["paused_reason"] is None
                 and status["phase"] == "capturing" and status["source_watch_active"]):
             print(json.dumps(status, indent=2))
@@ -192,10 +192,11 @@ that closes after unlink cannot supply a capture pathname. Old staging
 directories stay private and untouched. The status reports their startup count.
 
 The unprivileged watchdog polls systemd and the mount every 30 seconds. It
-journals state changes for an early or failed mover exit, stale heartbeat, or
-missing mount. It uses systemd timestamps and the service result to judge an
-exit. The heartbeat is only a liveness check. The watchdog has its own systemd
-limit of 24 hours 5 minutes.
+journals state changes for a mover that never started, an early or failed
+exit, a stale heartbeat, or a missing mount. It compares systemd's monotonic
+timestamps to judge runtime, and systemd's result and exit status to detect
+failure. The monotonic heartbeat is only a liveness check. The watchdog has
+its own systemd limit of 24 hours 5 minutes.
 Will's existing root-space alarm uses a privileged Wazuh notification relay.
 The pilot watchdog has no access to that relay's configuration. Andrew or his
 designated pilot operator checks the watchdog journal and aggregate status
@@ -208,7 +209,9 @@ miss, watch gap, and integrity counts in the status.
   admission cutoff is 23 hours 55 minutes after startup. Already-admitted
   work drains until the publication deadline at 23 hours 59 minutes. If work
   is unresolved at the deadline, the mover records a failed phase and the
-  unfinished count and exits nonzero. Compare independent matching closes
+  unfinished count and exits nonzero. If interrupted with unfinished work,
+  it records abandoned queued and in-flight work and exits with status 3.
+  Compare independent matching closes
   through the admission cutoff with confirmed archives, including archives
   with matching confirmation receipts. Report the boundary separately, along
   with missed, unconfirmed, later-confirmed, recovered-after-unlink, abandoned
@@ -229,7 +232,7 @@ miss, watch gap, and integrity counts in the status.
   final status.
 
 ```sh
-systemctl show -p ActiveState -p Result "$pilot_service" "$pilot_watchdog"
+systemctl show -p ActiveState -p Result -p ExecMainStatus "$pilot_service" "$pilot_watchdog"
 sudo systemctl stop "$pilot_watchdog"
 ```
 
@@ -237,7 +240,7 @@ For rollback, stop both services before reading diagnostics.
 
 ```sh
 sudo systemctl stop "$pilot_watchdog" "$pilot_service"
-systemctl show -p ActiveState -p Result "$pilot_service" "$pilot_watchdog" || true
+systemctl show -p ActiveState -p Result -p ExecMainStatus "$pilot_service" "$pilot_watchdog" || true
 if [ -r "$status_file" ]; then
   /usr/bin/python3.14 -I -m json.tool "$status_file" || true
 fi
