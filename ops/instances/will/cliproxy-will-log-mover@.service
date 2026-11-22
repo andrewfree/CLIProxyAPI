@@ -1,0 +1,20 @@
+[Unit]
+Description=Copy closed Will CLIProxy request logs to disk12
+After=local-fs.target
+RequiresMountsFor=/srv/share/drives/disk12
+
+[Service]
+Type=exec
+User=andrew
+Group=andrew
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadOnlyPaths=/home/andrew/cliproxy/logs
+ReadWritePaths=-/srv/share/drives/disk12/%i/will/requests /home/andrew/cliproxy/ops/runtime/will-log-mover
+Environment=WILL_LOG_MOVER_ARCHIVE_ROOT=%i
+EnvironmentFile=/etc/cliproxy-will-log-mover.env
+ExecStart=/usr/bin/env python3.14 -I /home/andrew/cliproxy/ops/will_log_mover.py
+LimitNOFILE=1024
+TimeoutStopSec=90s
+RuntimeMaxSec=24h
