@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import http.client
+import ipaddress
 import json
 import math
 import pathlib
@@ -185,6 +186,8 @@ def fetch_usage(proxy: Proxy, email: str, tries: int = 6, wait: float = 60,
     for attempt in range(1, tries + 1):
         status, body = proxy.upstream(email, "GET", USAGE_URL)
         if status == 200:
+            if not isinstance(body, dict):
+                raise ResetError(f"usage endpoint returned an unreadable body for {email}")
             return summarize_usage(body)
         if status not in RETRYABLE_STATUS or attempt == tries:
             break
@@ -229,7 +232,8 @@ def request_id_for(state_dir: pathlib.Path, email: str, grant_id: str) -> str:
 
 def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, receipt_path: pathlib.Path,
           dry_run: bool, sleep: Callable[[float], None] = time.sleep,
-          min_fable_percent: int | None = None, host: str | None = None) -> dict[str, Any]:
+          min_fable_percent: int | None = None, host: str | None = None,
+          host_flag: str = "local") -> dict[str, Any]:
     if min_fable_percent is not None and not 0 <= min_fable_percent <= 100:
         raise ResetError("minimum Fable percent must be between 0 and 100")
     receipt: dict[str, Any] = {"started_at": now_iso(), "account": email, "grant_id": grant_id, "dry_run": dry_run}
@@ -266,16 +270,29 @@ def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, rece
         try:
             status, body = proxy.upstream(email, "POST", CLAIM_URL.format(org=org),
                                           {"program": PROGRAM, "grant_id": grant_id, "request_id": request_id})
-        except (ProxyConnectionError, urllib.error.HTTPError) as err:
+        except urllib.error.HTTPError as err:
+            if err.code < 500:
+                # The management API rejects 4xx requests before forwarding them, so nothing was sent.
+                receipt["result"] = "refused"
+                receipt["claim_error"] = f"management HTTP {err.code}"
+                receipt["finished_at"] = now_iso()
+                write_receipt(receipt_path, receipt)
+                raise ResetError(f"the proxy refused the claim before sending it (management HTTP {err.code}). "
+                                 f"Receipt: {receipt_path}") from None
+            indeterminate = f"management HTTP {err.code}"
+        except ProxyConnectionError as err:
+            indeterminate = str(err)
+        else:
+            indeterminate = None
+        if indeterminate is not None:
             # The proxy may have forwarded the claim before failing, so its outcome is unknown.
-            error = f"management HTTP {err.code}" if isinstance(err, urllib.error.HTTPError) else str(err)
             receipt["result"] = "indeterminate"
-            receipt["claim_error"] = error
+            receipt["claim_error"] = indeterminate
             receipt["finished_at"] = now_iso()
             write_receipt(receipt_path, receipt)
-            raise ResetError(f"the claim may have been sent ({error}). Receipt: {receipt_path}. On the same "
-                             f"host, check `status` before anything else. If the grant is still usable, rerunning "
-                             f"the same command there reuses request {request_id}.") from None
+            raise ResetError(f"the claim may have been sent ({indeterminate}). Receipt: {receipt_path}. Check "
+                             f"`status --host {host_flag}` before anything else. If the grant is still usable, "
+                             f"rerunning the same command with --host {host_flag} reuses request {request_id}.")
         receipt["claim_http_status"] = status
         receipt["claim_response"] = body
         receipt["result"] = body.get("result") if isinstance(body, dict) else f"http_{status}"
@@ -371,7 +388,8 @@ def cmd_claim(proxy: Proxy, args: argparse.Namespace) -> int:
     stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     receipt_path = args.receipt or STATE_DIR / f"claim-{args.grant}-{stamp}{'-dryrun' if args.dry_run else ''}.json"
     receipt = claim(proxy, args.account, args.grant, STATE_DIR, receipt_path, args.dry_run,
-                    min_fable_percent=args.min_fable_percent, host=getattr(args, "label", None))
+                    min_fable_percent=args.min_fable_percent, host=getattr(args, "label", None),
+                    host_flag=args.host or "local")
     print(json.dumps(receipt, indent=2))
     print(f"receipt: {receipt_path}", file=sys.stderr)
     return 0 if receipt["result"] in ("reset", "dry_run") else 1
@@ -402,8 +420,14 @@ def will_entry() -> dict[str, Any] | None:
 
 
 def is_loopback(url: str) -> bool:
-    parts = urllib.parse.urlsplit(url)
-    return parts.scheme in ("http", "https") and parts.hostname in ("127.0.0.1", "localhost", "::1")
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        if parts.scheme not in ("http", "https") or host is None or parts.username or parts.password:
+            return False
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def local_root(command: str) -> pathlib.Path:

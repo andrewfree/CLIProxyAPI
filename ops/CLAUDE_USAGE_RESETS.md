@@ -112,11 +112,13 @@ instance root, and a `--receipt` path is a path on Will (relative to the SSH
 user's home directory). Each receipt records the host that sent it.
 
 The receipt is written with `result: sending` before the claim goes out. If the
-connection drops before the response arrives, or the proxy answers the claim
-with an HTTP error, the receipt says `indeterminate`, the tool exits 1, and the
-claim may have been sent. If SSH drops during `--host will --yes`, the outcome
-is unknown in the same way. Either way, read the receipt and run `status` on
-the same host first. If the grant is still usable, rerun the same command on
+connection drops before the response arrives, or the management API answers
+the claim with HTTP 5xx, the receipt says `indeterminate`, the tool exits 1, and
+the claim may have been sent. A management HTTP 4xx means the proxy rejected
+the request before forwarding it, so the receipt says `refused`. If SSH drops
+during `--host will --yes`, the outcome is unknown in the same way as
+`indeterminate`. Either way, read the receipt and run `status --host <same host>`
+first. If the grant is still usable, rerun the same command on
 that host: it reuses the stored request ID. A fresh threshold check can refuse
 the rerun, for example when the first claim already worked. A rerun on another
 host would use a new request ID and could spend a second grant. Once the claim

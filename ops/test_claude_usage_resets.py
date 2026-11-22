@@ -365,8 +365,15 @@ class WillEntryTest(unittest.TestCase):
                 self.assertIsNone(resets.will_entry())
                 self.assertIn("no usable Will entry", err.getvalue())
 
+    def test_loopback_urls_are_recognised(self):
+        for url in ("http://127.0.0.1:8317", "http://localhost:8317", "http://[::1]:8317",
+                    "http://[0:0:0:0:0:0:0:1]:8317", "https://127.0.0.2"):
+            with self.subTest(url=url):
+                self.assertTrue(resets.is_loopback(url))
+
     def test_a_non_loopback_base_url_never_receives_the_key(self):
-        for url in ("http://10.0.0.9:8317", "http://will.local:8317", "file:///etc/passwd"):
+        for url in ("http://10.0.0.9:8317", "http://will.local:8317", "file:///etc/passwd", "http://[::1",
+                    "http://127.0.0.1@evil.example", "http://user@127.0.0.1:8317"):
             args = resets.build_parser().parse_args(["--base-url", url, "status"])
             with self.subTest(url=url), mock.patch.object(resets, "load_management_key") as key, \
                     contextlib.redirect_stderr(io.StringIO()) as err:
@@ -550,17 +557,29 @@ class RemoteProgramTest(unittest.TestCase):
                 result, saved = self.claim_against(on_claim)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("the claim may have been sent", result.stderr)
-                self.assertIn("same host", result.stderr)
+                self.assertIn("Check `status --host will`", result.stderr)
                 self.assertEqual((saved["result"], saved["host"]), ("indeterminate", "Will (will.local)"))
                 for receipt in pathlib.Path(self.root, "ops", "runtime", "claude-resets").glob("claim-*.json"):
                     receipt.unlink()
 
-    def test_a_confirmed_claim_survives_a_failed_reread(self):
+    def test_a_proxy_rejection_before_forwarding_is_a_refusal(self):
+        result, saved = self.claim_against(400)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("refused the claim before sending it", result.stderr)
+        self.assertEqual(saved["result"], "refused")
+
+    def test_a_confirmed_claim_survives_a_failed_or_unreadable_reread(self):
         reset = {"status_code": 200, "body": json.dumps({"result": "reset", "resets_left": 0})}
-        result, saved = self.claim_against(reset, after=403)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)["result"], "reset")
-        self.assertEqual((saved["result"], saved["after_error"]), ("reset", "management HTTP 403"))
+        html = {"status_code": 200, "body": "<html>upstream error</html>"}
+        for after, error in ((403, "management HTTP 403"), (html, "unreadable body")):
+            with self.subTest(error=error):
+                result, saved = self.claim_against(reset, after=after)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["result"], "reset")
+                self.assertEqual(saved["result"], "reset")
+                self.assertIn(error, saved["after_error"])
+                for receipt in pathlib.Path(self.root, "ops", "runtime", "claude-resets").glob("claim-*.json"):
+                    receipt.unlink()
 
 
 if __name__ == "__main__":
