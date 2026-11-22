@@ -1,9 +1,13 @@
 import logging
 import os
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from ops import archive_logs
 from ops.archive_logs import ArchiveConfig, LogArchiver
 
 
@@ -13,6 +17,7 @@ class LogArchiverTest(unittest.TestCase):
         self.root = Path(self.temp_dir.name)
         self.source = self.root / "logs"
         self.archive = self.root / "archive"
+        self.index = self.root / "ops/runtime/archive-index.json"
         self.source.mkdir()
         self.now = 1_800_000_000.0
         self.logger = logging.getLogger(f"archive-test-{id(self)}")
@@ -36,6 +41,7 @@ class LogArchiverTest(unittest.TestCase):
             min_age_seconds=3_600,
             prune=prune,
             require_mounted_destination=False,
+            index_path=self.index,
         )
         return LogArchiver(config, logger=self.logger, clock=lambda: self.now)
 
@@ -107,6 +113,91 @@ class LogArchiverTest(unittest.TestCase):
             encoding="utf-8"
         ).splitlines()
         self.assertEqual(len(manifest_lines), 2)
+
+    def test_index_hit_does_not_hash_or_read_manifest(self) -> None:
+        source = self.write_log("existing.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        inode = self.index.stat().st_ino
+        self.assertEqual(self.index.stat().st_mode & 0o777, 0o600)
+
+        with (patch.object(LogArchiver, "_sha256", wraps=LogArchiver._sha256) as sha256,
+              patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as read_text,
+              self.assertLogs(self.logger, level="INFO") as logs):
+            result = self.archiver(prune=False).run()
+
+        sha256.assert_not_called()
+        self.assertEqual([call.args[0] for call in read_text.call_args_list], [self.index])
+        self.assertEqual((result.skipped_by_index, result.failures), (1, 0))
+        self.assertIn("skipped_by_index=1", logs.output[-1])
+        self.assertEqual(self.index.stat().st_ino, inode)
+        self.assertTrue(source.exists())
+
+    def test_changed_fingerprint_is_verified_and_updates_index(self) -> None:
+        source = self.write_log("changed.log", b"before\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        self.write_log(source.name, b"after!\n", age_seconds=7_201)
+
+        with patch.object(LogArchiver, "_sha256", wraps=LogArchiver._sha256) as sha256:
+            result = self.archiver(prune=False).run()
+
+        self.assertIn(source, [call.args[0] for call in sha256.call_args_list])
+        self.assertEqual((result.archived, result.skipped_by_index, result.failures), (1, 0, 0))
+        self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 1)
+
+    def test_missing_or_short_archive_copy_is_rearchived(self) -> None:
+        source = self.write_log("repair.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        destination = next((self.archive / "requests").rglob(source.name))
+        destination.unlink()
+
+        result = self.archiver(prune=False).run()
+        self.assertEqual((result.archived, result.skipped_by_index, result.failures), (1, 0, 0))
+        self.assertEqual(destination.read_bytes(), source.read_bytes())
+
+        destination.write_bytes(b"short")
+        result = self.archiver(prune=False).run()
+        self.assertEqual((result.archived, result.skipped_by_index, result.failures), (1, 0, 0))
+        repaired = next(destination.parent.glob(f"{source.name}.sha256-*"))
+        self.assertEqual(repaired.read_bytes(), source.read_bytes())
+        self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 1)
+
+    def test_corrupt_index_is_rebuilt_and_manifest_is_read_once(self) -> None:
+        for name in ("one.log", "two.log"):
+            self.write_log(name, b"closed\n", age_seconds=7_200)
+        with self.assertLogs(self.logger, level="WARNING") as logs:
+            self.assertEqual(self.archiver(prune=False).run().archived, 2)
+        self.assertIn("archive-index.json", logs.output[0])
+        self.index.write_text("{broken", encoding="utf-8")
+
+        with (self.assertLogs(self.logger, level="WARNING") as logs,
+              patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as read_text):
+            result = self.archiver(prune=False).run()
+
+        self.assertIn("archive-index.json", logs.output[0])
+        manifest = self.archive / "SHA256SUMS"
+        self.assertEqual([call.args[0] for call in read_text.call_args_list].count(manifest), 1)
+        self.assertEqual((result.already_archived, result.skipped_by_index, result.failures), (2, 0, 0))
+        self.assertEqual(len(manifest.read_text(encoding="utf-8").splitlines()), 2)
+        self.assertEqual(self.archiver(prune=False).run().skipped_by_index, 2)
+
+    def test_archive_only_cli_never_unlinks_source(self) -> None:
+        source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)
+        timestamp = time.time() - 7_200
+        os.utime(source, (timestamp, timestamp))
+        argv = ["archive_logs.py", "--archive-only", "--destination", str(self.archive),
+                "--mount-point", str(self.root)]
+        with (patch.dict(os.environ, {"CLIPROXY_ROOT": str(self.root)}, clear=True),
+              patch.object(sys, "argv", argv),
+              patch.object(Path, "is_mount", return_value=True),
+              patch.object(archive_logs, "build_logger", return_value=self.logger),
+              patch.object(Path, "unlink", autospec=True, side_effect=Path.unlink) as unlink,
+              self.assertLogs(self.logger, level="INFO") as logs):
+            self.assertEqual(archive_logs.main(), 0)
+
+        self.assertNotIn(source.resolve(), [call.args[0] for call in unlink.call_args_list])
+        self.assertTrue(source.exists())
+        self.assertTrue(self.index.exists())
+        self.assertIn("pruned=0", logs.output[-1])
 
     def test_unmounted_destination_never_prunes(self) -> None:
         source = self.write_log(

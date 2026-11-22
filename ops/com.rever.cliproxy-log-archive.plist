@@ -8,6 +8,7 @@
     <array>
         <string>/opt/homebrew/bin/python3</string>
         <string>/Users/rever/cliproxy-live/ops/archive_logs.py</string>
+        <string>--archive-only</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/rever/cliproxy</string>

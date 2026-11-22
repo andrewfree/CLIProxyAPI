@@ -1,6 +1,6 @@
 # CLIProxy recovery operations
 
-This directory owns the host-side recovery and archive-before-prune paths for the localhost CLIProxy service. It does not contain credentials. Runtime state and the jobs' bounded logs live in ignored `ops/runtime/`.
+This directory owns host-side recovery and log archiving for the localhost CLIProxy service. It does not contain credentials. Runtime state and the jobs' bounded logs live in ignored `ops/runtime/`.
 
 The primary Linux instance has its own secret-free owner contract under
 [`instances/will/`](instances/will/README.md). That contract is separate from
@@ -353,13 +353,16 @@ receipt.
 
 Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watchdog actions.
 
-`com.rever.cliproxy-log-archive` runs at login and every 300 seconds. It handles only closed `.log` and `.log.gz` files older than one hour; the active `main.log` and recent request logs are never candidates. Each candidate is copied to the archive drive (Innie since November 18, 2026; see below), SHA-256 checked, recorded in the archive manifest, and fingerprinted again before the local copy is unlinked. A missing or unwritable archive mount means zero pruning. Lumberjack's closed `main-<timestamp>.log` rotations are eligible, so the active `main.log` remains local while completed rotations are preserved in the archive.
+`com.rever.cliproxy-log-archive` runs at login and every 300 seconds with
+`--archive-only`, keeping the Mac copies. It considers closed `.log` and
+`.log.gz` files at least one hour old, including Lumberjack's closed
+`main-<timestamp>.log` rotations. The active `main.log` stays local.
 
 ## Install and inspect
 
-Follow the [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) to
-ship a reviewed bundle and install its LaunchAgents. The installer checks both
-script paths before touching either job. The fleet monitor's LaunchAgent,
+For the log archiver, follow [Install or resume the log archive job](#install-or-resume-the-log-archive-job).
+The [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) records the first
+installation of the bundled jobs. The fleet monitor's LaunchAgent,
 `com.rever.cliproxy-fleet-monitor`, installs with the block in
 [Install or resume on the Mac](FLEET.md#install-or-resume-on-the-mac) and logs to
 `~/Library/Logs/cliproxy-fleet-monitor.log`. Inspect the installed jobs and their
@@ -522,14 +525,47 @@ The durable archive is:
 /Volumes/Innie/backups/llm-logs/cliproxy/m5/live/
 ```
 
-Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free. The T9 drive had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, update the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR. Ship the reviewed commit and reinstall the LaunchAgents from the bundle using the [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover).
+Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free. The T9 drive had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, update the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR, then follow the installation steps below.
 
-Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`; `SHA256SUMS` is append-only evidence for archived content. The local copy is pruned only after content verification. If the archive drive is unavailable, local files accumulate and `ops/runtime/archive.log` records the failure. `main.log` itself is never pruned while active and rolls at 10 MB; its closed rotations then follow the same archive path.
+Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`.
+Each new copy is SHA-256 verified and recorded in the append-only `SHA256SUMS`
+manifest. Archive-only runs keep a verification index in
+`ops/runtime/archive-index.json` under the instance root. If the source
+fingerprint matches and the archive copy still has the recorded size, the job
+skips rehashing it and counts it as `skipped_by_index`. A missing or corrupt
+index is rebuilt from verified copies. An unavailable drive is reported in
+`ops/runtime/archive.log`.
 
-To archive without pruning, use:
+### Install or resume the log archive job
 
-```bash
-python3 ops/archive_logs.py --archive-only --verbose
+From a clean worktree at the reviewed, merged commit, wait for Andrew's
+`promote fleet <id>` phrase before shipping and installing the job. Install
+the plist from the shipped bundle. A disabled job needs `launchctl enable`
+before `bootstrap`. The two-job `ops/install_watchdog.sh` bootstraps before
+enabling, so use this sequence for the log archive job.
+
+```sh
+(
+  set -e
+  commit=$(git rev-parse HEAD)
+  python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+  label=com.rever.cliproxy-log-archive
+  bundled="$HOME/cliproxy-live/ops/$label.plist"
+  installed="$HOME/Library/LaunchAgents/$label.plist"
+  /usr/bin/plutil -lint "$bundled"
+  if launchctl print "gui/501/$label" >/dev/null 2>&1; then
+    launchctl bootout "gui/501/$label"
+  fi
+  /usr/bin/install -m 0644 "$bundled" "$installed"
+  launchctl enable "gui/501/$label"
+  launchctl bootstrap gui/501 "$installed"
+  launchctl print "gui/501/$label"
+)
 ```
+
+Confirm the loaded arguments include `--archive-only`. After a completed run,
+check `ops/runtime/archive.log` under the Mac instance root for `pruned=0`.
+When an eligible new log is available, confirm both the archive copy and its
+manifest entry appear and the Mac copy remains.
 
 The August 27 recovery set and downstream reconstruction are described in `ops/RECOVERY-2026-08-27.md`.

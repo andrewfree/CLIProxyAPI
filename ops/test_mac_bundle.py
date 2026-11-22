@@ -18,9 +18,9 @@ class BundleLaunchAgentsTest(unittest.TestCase):
         host = json.loads((ops / "fleet/hosts.json").read_text())["m5"]
         allowlist = (ops / "fleet/bundle.txt").read_text().splitlines()
         self.assertIn("ops/fleet_mac.py", allowlist)
-        for job, script, seconds in (
-            ("watchdog", "cliproxy_watchdog.py", 120),
-            ("log-archive", "archive_logs.py", 300),
+        for job, script, seconds, args in (
+            ("watchdog", "cliproxy_watchdog.py", 120, []),
+            ("log-archive", "archive_logs.py", 300, ["--archive-only"]),
         ):
             label = "com.rever.cliproxy-" + job
             with self.subTest(label=label):
@@ -30,7 +30,7 @@ class BundleLaunchAgentsTest(unittest.TestCase):
                     plist = plistlib.load(stream)
                 self.assertEqual(plist["Label"], label)
                 self.assertEqual(plist["ProgramArguments"],
-                                 ["/opt/homebrew/bin/python3", host["bundle_root"] + "/" + script])
+                                 ["/opt/homebrew/bin/python3", host["bundle_root"] + "/" + script, *args])
                 self.assertEqual(plist["WorkingDirectory"], host["instance_root"])
                 self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], host["instance_root"])
                 self.assertTrue(plist["RunAtLoad"])

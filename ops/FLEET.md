@@ -132,6 +132,8 @@ the instance root for Compose, the host's logs, and private runtime state.
    checks the saved profile settings. It writes private redacted before and
    after snapshots and prints the five path strings. The shipped token helper
    replaces the locally edited copy so P0 can verify its checksum.
+   For later archive job reinstalls, follow
+   [Install or resume the log archive job](README.md#install-or-resume-the-log-archive-job).
 
    ```sh
    /bin/zsh ops/install_watchdog.sh "$bundle"

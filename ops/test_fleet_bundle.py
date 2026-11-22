@@ -244,11 +244,17 @@ class FleetBundleTest(unittest.TestCase):
         monitor = agents / (bundle.MONITOR + ".plist")
         shutil.copyfile(self.destination / monitor.name, monitor)
         self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], [])
+        archive_label = "com.rever.cliproxy-log-archive"
+        archive_plist = agents / (archive_label + ".plist")
+        stale = plistlib.loads(archive_plist.read_bytes())
+        self.assertEqual(stale["ProgramArguments"].pop(), "--archive-only")
+        archive_plist.write_bytes(plistlib.dumps(stale))
+        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/" + archive_label])
         launchers[0] = str(self.root / "cliproxy/ops/claude_account_launcher.mjs")
         (self.destination / "archive_logs.py").write_text("edited")
         helper.write_text("different")
         monitor.write_text("stale")
         self.assertEqual(set(bundle.verify_bundle(host, manifest, launchers)["issues"]), {
             "P0/t3-launchers", "P0/file:ops/archive_logs.py", "P0/token-helper",
-            "P0/" + bundle.MONITOR,
+            "P0/" + bundle.MONITOR, "P0/" + archive_label,
         })
