@@ -18,8 +18,7 @@ RuntimeDirectoryPreserve=yes
 Environment=WILL_LOG_MOVER_ARCHIVE_ROOT=%i
 EnvironmentFile=/etc/cliproxy-will-log-mover.env
 ExecStart=/usr/bin/python3.14 -I -B /usr/local/lib/cliproxy-will-log-mover/will_log_mover.py
-ExecStopPost=+/usr/bin/python3.14 -I -B /usr/local/lib/cliproxy-will-log-mover/will_log_mover.py --stop-post
 LimitNOFILE=1024
 LimitCORE=0
-TimeoutStopSec=90s
-RuntimeMaxSec=24h1min
+TimeoutStopSec=30s
+RuntimeMaxSec=24h

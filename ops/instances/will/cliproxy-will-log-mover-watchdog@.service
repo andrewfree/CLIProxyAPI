@@ -1,16 +1,16 @@
 [Unit]
 Description=Check the Will CLIProxy log mover heartbeat and destination mount
+After=cliproxy-will-log-mover@%i.service
 
 [Service]
-Type=oneshot
+Type=exec
 User=andrew
 Group=andrew
 UMask=0077
 NoNewPrivileges=yes
-RuntimeDirectory=cliproxy-will-log-mover-watchdog
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
+ProtectSystem=strict
 Environment=WILL_LOG_MOVER_ARCHIVE_ROOT=%i
 EnvironmentFile=/etc/cliproxy-will-log-mover.env
 ExecStart=/usr/bin/python3.14 -I -B /usr/local/lib/cliproxy-will-log-mover/will_log_mover.py --watchdog
-TimeoutStartSec=15s
+RuntimeMaxSec=24h5min
+TimeoutStopSec=10s

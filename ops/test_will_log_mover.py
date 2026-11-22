@@ -66,11 +66,12 @@ class FakeWatch:
         yield from pending
 
 
-def portable_publish(parent, staging, archive_id):
+def portable_publish(parent, staging, archive_id, target_parent=None):
+    target = parent if target_parent is None else target_parent
     try:
-        os.stat(archive_id, dir_fd=parent, follow_symlinks=False)
+        os.stat(archive_id, dir_fd=target, follow_symlinks=False)
     except FileNotFoundError:
-        os.rename(staging, archive_id, src_dir_fd=parent, dst_dir_fd=parent)
+        os.rename(staging, archive_id, src_dir_fd=parent, dst_dir_fd=target)
         return
     raise FileExistsError
 
@@ -350,13 +351,17 @@ class LogMoverTests(unittest.TestCase):
         self.assertEqual(self.directories(), [])
         self.assertEqual(self.pilot.counts["integrity_failures"]["files"], 1)
 
-    def test_deadline_rejects_new_captures_and_blocks_inflight_publication(self):
+    def test_cutoff_rejects_new_records_and_deadline_blocks_publication(self):
         record = self.offer()
+        self.pilot.admission_cutoff = time.monotonic()
+        self.assertIs(self.pilot.next_record(time.monotonic()), record)
+        self.events((mover.CLOSE_WRITE, ERROR))
+        self.assertEqual(self.pilot.pending_files, 1)
         compress = self.archive.codec.compress
 
         def reach_deadline(*args):
             result = compress(*args)
-            self.pilot.deadline = time.monotonic()
+            self.pilot.publication_deadline = time.monotonic()
             return result
 
         with patch.object(self.archive.codec, "compress", side_effect=reach_deadline):
@@ -366,13 +371,120 @@ class LogMoverTests(unittest.TestCase):
         self.assertEqual(self.pilot.counts["abandoned_pending"]["files"], 1)
 
     def test_expired_run_writes_finished_status_without_opening_source(self):
-        pilot = mover.Pilot(self.archive, deadline=time.monotonic() - 1)
+        past = time.monotonic() - 1
+        pilot = mover.Pilot(self.archive, admission_cutoff=past, publication_deadline=past)
         with mover.directory(self.root) as fd, patch.object(pilot, "arm") as arm:
-            pilot.run(self.source, fd, lambda: False)
+            self.assertEqual(pilot.run(self.source, fd, lambda: False), 0)
             arm.assert_not_called()
             status = mover.read_json(fd, mover.STATUS_NAME)
         self.assertEqual(status["phase"], "finished")
+        self.assertEqual(status["unfinished"], 0)
         self.assertFalse(status["source_watch_active"])
+
+    def test_publication_deadline_fails_when_submitted_work_is_unresolved(self):
+        for blocked_probe in (False, True):
+            with self.subTest(blocked_probe=blocked_probe):
+                self.pilot = self.start_pilot()
+                if not blocked_probe:
+                    self.offer()
+                pilot = self.pilot
+                pilot.stop_watch()
+                now = time.monotonic()
+                pilot.admission_cutoff, pilot.publication_deadline = now + 2, now + 4
+                pending_job = Future()
+                submitted = []
+
+                def submit(function, *args):
+                    submitted.append(function)
+                    if function == self.archive.probe:
+                        if blocked_probe:
+                            return pending_job
+                        probe_job = Future()
+                        probe_job.completed_at = now
+                        probe_job.set_result((None, 0, False))
+                        return probe_job
+                    os.close(args[1])
+                    return pending_job
+
+                def tick(*_args):
+                    nonlocal now
+                    now += 1
+
+                worker = SimpleNamespace(submit=submit, close=lambda: None)
+                with (
+                    mover.directory(self.root) as fd,
+                    patch.object(pilot, "reconcile"),
+                    patch.object(mover, "DiskWorker", return_value=worker),
+                    patch.object(mover.time, "monotonic", side_effect=lambda: now),
+                    patch.object(mover.select, "select", side_effect=tick),
+                ):
+                    self.assertEqual(pilot.run(self.source, fd, lambda: False), 1)
+                    status = mover.read_json(fd, mover.STATUS_NAME)
+                self.assertEqual(status["phase"], "failed")
+                self.assertEqual(status["unfinished"], 1)
+                self.assertEqual(len(submitted), 1 if blocked_probe else 2)
+                self.assertFalse(pending_job.done())
+
+    def test_stop_signal_after_publication_deadline_cannot_hide_pending_work(self):
+        self.offer()
+        past = time.monotonic() - 1
+        self.pilot.admission_cutoff = self.pilot.publication_deadline = past
+        with mover.directory(self.root) as fd:
+            self.assertEqual(self.pilot.run(self.source, fd, lambda: True), 1)
+            status = mover.read_json(fd, mover.STATUS_NAME)
+        self.assertEqual(status["phase"], "failed")
+        self.assertEqual(status["unfinished"], 1)
+
+    def test_later_close_confirms_identical_archive_without_replacing_manifest(self):
+        path = self.source_path()
+        path.write_bytes(SYNTHETIC)
+        self.make_old(path)
+        self.scan()
+        self.capture(self.pilot.next_record(time.monotonic()))
+        directory = self.directories()[0]
+        manifest = (directory / "manifest.json").read_bytes()
+        self.assertEqual(json.loads(manifest)["completion"], "unconfirmed")
+
+        self.events((mover.CLOSE_WRITE, NORMAL))
+        self.capture(self.pilot.next_record(time.monotonic()))
+        self.assertEqual(len(self.directories()), 1)
+        self.assertEqual((directory / "manifest.json").read_bytes(), manifest)
+        confirmation = directory / "confirmation.json"
+        receipt = json.loads(confirmation.read_bytes())
+        self.assertEqual(receipt["completion"], "close_write")
+        self.assertEqual(receipt["original_sha256"], json.loads(manifest)["original_sha256"])
+        self.assertEqual(self.pilot.counts["completed"]["files"], 1)
+        self.assertEqual(self.pilot.counts["archived"]["files"], 1)
+        self.assertEqual(self.pilot.counts["archived_unconfirmed"], {"files": 0, "bytes": 0})
+        self.assertEqual(self.pilot.counts["confirmed_later"],
+                         {"files": 1, "bytes": len(SYNTHETIC)})
+        first_inode = confirmation.stat().st_ino
+        self.events((mover.CLOSE_WRITE, NORMAL))
+        self.assertIsNone(self.pilot.next_record(time.monotonic()))
+        self.assertEqual(confirmation.stat().st_ino, first_inode)
+
+    def test_later_close_archives_new_bytes_even_with_same_size_and_mtime(self):
+        path = self.source_path()
+        path.write_bytes(SYNTHETIC)
+        self.make_old(path)
+        self.scan()
+        self.capture(self.pilot.next_record(time.monotonic()))
+        old_archive = self.directories()[0]
+        old_stat = path.stat()
+        path.write_bytes(b"x" * old_stat.st_size)
+        os.utime(path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+
+        self.events((mover.CLOSE_WRITE, NORMAL))
+        self.capture(self.pilot.next_record(time.monotonic()))
+        self.assertEqual(len(self.directories()), 2)
+        self.assertFalse((old_archive / "confirmation.json").exists())
+        self.assertCountEqual(
+            [json.loads((item / "manifest.json").read_bytes())["completion"]
+             for item in self.directories()],
+            ["unconfirmed", "close_write"],
+        )
+        self.assertEqual(self.pilot.counts["archived_unconfirmed"]["files"], 1)
+        self.assertEqual(self.pilot.counts["confirmed_later"]["files"], 0)
 
     def test_pending_budget_refills_oldest_first_and_records_peaks(self):
         self.pilot = self.start_pilot(max_fds=1, max_bytes=len(SYNTHETIC))
@@ -475,46 +587,47 @@ class LogMoverTests(unittest.TestCase):
             self.assertFalse(ERROR in data or SYNTHETIC[:30] in data)
         self.assertEqual(len(history.read_bytes().splitlines()), 2)
 
+    def test_watchdog_uses_manager_exit_timestamps_and_result(self):
+        started = 1_700_000_000
+        cutoff = started + mover.ADMISSION_WINDOW
+
+        def timestamp(value):
+            return time.strftime("%a %Y-%m-%d %H:%M:%S UTC", time.gmtime(value))
+
+        properties = {
+            "ActiveState": "inactive",
+            "Result": "success",
+            "ActiveEnterTimestamp": timestamp(started),
+            "InactiveEnterTimestamp": timestamp(cutoff - 1),
+        }
+        # A fresh heartbeat cannot make an early manager-recorded exit clean.
+        self.assertEqual(mover.watchdog_alerts(properties, cutoff + 20, cutoff + 20),
+                         {"inactive"})
+        properties["InactiveEnterTimestamp"] = timestamp(cutoff)
+        self.assertEqual(mover.watchdog_alerts(properties, None, cutoff + 20), set())
+        properties.update(ActiveState="failed", Result="exit-code")
+        self.assertEqual(mover.watchdog_alerts(properties, None, cutoff + 20), {"inactive"})
+        self.assertEqual(mover.watchdog_alerts({}, None, cutoff + 20), {"manager"})
+
     def test_watchdog_alert_hook_only_fires_on_state_changes(self):
+        started = 1_700_000_000
+        now = started + mover.STALE_AFTER + 1
+        active = {
+            "ActiveState": "active", "Result": "success",
+            "ActiveEnterTimestamp": time.strftime(
+                "%a %Y-%m-%d %H:%M:%S UTC", time.gmtime(started)
+            ),
+        }
         self.mount.reason = "mount_unavailable"
         messages = []
-        with (
-            mover.directory(self.root) as fd,
-            patch.object(mover, "STATUS_PATH", self.root),
-            patch.object(mover.subprocess, "run") as command,
-        ):
-            command.return_value.returncode = 3
-            mover.replace_json(fd, mover.STATUS_NAME, {"heartbeat_unix": 0})
-            watch = lambda: mover.watchdog(self.mount, "synthetic.service", fd, messages.append)
-            watch()
-            self.assertEqual(len(messages), 3)
-            watch()
-            self.assertEqual(len(messages), 3)
-            command.return_value.returncode = 0
-            self.mount.reason = None
-            mover.replace_json(fd, mover.STATUS_NAME,
-                               {"heartbeat_unix": time.time(), "watch_gaps": 1,
-                                "paused_reason": "low_space", "missed": {"files": 1},
-                                "integrity_failures": {"files": 1}})
-            watch()
-            self.assertEqual(len(messages), 10)
-            watch()
-            self.assertEqual(len(messages), 10)
-
-    def test_stop_post_only_disarms_timer_after_clean_deadline(self):
-        with (
-            mover.directory(self.root) as fd,
-            patch.object(mover, "STATUS_PATH", self.root),
-            patch.object(mover.subprocess, "run") as command,
-            patch.dict(os.environ, {"SERVICE_RESULT": "success"}),
-        ):
-            command.return_value.returncode = 0
-            mover.replace_json(fd, mover.STATUS_NAME, {"phase": "interrupted"})
-            self.assertEqual(mover.stop_post("synthetic"), 0)
-            command.assert_not_called()
-            mover.replace_json(fd, mover.STATUS_NAME, {"phase": "finished"})
-            self.assertEqual(mover.stop_post("synthetic"), 0)
-            command.assert_called_once()
+        alerts = mover.watchdog_poll(self.mount, active, started - 1, now, set(), messages.append)
+        self.assertEqual(alerts, {"heartbeat", "mount"})
+        mover.watchdog_poll(self.mount, active, started - 1, now, alerts, messages.append)
+        self.assertEqual(len(messages), 2)
+        self.mount.reason = None
+        alerts = mover.watchdog_poll(self.mount, active, now, now, alerts, messages.append)
+        self.assertEqual(alerts, set())
+        self.assertEqual(len(messages), 4)
 
     @unittest.skipUnless(mover.zstd is not None, "in-process zstd requires Python 3.14")
     def test_production_codec_round_trip(self):

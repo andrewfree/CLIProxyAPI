@@ -35,7 +35,6 @@ except ImportError:
 MOUNT_PATH = Path("/srv/share/drives/disk12")
 INSTANCE_PATH = Path("/home/andrew/cliproxy")
 STATUS_PATH = Path("/run/cliproxy-will-log-mover")
-WATCHDOG_PATH = Path("/run/cliproxy-will-log-mover-watchdog")
 STATUS_NAME = "status.json"
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -51,7 +50,9 @@ HEARTBEAT_INTERVAL = 5
 STALE_AFTER = 75
 UNCONFIRMED_AGE = 60
 PILOT_DURATION = 24 * 60 * 60
-DRAIN_SECONDS = 5 * 60
+ADMISSION_WINDOW = PILOT_DURATION - 5 * 60
+PUBLICATION_WINDOW = PILOT_DURATION - 60
+WATCHDOG_INTERVAL = 30
 HISTORY_INTERVAL = 60
 CHUNK_SIZE = 1024 * 1024
 
@@ -167,9 +168,10 @@ def linux_call(function, *args):
     return result
 
 
-def publish(parent, staging, archive_id):
-    linux_call("renameat2", parent, os.fsencode(staging), parent,
-               os.fsencode(archive_id), 1)  # RENAME_NOREPLACE
+def publish(parent, staging, name, target_parent=None):
+    linux_call("renameat2", parent, os.fsencode(staging),
+               parent if target_parent is None else target_parent,
+               os.fsencode(name), 1)  # RENAME_NOREPLACE
 
 
 def request_name(name):
@@ -298,6 +300,8 @@ class Record:
     retry_at: float = 0
     pending: bool = True
     cancelled: threading.Event = field(default_factory=threading.Event)
+    archive_id: str | None = None
+    previous_unconfirmed: "Record | None" = None
 
     @property
     def key(self):
@@ -343,6 +347,16 @@ def same_source(record, info):
         info.st_ctime_ns == record.info.st_ctime_ns
         or info.st_nlink == 0 < record.info.st_nlink
     )
+
+
+@dataclass(frozen=True)
+class CaptureResult:
+    archive_id: str
+    created: bool
+    confirmed: bool
+    recovered: bool
+    stored_bytes: int
+    finished_at: float
 
 
 class Archive:
@@ -428,6 +442,12 @@ class Archive:
     def capture_in_hour(self, record, fd, hour, allowed):
         if not same_source(record, os.fstat(fd)):
             raise IntegrityError
+
+        def can_publish():
+            if not same_source(record, os.fstat(fd)):
+                raise IntegrityError
+            return allowed()
+
         manifest = record.manifest()
         stage = ".pending-" + uuid.uuid4().hex
         os.mkdir(stage, 0o700, dir_fd=hour)
@@ -451,10 +471,9 @@ class Archive:
                                 compressed_sha256=stored[1])
                 manifest["archive_id"] = archive_key(manifest)
                 replace_json(stage_fd, "manifest.json", manifest)
-                if not same_source(record, os.fstat(fd)):
-                    raise IntegrityError
-                published = self.commit(hour, stage, manifest, allowed)
-            return published, os.fstat(fd).st_nlink == 0, stored[0], time.monotonic()
+                published, confirmed = self.commit(hour, stage, stage_fd, manifest, can_publish)
+            return CaptureResult(manifest["archive_id"], published, confirmed,
+                                 os.fstat(fd).st_nlink == 0, stored[0], time.monotonic())
         finally:
             if not published:
                 self.remove_stage(hour, stage)
@@ -463,7 +482,8 @@ class Archive:
     def remove_stage(hour, stage):
         try:
             with directory(stage, hour, device=os.fstat(hour).st_dev) as fd:
-                for name in ("body.zst", "manifest.json", ".manifest.json.part"):
+                for name in ("body.zst", "manifest.json", ".manifest.json.part",
+                             "confirmation.json", ".confirmation.json.part"):
                     try:
                         os.unlink(name, dir_fd=fd)
                     except FileNotFoundError:
@@ -494,24 +514,45 @@ class Archive:
             if self.codec.decompress_digest(compressed, original[0]) != original:
                 raise IntegrityError
 
-    def commit(self, hour, stage, manifest, allowed):
+    def commit(self, hour, stage, stage_fd, manifest, allowed):
         archive_id = manifest["archive_id"]
         if not allowed():
             raise CaptureCancelled
         try:
             publish(hour, stage, archive_id)
         except FileExistsError:
+            confirmed = False
             with directory(archive_id, hour, device=os.fstat(hour).st_dev) as committed:
                 saved = read_json(committed, "manifest.json")
                 self.verify(committed, saved)
                 if any(saved.get(field) != manifest[field] for field in (
-                    "archive_id", "original_sha256", "original_bytes",
+                    "archive_id", "original_sha256", "original_bytes", "mtime_unix_ns",
                 )):
                     raise IntegrityError
+                if manifest["completion"] == "close_write" and saved.get("completion") == "unconfirmed":
+                    self.confirm(stage_fd, committed, manifest, allowed)
+                    confirmed = True
             os.fsync(hour)
-            return False
+            return False, confirmed
         os.fsync(hour)
-        return True
+        return True, False
+
+    @staticmethod
+    def confirm(stage_fd, committed, manifest, allowed):
+        name = "confirmation.json"
+        receipt = {key: manifest[key] for key in (
+            "version", "archive_id", "completion", "original_bytes",
+            "original_sha256", "mtime_unix_ns",
+        )}
+        replace_json(stage_fd, name, receipt)
+        if not allowed():
+            raise CaptureCancelled
+        try:
+            publish(stage_fd, name, name, committed)
+        except FileExistsError:
+            if read_json(committed, name) != receipt:
+                raise IntegrityError
+        os.fsync(committed)
 
 
 class DiskWorker:
@@ -526,9 +567,13 @@ class DiskWorker:
         while task := self.tasks.get():
             job, function, args = task
             try:
-                job.set_result(function(*args))
+                result = function(*args)
             except Exception as error:
+                job.completed_at = time.monotonic()
                 job.set_exception(error)
+            else:
+                job.completed_at = time.monotonic()
+                job.set_result(result)
 
     def submit(self, function, *args):
         job = Future()
@@ -540,14 +585,19 @@ class DiskWorker:
 
 
 class Pilot:
-    def __init__(self, archive, max_fds=MAX_FDS, max_bytes=MAX_BYTES, deadline=None):
+    def __init__(self, archive, max_fds=MAX_FDS, max_bytes=MAX_BYTES, *,
+                 admission_cutoff=None, publication_deadline=None):
         self.archive = archive
         self.max_fds = max_fds
         self.max_bytes = max_bytes
         self.started_at = time.time()
         start = time.monotonic()
-        self.deadline = start + PILOT_DURATION - DRAIN_SECONDS if deadline is None else deadline
-        self.deadline_unix = self.started_at + self.deadline - start
+        self.admission_cutoff = (start + ADMISSION_WINDOW
+                                 if admission_cutoff is None else admission_cutoff)
+        self.publication_deadline = (start + PUBLICATION_WINDOW
+                                     if publication_deadline is None else publication_deadline)
+        self.admission_cutoff_unix = self.started_at + (self.admission_cutoff - start)
+        self.publication_deadline_unix = self.started_at + (self.publication_deadline - start)
         self.source_fd = None
         self.watch = None
         self.source_unavailable = False
@@ -561,12 +611,14 @@ class Pilot:
         self.max_latency = 0
         self.paused = "checking"
         self.phase = "capturing"
+        self.unfinished = 0
         self.watch_gaps = self.queue_overflows = self.ambiguous_closes = 0
         self.abandoned_staging = None
         self.unknown_miss_bytes = self.stored_bytes = 0
         self.counts = {
             label: {"files": 0, "bytes": 0}
             for label in ("completed", "archived", "unconfirmed", "archived_unconfirmed",
+                          "confirmed_later",
                           "recovered_after_unlink", "missed", "integrity_failures",
                           "archive_failures", "abandoned_pending")
         }
@@ -599,10 +651,13 @@ class Pilot:
         self.records = {key: item for key, item in self.records.items()
                         if not item.cancelled.is_set()}
 
-    def disarm(self):
+    def stop_watch(self):
         if self.watch is not None:
             self.watch.close()
             self.watch = None
+
+    def disarm(self):
+        self.stop_watch()
         if self.source_fd is not None:
             os.close(self.source_fd)
             self.source_fd = None
@@ -690,17 +745,16 @@ class Pilot:
         return record
 
     def admit(self, record):
+        if time.monotonic() >= self.admission_cutoff:
+            self.release(record)
+            return
         known = self.records.get(record.key)
         if known is not None:
             if known.evidence == "unconfirmed" and record.evidence == "close_write":
+                record.previous_unconfirmed = known
                 if known.pending:
                     known.cancelled.set()
                     self.finish(known)
-                else:
-                    self.count("completed", record.info.st_size)
-                    known.evidence = "close_write"
-                    self.release(record)
-                    return
             else:
                 self.release(record)
                 return
@@ -727,7 +781,7 @@ class Pilot:
             self.unknown_miss_bytes += 1
 
     def drain(self, now):
-        if self.watch is None or now >= self.deadline:
+        if self.watch is None or now >= self.admission_cutoff:
             return False
         candidates = {}
         for mask, name in self.watch.events():
@@ -754,10 +808,7 @@ class Pilot:
                 elif record := self.observed_close(name, now):
                     candidates[name] = record
         for record in candidates.values():
-            if time.monotonic() < self.deadline:
-                self.admit(record)
-            else:
-                self.release(record)
+            self.admit(record)
         return False
 
     def reconcile(self, source, now, in_flight=None):
@@ -766,6 +817,7 @@ class Pilot:
             return
         present = set()
         live_records = set()
+        live_inodes = set()
         old_mtime = time.time_ns() - UNCONFIRMED_AGE * 10**9
         with os.scandir(self.source_fd) as entries:
             for entry in entries:
@@ -788,9 +840,13 @@ class Pilot:
                 if key not in self.records and info.st_mtime_ns <= old_mtime:
                     self.admit(Record(name, info, "unconfirmed", now))
                 live_records.add(key)
+                live_inodes.add((name, inode(info)))
         self.seen = {name: identity for name, identity in self.seen.items() if name in present}
         for key, record in list(self.records.items()):
             if key in live_records or record is in_flight or record.fd is not None:
+                continue
+            if (record.evidence == "unconfirmed" and record.archive_id is not None
+                    and (record.name, inode(record.info)) in live_inodes):
                 continue
             if record.pending:
                 if record.evidence == "close_write":
@@ -831,7 +887,7 @@ class Pilot:
                 self.finish(record)
 
     def next_record(self, now):
-        if now >= self.deadline:
+        if now >= self.publication_deadline:
             return None
         return min(
             (record for record in self.records.values()
@@ -841,7 +897,7 @@ class Pilot:
         )
 
     def allowed(self, record):
-        return not record.cancelled.is_set() and time.monotonic() < self.deadline
+        return not record.cancelled.is_set() and time.monotonic() < self.publication_deadline
 
     def capture(self, record, fd):
         try:
@@ -853,7 +909,7 @@ class Pilot:
         size = record.info.st_size
         self.observe_age(now)
         try:
-            created, recovered, stored_bytes, published_at = job.result()
+            result = job.result()
         except CaptureCancelled:
             if not record.cancelled.is_set():
                 self.count("abandoned_pending", size)
@@ -869,18 +925,25 @@ class Pilot:
                 self.paused = "archive_io"
             record.retry_at = now + SCAN_INTERVAL
         else:
-            if created:
+            if result.created:
                 self.count("archived", size)
-                self.stored_bytes += stored_bytes
+                self.stored_bytes += result.stored_bytes
                 if record.evidence == "unconfirmed":
+                    record.archive_id = result.archive_id
                     self.count("archived_unconfirmed", size)
                 else:
-                    latency = max(0, published_at - record.observed)
+                    latency = max(0, result.finished_at - record.observed)
                     bucket = math.ceil(latency * 10) if latency < 60 else math.ceil(latency) * 10
                     self.latencies[bucket] += 1
                     self.max_latency = max(self.max_latency, latency)
-                if recovered:
+                if result.recovered:
                     self.count("recovered_after_unlink", size)
+            prior = record.previous_unconfirmed
+            if result.confirmed and prior is not None and prior.archive_id == result.archive_id:
+                counts = self.counts["archived_unconfirmed"]
+                counts["files"] -= 1
+                counts["bytes"] -= size
+                self.count("confirmed_later", size)
             self.finish(record)
 
     def observe_age(self, now):
@@ -906,9 +969,11 @@ class Pilot:
         oldest = self.observe_age(now)
         return {
             "started_at_unix": self.started_at,
-            "capture_deadline_unix": self.deadline_unix,
+            "admission_cutoff_unix": self.admission_cutoff_unix,
+            "publication_deadline_unix": self.publication_deadline_unix,
             "heartbeat_unix": time.time(),
             "phase": self.phase,
+            "unfinished": self.unfinished,
             "paused_reason": self.paused,
             "source_watch_active": self.watch is not None,
             "watch_gaps": self.watch_gaps,
@@ -931,15 +996,24 @@ class Pilot:
         worker = DiskWorker()
         job = record = None
         history_requested = False
-        drain_end = None
+        shutdown_deadline = self.publication_deadline
         try:
             while True:
                 now = time.monotonic()
-                if job is not None and job.done():
+                if now < shutdown_deadline and stop() and self.phase != "interrupted":
+                    self.phase = "interrupted"
+                    shutdown_deadline = min(shutdown_deadline, now + 20)
+                    self.disarm()
+                    self.discard_pending()
+                    heartbeat_due = 0
+                elif self.phase == "capturing" and now >= self.admission_cutoff:
+                    self.phase = "draining"
+                    self.stop_watch()
+                    heartbeat_due = 0
+
+                if job is not None and job.done() and job.completed_at < shutdown_deadline:
                     if record is not None:
                         self.capture_result(record, job, now)
-                        if self.phase == "capturing" and now < self.deadline and not stop():
-                            self.refill()
                     else:
                         self.paused, abandoned, wrote_history = job.result()
                         if abandoned is not None:
@@ -947,60 +1021,67 @@ class Pilot:
                         if history_requested and wrote_history:
                             history_due = now + HISTORY_INTERVAL
                     job = record = None
+                    if now < shutdown_deadline and self.phase != "interrupted":
+                        self.refill()
 
-                if self.phase == "capturing" and (now >= self.deadline or stop()):
-                    self.phase = "draining" if now >= self.deadline else "interrupted"
-                    drain_end = (self.deadline + DRAIN_SECONDS - 1 if now >= self.deadline
-                                 else now + min(30, DRAIN_SECONDS - 1))
-                    drain_end = max(drain_end, now)
-                    self.disarm()
-                    self.discard_pending()
-                    heartbeat_due = 0
+                if now >= shutdown_deadline:
+                    self.unfinished = self.pending_files
+                    if job is not None and (record is None or not record.pending):
+                        self.unfinished += 1
+                    if self.unfinished:
+                        self.phase = "failed"
+                    elif self.phase == "draining":
+                        self.phase = "finished"
+                    break
+                if job is None:
+                    if self.phase == "interrupted":
+                        break
+                    if self.phase == "draining" and self.pending_files == 0:
+                        self.phase = "finished"
+                        break
 
                 if self.phase == "capturing":
                     reconcile = self.drain(now)
                     if now >= scan_due or reconcile:
                         self.reconcile(source, now, record)
                         scan_due = now if self.drain(now) else now + SCAN_INTERVAL
-                    if job is None and now >= probe_due:
+                if job is None and self.phase != "interrupted":
+                    if now >= probe_due:
                         history_requested = now >= history_due
                         row = self.status(now) if history_requested else None
                         was_paused = self.paused not in (None, "checking")
                         job = worker.submit(self.archive.probe, was_paused,
                                             self.abandoned_staging is None, row)
                         probe_due = now + HEARTBEAT_INTERVAL
-                    elif job is None and self.paused is None:
+                    elif self.paused is None:
                         if record := self.next_record(now):
                             job = worker.submit(self.capture, record, os.dup(record.fd))
-                elif job is None or now >= drain_end:
-                    if self.phase == "draining":
-                        self.phase = "finished"
-                    break
-
                 if now >= heartbeat_due:
                     replace_json(status_fd, STATUS_NAME, self.status(now))
                     heartbeat_due = now + HEARTBEAT_INTERVAL
                 watch_fd = [self.watch.fd] if self.watch is not None else []
                 select.select(watch_fd, [], [], 0.05 if job is not None else 0.5)
+        except Exception:
+            self.phase = "failed"
+            self.unfinished = self.pending_files + (
+                job is not None and (record is None or not record.pending)
+            )
+            raise
         finally:
             # A stuck I/O must not keep this process or its inotify loop alive.
-            if job is None:
+            if job is None or job.done():
                 worker.close()
             self.discard_pending()
             self.close()
             replace_json(status_fd, STATUS_NAME, self.status(time.monotonic()))
+        return 1 if self.phase == "failed" else 0
 
 
 ALERTS = {
-    "inactive": "pilot service exited without a clean deadline",
+    "inactive": "pilot service exited early or failed",
     "heartbeat": "heartbeat is missing or stale",
     "mount": "expected disk12 mount is unavailable",
-    "paused": "archive writes are paused",
-    "missed": "a completed log could not be captured",
-    "gap": "source event coverage is incomplete",
-    "integrity": "archive integrity check failed",
-    "io": "archive I/O failed",
-    "backlog": "pending capture is at least 30 seconds old",
+    "manager": "systemd mover status is unavailable",
 }
 
 
@@ -1008,77 +1089,80 @@ def journal_alert(message):
     print("<4>Will CLIProxy log mover: " + message, file=sys.stderr)
 
 
-def watchdog(mount, pilot_unit, state_fd, alert=journal_alert):
-    alerts = set()
+def manager_properties(pilot_unit):
+    properties = ("ActiveState", "Result", "ActiveEnterTimestamp", "InactiveEnterTimestamp")
+    try:
+        result = subprocess.run(
+            ["/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(properties),
+             "--", pilot_unit],
+            env=dict(os.environ, LC_ALL="C", TZ="UTC"), text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def manager_timestamp(value):
+    try:
+        return datetime.strptime(value, "%a %Y-%m-%d %H:%M:%S UTC").replace(
+            tzinfo=timezone.utc
+        ).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def watchdog_alerts(properties, heartbeat, now):
+    active = properties.get("ActiveState")
+    if not active:
+        return {"manager"}
+
+    started = manager_timestamp(properties.get("ActiveEnterTimestamp"))
+    if active in ("activating", "deactivating"):
+        return set()
+    if active in ("active", "reloading"):
+        if (isinstance(heartbeat, (int, float))
+                and 0 <= now - heartbeat <= STALE_AFTER
+                and (started is None or heartbeat >= started)):
+            return set()
+        if started is None or now - started >= STALE_AFTER:
+            return {"heartbeat"}
+        return set()
+
+    stopped = manager_timestamp(properties.get("InactiveEnterTimestamp"))
+    # systemctl prints both timestamps at one-second resolution.
+    if (active == "inactive" and properties.get("Result") == "success"
+            and started is not None and stopped is not None
+            and stopped - started >= ADMISSION_WINDOW):
+        return set()
+    return {"inactive"}
+
+
+def watchdog_poll(mount, properties, heartbeat, now, previous, alert=journal_alert):
+    alerts = watchdog_alerts(properties, heartbeat, now)
     try:
         with mount.open():
             pass
     except Paused:
         alerts.add("mount")
-    finished_now = False
-    try:
-        with directory(STATUS_PATH) as fd:
-            status = read_json(fd, STATUS_NAME)
-        now = time.time()
-        age = now - status["heartbeat_unix"]
-        if not 0 <= age <= STALE_AFTER:
-            alerts.add("heartbeat")
-        else:
-            finished_now = (status.get("phase") == "finished"
-                            and status["capture_deadline_unix"] <= now)
-    except (OSError, IntegrityError, KeyError, TypeError):
-        status = {}
-        alerts.add("heartbeat")
-
-    live = subprocess.run(["/bin/systemctl", "is-active", "--quiet", pilot_unit],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if live.returncode and not finished_now:
-        alerts.add("inactive")
-    if status.get("paused_reason") not in (None, "checking"):
-        alerts.add("paused")
-    if status.get("watch_gaps") or status.get("queue_overflows"):
-        alerts.add("gap")
-    if status.get("missed", {}).get("files"):
-        alerts.add("missed")
-    if status.get("integrity_failures", {}).get("files"):
-        alerts.add("integrity")
-    if status.get("archive_failures", {}).get("files"):
-        alerts.add("io")
-    if status.get("oldest_pending_seconds", 0) >= 30:
-        alerts.add("backlog")
-
-    started_at = status.get("started_at_unix")
-    try:
-        previous = read_json(state_fd, "alerts.json")
-    except (OSError, IntegrityError):
-        previous = {}
-    # Carry outage alerts through a missing heartbeat and reset once a new pilot is seen.
-    if started_at is None:
-        started_at = previous.get("started_at_unix")
-    old_alerts = (set(previous.get("alerts", []))
-                  if previous.get("started_at_unix") == started_at else set())
-    for changed in sorted(alerts - old_alerts):
+    for changed in sorted(alerts - previous):
         alert(ALERTS[changed])
-    for changed in sorted(old_alerts - alerts):
+    for changed in sorted(previous - alerts):
         alert("cleared: " + ALERTS[changed])
-    if alerts != old_alerts or previous.get("started_at_unix") != started_at:
-        replace_json(state_fd, "alerts.json",
-                     {"started_at_unix": started_at, "alerts": sorted(alerts)})
+    return alerts
 
 
-def stop_post(archive_root):
-    if os.environ.get("SERVICE_RESULT") != "success":
-        return 0
-    try:
-        with directory(STATUS_PATH) as fd:
-            status = read_json(fd, STATUS_NAME)
-    except (OSError, IntegrityError):
-        return 0
-    if status.get("phase") != "finished":
-        return 0
-    timer = f"cliproxy-will-log-mover-watchdog@{archive_root}.timer"
-    return subprocess.run(["/bin/systemctl", "--no-block", "stop", timer],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+def watchdog_loop(mount, pilot_unit, stopping):
+    previous = set()
+    while not stopping.is_set():
+        properties = manager_properties(pilot_unit)
+        try:
+            with directory(STATUS_PATH) as fd:
+                heartbeat = read_json(fd, STATUS_NAME).get("heartbeat_unix")
+        except (OSError, IntegrityError):
+            heartbeat = None
+        previous = watchdog_poll(mount, properties, heartbeat, time.time(), previous)
+        stopping.wait(WATCHDOG_INTERVAL)
 
 
 def main():
@@ -1087,35 +1171,31 @@ def main():
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", archive_root):
         print("<3>Will CLIProxy log mover: invalid archive root", file=sys.stderr)
         return 2
-    if sys.argv[1:] == ["--stop-post"]:
-        return stop_post(archive_root)
+
+    stopping = threading.Event()
+
+    def stop(_signum, _frame):
+        stopping.set()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
     mount = Disk12(os.environ.get("WILL_LOG_MOVER_DISK_UUID", ""))
     if sys.argv[1:] == ["--watchdog"]:
-        with directory(WATCHDOG_PATH) as fd:
-            watchdog(mount, f"cliproxy-will-log-mover@{archive_root}.service", fd)
+        watchdog_loop(mount, f"cliproxy-will-log-mover@{archive_root}.service", stopping)
         return 0
     if sys.argv[1:] or zstd is None:
         print("<3>Will CLIProxy log mover: requires in-process compression.zstd", file=sys.stderr)
         return 2
 
     linux_call("prctl", 4, 0, 0, 0, 0)  # PR_SET_DUMPABLE
-    stopping = False
-
-    def stop(_signum, _frame):
-        nonlocal stopping
-        stopping = True
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
     with directory(STATUS_PATH) as fd:
         lock = os.open("mover.lock", os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600, dir_fd=fd)
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             archive = Archive(mount, ZstdCodec(), (archive_root, "will", "requests"))
-            Pilot(archive).run(INSTANCE_PATH / "logs", fd, lambda: stopping)
+            return Pilot(archive).run(INSTANCE_PATH / "logs", fd, stopping.is_set)
         finally:
             os.close(lock)
-    return 0
 
 
 if __name__ == "__main__":

@@ -56,7 +56,10 @@ confirms that the writer released the same observed inode. It can also result
 from an interrupted writer. Startup files, ambiguous closes and files found
 after a watch gap can be copied after 60 seconds without an mtime change.
 Those copies are marked `unconfirmed` in their manifests and reported
-separately. Move-in events do not establish completion.
+separately. A later close adds a `confirmation.json` only when a fresh read
+matches the archived size, mtime and SHA-256. Changed bytes receive a new
+archive and the earlier copy keeps its original evidence. Move-in events do
+not establish completion.
 
 The Samba `[will]` share exports `/srv/share` and maps its authorized identity
 to `andrew`, which can read private files. Obtain separate approval for the
@@ -79,7 +82,6 @@ by root.
 ssh will.local 'umask 077 && mkdir -p /home/andrew/.cache/cliproxy-will-log-mover-upload'
 scp ops/will_log_mover.py ops/instances/will/cliproxy-will-log-mover@.service \
   ops/instances/will/cliproxy-will-log-mover-watchdog@.service \
-  ops/instances/will/cliproxy-will-log-mover-watchdog@.timer \
   will.local:/home/andrew/.cache/cliproxy-will-log-mover-upload/
 ssh will.local
 ```
@@ -97,7 +99,6 @@ mountpoint=/srv/share/drives/disk12
 archive_root=cliproxy-request-archive
 archive_dir="$mountpoint/$archive_root/will/requests"
 pilot_service="cliproxy-will-log-mover@${archive_root}.service"
-pilot_timer="cliproxy-will-log-mover-watchdog@${archive_root}.timer"
 pilot_watchdog="cliproxy-will-log-mover-watchdog@${archive_root}.service"
 status_file=/run/cliproxy-will-log-mover/status.json
 sudo testparm -s --section-name=will --parameter-name='veto files' | grep -F "/$archive_root/"
@@ -125,9 +126,8 @@ sudo install -o root -g root -m 0755 "$upload/will_log_mover.py" \
 printf 'WILL_LOG_MOVER_DISK_UUID=%s\n' "$disk_uuid" > "$upload/disk.env"
 sudo install -o root -g root -m 0600 "$upload/disk.env" /etc/cliproxy-will-log-mover.env
 sudo install -o root -g root -m 0644 "$upload/cliproxy-will-log-mover@.service" \
-  "$upload/cliproxy-will-log-mover-watchdog@.service" \
-  "$upload/cliproxy-will-log-mover-watchdog@.timer" /etc/systemd/system/
-sudo systemd-analyze verify "$pilot_service" "$pilot_watchdog" "$pilot_timer"
+  "$upload/cliproxy-will-log-mover-watchdog@.service" /etc/systemd/system/
+sudo systemd-analyze verify "$pilot_service" "$pilot_watchdog"
 sudo systemctl daemon-reload
 ```
 
@@ -146,9 +146,10 @@ find "$archive_dir" \
 ```
 
 ```sh
-start_time=$(date +%s.%N)
-sudo systemctl start "$pilot_service" "$pilot_timer"
-/usr/bin/python3.14 -I - "$status_file" "$start_time" <<'PYTHON'
+start_and_verify_pilot() {
+  start_time=$(date +%s.%N) || return
+  sudo systemctl start "$pilot_service" "$pilot_watchdog" || return
+  /usr/bin/python3.14 -I - "$status_file" "$start_time" <<'PYTHON' || return
 import json
 from pathlib import Path
 import sys
@@ -162,6 +163,7 @@ while time.monotonic() < deadline:
         status = json.loads(path.read_text())
         if (status["heartbeat_unix"] > start_time
                 and status["started_at_unix"] >= start_time
+                and status["paused_reason"] is None
                 and status["phase"] == "capturing" and status["source_watch_active"]):
             print(json.dumps(status, indent=2))
             break
@@ -169,11 +171,16 @@ while time.monotonic() < deadline:
         pass
     time.sleep(1)
 else:
-    raise SystemExit("Fresh pilot heartbeat with an armed watch did not appear")
+    raise SystemExit("Fresh heartbeat, successful destination probe, and armed watch did not appear")
 PYTHON
-systemctl is-active "$pilot_service" "$pilot_timer"
-systemctl list-timers "$pilot_timer"
-sudo journalctl -u "$pilot_watchdog" --since '-2 minutes' --no-pager
+  systemctl is-active "$pilot_service" && systemctl is-active "$pilot_watchdog"
+}
+if ! start_and_verify_pilot; then
+  sudo systemctl stop "$pilot_watchdog" "$pilot_service" ||
+    printf '%s\n' 'Could not stop both pilot services' >&2
+  exit 1
+fi
+sudo journalctl -u "$pilot_watchdog" --since '-2 minutes' --no-pager || true
 ```
 
 The mover pauses below 200 GiB free, when an item would cross that floor, or
@@ -184,22 +191,28 @@ entries beyond that budget can disappear before they are reopened. A writer
 that closes after unlink cannot supply a capture pathname. Old staging
 directories stay private and untouched. The status reports their startup count.
 
-The watchdog journals each transition for early exit, stale heartbeat,
-disk12 pause or loss, missing captures, watch gaps and integrity failures.
+The unprivileged watchdog polls systemd and the mount every 30 seconds. It
+journals state changes for an early or failed mover exit, stale heartbeat, or
+missing mount. It uses systemd timestamps and the service result to judge an
+exit. The heartbeat is only a liveness check. The watchdog has its own systemd
+limit of 24 hours 5 minutes.
 Will's existing root-space alarm uses a privileged Wazuh notification relay.
 The pilot watchdog has no access to that relay's configuration. Andrew or his
 designated pilot operator checks the watchdog journal and aggregate status
-after startup and every 15 minutes through the recorded end.
+after startup and every 15 minutes through the recorded end, including pause,
+miss, watch gap, and integrity counts in the status.
 
 ### Acceptance and rollback
 
 - Check the 24-hour pilot window with a representative busy period. The
-  capture cutoff is 23 hours 55 minutes after startup, followed by up to five
-  minutes to finish cleanup and write final status. The mover takes no new
-  captures or publication attempts after the cutoff. Compare independent
-  matching closes through the cutoff with confirmed archives and report the
-  cutoff boundary separately. Report missed, unconfirmed, recovered-after-
-  unlink, abandoned pending and watch gap counts. Any restart fails acceptance.
+  admission cutoff is 23 hours 55 minutes after startup. Already-admitted
+  work drains until the publication deadline at 23 hours 59 minutes. If work
+  is unresolved at the deadline, the mover records a failed phase and the
+  unfinished count and exits nonzero. Compare independent matching closes
+  through the admission cutoff with confirmed archives, including archives
+  with matching confirmation receipts. Report the boundary separately, along
+  with missed, unconfirmed, later-confirmed, recovered-after-unlink, abandoned
+  pending and watch gap counts. Any restart fails acceptance.
 - Require zero integrity failures, misses, late captures, watch gaps and
   queue overflows. Verify a timed restore by comparing bytes and SHA-256 to the
   manifest, and report the aggregate result.
@@ -209,19 +222,25 @@ after startup and every 15 minutes through the recorded end.
   disk12 I/O and free space. The percentiles use 0.1-second buckets below one
   minute and one-second buckets after that. Run a synthetic drain of at least
   13 MiB/s, twice the busiest measured minute, before accepting the pilot.
-- Check both units at the recorded end. A clean deadline exit leaves the
-  mover inactive with a successful result and automatically stops the
-  watchdog timer. The final status remains under `/run` until reboot.
-  A `RuntimeMaxSec` timeout means the deadline logic failed. For rollback,
-  stop the timer, mover and watchdog. The units are static and will only
-  start when invoked. Preserve the archive, Samba veto and final status.
+- At the recorded end, check that the mover is inactive with a successful
+  result, then stop the independent watchdog. The final status remains under
+  `/run` until reboot. A mover `RuntimeMaxSec` timeout means the deadline logic
+  failed. Both services are static. Preserve the archive, Samba veto and
+  final status.
 
 ```sh
-systemctl show -p ActiveState -p Result "$pilot_service"
-systemctl show -p ActiveState -p UnitFileState "$pilot_timer"
-/usr/bin/python3.14 -I -m json.tool "$status_file"
-sudo systemctl stop "$pilot_timer" "$pilot_service" "$pilot_watchdog"
-systemctl show -p ActiveState -p UnitFileState "$pilot_service" "$pilot_timer"
+systemctl show -p ActiveState -p Result "$pilot_service" "$pilot_watchdog"
+sudo systemctl stop "$pilot_watchdog"
+```
+
+For rollback, stop both services before reading diagnostics.
+
+```sh
+sudo systemctl stop "$pilot_watchdog" "$pilot_service"
+systemctl show -p ActiveState -p Result "$pilot_service" "$pilot_watchdog" || true
+if [ -r "$status_file" ]; then
+  /usr/bin/python3.14 -I -m json.tool "$status_file" || true
+fi
 ```
 
 ## Update boundary
