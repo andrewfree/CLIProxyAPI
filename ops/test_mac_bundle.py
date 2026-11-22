@@ -61,7 +61,8 @@ class BundleLaunchAgentsTest(unittest.TestCase):
     def test_installer_requires_archive_only_before_installing_either_job(self):
         ops = Path(__file__).resolve().parent
         for args, allowed in (
-            ([], False), (["--prune"], False), (["--archive-only", "--prune"], False),
+            ([], False), (["--prune"], False), (["--archive-only\n"], False),
+            (["--archive-only", "--prune"], False),
             (["--prune", "--archive-only"], False), (["--verbose", "--archive-only"], True),
         ):
             with self.subTest(args=args), tempfile.TemporaryDirectory() as directory:
@@ -84,6 +85,46 @@ class BundleLaunchAgentsTest(unittest.TestCase):
                 self.assertEqual((root / "Library/LaunchAgents").exists(), allowed)
                 if not allowed:
                     self.assertIn("requires --archive-only and forbids --prune", result.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
+    def test_installer_uses_validated_bytes_after_bundle_switch(self):
+        ops = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tmp = root / "tmp"
+            tmp.mkdir()
+            installer = root / "install_watchdog.sh"
+            installer.write_text((ops / installer.name).read_text()
+                                 .replace("/bin/launchctl", "/usr/bin/true")
+                                 .replace("/usr/bin/install", '"$HOME/switch-and-install"'))
+            switch = root / "switch-and-install"
+            switch.write_text('#!/bin/zsh\n/bin/ln -sfn "$HOME/older" "$HOME/current"\n'
+                              'exec /usr/bin/install "$@"\n')
+            switch.chmod(0o700)
+            for generation in ("newer", "older"):
+                bundle = root / generation
+                bundle.mkdir()
+                for job in ("watchdog", "log-archive"):
+                    label = f"com.rever.cliproxy-{job}"
+                    script = root / f"{job}.py"
+                    script.touch()
+                    arguments = ["--archive-only"] if job == "log-archive" and generation == "newer" else []
+                    plist = {"Label": label, "ProgramArguments": [sys.executable, str(script), *arguments],
+                             "RunAtLoad": True, "Generation": generation}
+                    (bundle / f"{label}.plist").write_bytes(plistlib.dumps(plist))
+            current = root / "current"
+            current.symlink_to(root / "newer")
+
+            result = subprocess.run(
+                ["/bin/zsh", "-f", str(installer), str(current)],
+                env={"HOME": str(root), "TMPDIR": str(tmp)}, capture_output=True, text=True, check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(current.resolve(), (root / "older").resolve())
+            for original in (root / "newer").iterdir():
+                self.assertEqual((root / "Library/LaunchAgents" / original.name).read_bytes(), original.read_bytes())
+            self.assertEqual(list(tmp.iterdir()), [])
 
 
 class BundleJobsTest(unittest.TestCase):

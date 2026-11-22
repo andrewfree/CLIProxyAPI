@@ -10,6 +10,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -77,7 +78,6 @@ class LogArchiver:
         self.clock = clock
         self._manifest_lines: set[bytes] | None = None
         self._manifest_state: ManifestFingerprint | None = None
-        self._manifest_terminated = True
 
     @staticmethod
     def _fingerprint(path: Path) -> FileFingerprint:
@@ -247,38 +247,52 @@ class LogArchiver:
             state = self._manifest_fingerprint(os.fstat(handle.fileno()))
             return state, self._manifest_tail_complete(handle, state[1])
 
-    def _load_manifest(self, handle: BinaryIO) -> None:
-        content = handle.read()
-        self._manifest_lines = set(content.split(b"\n"))
-        self._manifest_terminated = not content or content.endswith(b"\n")
+    def _open_manifest_for_append(self) -> BinaryIO:
+        descriptor = os.open(
+            self._manifest_path,
+            os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+        )
+        return os.fdopen(descriptor, "r+b")
+
+    @staticmethod
+    def _load_manifest(handle: BinaryIO) -> tuple[set[bytes], bytes]:
+        handle.seek(0)
+        records = handle.read().split(b"\n")
+        return set(records), records[-1]
+
+    def _append_manifest(self, handle: BinaryIO, data: bytes) -> ManifestFingerprint:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+        return self._manifest_fingerprint(os.fstat(handle.fileno()))
+
+    def _prepare_manifest(self, handle: BinaryIO) -> set[bytes]:
+        state = self._manifest_fingerprint(os.fstat(handle.fileno()))
+        if self._manifest_state is not None and not self._manifest_covers(state, self._manifest_state):
+            raise OSError("archive manifest changed during run")
+        if self._manifest_lines is not None and state == self._manifest_state:
+            return self._manifest_lines
+
+        lines, tail = self._load_manifest(handle)
+        if tail:
+            match = re.fullmatch(rb"[0-9a-fA-F]{64}  (requests/[^\x00\r\n]+)", tail)
+            if match is None or any(part in (b"", b".", b"..") for part in match[1].split(b"/")):
+                raise OSError("SHA256SUMS has a malformed unterminated final record; repair it before archiving")
+            state = self._append_manifest(handle, b"\n")
+        self._manifest_state = state
+        self._manifest_lines = lines
+        return lines
 
     def _ensure_manifest(self, digest: str, destination: Path) -> None:
         relative = destination.relative_to(self.config.archive_root).as_posix()
         line = f"{digest}  {relative}".encode("utf-8")
         try:
-            descriptor = os.open(
-                self._manifest_path,
-                os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
-                0o600,
-            )
-            with os.fdopen(descriptor, "r+b") as handle:
-                state = self._manifest_fingerprint(os.fstat(handle.fileno()))
-                if self._manifest_state is not None and not self._manifest_covers(state, self._manifest_state):
-                    raise OSError("archive manifest changed during run")
-                if self._manifest_lines is None:
-                    self._load_manifest(handle)
-                    self._manifest_state = state
-                if line in self._manifest_lines and self._manifest_terminated:
-                    return
-                prefix = b"" if self._manifest_tail_complete(handle, state[1]) else b"\n"
-                record = b"" if line in self._manifest_lines else line + b"\n"
-                if prefix or record:
-                    handle.write(prefix + record)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                    self._manifest_state = self._manifest_fingerprint(os.fstat(handle.fileno()))
-                self._manifest_lines.add(line)
-                self._manifest_terminated = True
+            with self._open_manifest_for_append() as handle:
+                lines = self._prepare_manifest(handle)
+                if line not in lines:
+                    self._manifest_state = self._append_manifest(handle, line + b"\n")
+                    lines.add(line)
         except OSError as error:
             raise OSError(f"cannot update archive manifest: {error}") from error
 
@@ -373,8 +387,10 @@ class LogArchiver:
         try:
             self._manifest_state, manifest_terminated = self._inspect_manifest()
             if not manifest_terminated:
+                with self._open_manifest_for_append() as handle:
+                    self._prepare_manifest(handle)
                 result.failures += 1
-                self.logger.error("SHA256SUMS has an unterminated final record; review the manifest")
+                self.logger.error("SHA256SUMS had an unterminated final record; added the missing newline")
             if index_path is not None:
                 archive = str(self.config.archive_root.resolve())
                 if manifest_terminated:

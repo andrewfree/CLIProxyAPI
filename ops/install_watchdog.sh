@@ -7,8 +7,14 @@ launch_agents_dir="$HOME/Library/LaunchAgents"
 user_domain="gui/$(/usr/bin/id -u)"
 labels=(com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive)
 
+staging_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cliproxy-agents.XXXXXXXX")
+trap '/bin/rm -rf -- "$staging_dir"' EXIT
 for label in "${labels[@]}"; do
-    source_plist="$source_dir/$label.plist"
+    /bin/cp "$source_dir/$label.plist" "$staging_dir/$label.plist"
+done
+
+for label in "${labels[@]}"; do
+    source_plist="$staging_dir/$label.plist"
     /usr/bin/plutil -lint "$source_plist"
     if ! script=$(/usr/bin/plutil -extract ProgramArguments.1 raw -expect string -o - "$source_plist") ||
         [[ "$script" != /* || ! -f "$script" ]]; then
@@ -16,16 +22,16 @@ for label in "${labels[@]}"; do
         exit 1
     fi
     if [[ "$label" == com.rever.cliproxy-log-archive ]]; then
-        count=$(/usr/bin/plutil -extract ProgramArguments raw -expect array -o - "$source_plist")
-        archive_only=false
-        for ((i = 2; i < count; i++)); do
-            argument=$(/usr/bin/plutil -extract "ProgramArguments.$i" raw -expect string -o - "$source_plist")
-            case "$argument" in
-                --archive-only) archive_only=true ;;
-                --prune) archive_only=false; break ;;
-            esac
-        done
-        if [[ "$archive_only" != true ]]; then
+        if ! /usr/bin/python3 -I -c '
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as plist:
+    arguments = plistlib.load(plist)["ProgramArguments"]
+valid = (isinstance(arguments, list) and all(isinstance(arg, str) for arg in arguments)
+         and "--archive-only" in arguments[2:] and "--prune" not in arguments[2:])
+sys.exit(not valid)
+' "$source_plist"; then
             printf 'Cannot install %s: ProgramArguments requires --archive-only and forbids --prune.\n' "$label" >&2
             exit 1
         fi
@@ -35,7 +41,7 @@ done
 /bin/mkdir -p "$launch_agents_dir"
 
 for label in "${labels[@]}"; do
-    source_plist="$source_dir/$label.plist"
+    source_plist="$staging_dir/$label.plist"
     installed_plist="$launch_agents_dir/$label.plist"
     /usr/bin/install -m 0644 "$source_plist" "$installed_plist"
 

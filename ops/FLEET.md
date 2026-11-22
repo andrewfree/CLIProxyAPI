@@ -234,14 +234,18 @@ launchctl bootstrap "$domain" "$installed"
 Check the loaded jobs again. The saved settings take effect for new T3
 sessions. Use this checkout-path rollback for commits from before unit 2b.
 To roll back a later bundle ship, use a previously shipped bundle-aware
-commit with `ship --host m5 --commit <previous-shipped-sha> --apply`. Ship
-refuses pre-bundle commits.
+commit. Set `commit` in the shell to that full SHA, complete the archive
+disable and unload above, then run
+`python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply`. Ship
+refuses pre-bundle commits. Keep `commit` set to the rollback SHA.
 
 After a later ship or bundle rollback, reinstall the token helper from the
 bundle when it changed and use the watchdog-only block above for watchdog
 plist changes. When the archive plist has `--archive-only` and omits
-`--prune`, use [Install or resume the log archive job](README.md#install-or-resume-the-log-archive-job)
-to resume it. LaunchAgents are installed as copies. Reinstall the monitor's plist with the block in
+`--prune`, use [Install the archive plist from the active bundle](README.md#install-the-archive-plist-from-the-active-bundle)
+to resume it. That block verifies the already shipped release against `commit`
+and installs from it. LaunchAgents are installed as copies. Reinstall the
+monitor's plist with the block in
 [Install or resume on the Mac](#install-or-resume-on-the-mac) when
 `ops/com.rever.cliproxy-fleet-monitor.plist` changed. P0 reports
 `P0/com.rever.cliproxy-fleet-monitor` while an installed copy differs from the

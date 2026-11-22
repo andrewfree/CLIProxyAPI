@@ -293,17 +293,28 @@ class LogArchiverTest(unittest.TestCase):
         sha256.assert_not_called()
         self.assertEqual((result.skipped_by_index, result.failures), (1, 0))
 
-    def test_partial_append_is_reported_even_with_a_warm_index(self) -> None:
+    def test_malformed_tail_blocks_index_and_appends_until_repaired(self) -> None:
         self.write_log("existing.log", b"closed\n", age_seconds=7_200)
         self.assertEqual(self.archiver(prune=False).run().archived, 1)
-        with (self.archive / "SHA256SUMS").open("ab") as manifest:
-            manifest.write(b"partial record")
+        manifest = self.archive / "SHA256SUMS"
+        original = manifest.read_bytes()
+        malformed = original + b"a" * 63 + b"  requests/partial.log"
+        manifest.write_bytes(malformed)
+        source = self.write_log("new.log", b"new log\n", age_seconds=7_200)
 
-        with self.assertLogs(self.logger, level="ERROR") as logs:
-            result = self.archiver(prune=False).run()
+        for _ in range(2):
+            with self.assertLogs(self.logger, level="ERROR") as logs:
+                result = self.archiver(prune=False).run()
+            self.assertEqual((result.skipped_by_index, result.failures), (0, 1))
+            self.assertIn("malformed unterminated final record", "\n".join(logs.output))
+            self.assertEqual(manifest.read_bytes(), malformed)
+            self.assertTrue(source.exists())
+            self.assertFalse(list((self.archive / "requests").rglob(source.name)))
 
-        self.assertEqual((result.skipped_by_index, result.failures), (0, 1))
-        self.assertIn("unterminated", "\n".join(logs.output))
+        manifest.write_bytes(original)
+        result = self.archiver(prune=False).run()
+        self.assertEqual((result.archived, result.skipped_by_index, result.failures), (1, 1, 0))
+        self.assertTrue(manifest.read_bytes().endswith(b"/new.log\n"))
 
     def test_symlink_manifest_keeps_its_source_target_untouched(self) -> None:
         source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)

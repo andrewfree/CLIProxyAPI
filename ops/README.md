@@ -540,7 +540,8 @@ A missing or corrupt index or a missing, replaced, or
 shortened manifest triggers fresh verification. The first index miss in a
 run reads the full manifest. A run with only index hits checks metadata and
 the manifest's final byte. The job reports an unterminated tail as a failure
-for review and separates it from any appended record.
+and completes it with a newline only when it is a valid record. A malformed
+tail blocks index hits and new archive records until the manifest is repaired.
 Publishing a new archive copy requires hard-link support on the archive
 filesystem so competing writers can preserve both copies. Archive failures
 are reported in `ops/runtime/archive.log`.
@@ -548,15 +549,13 @@ are reported in `ops/runtime/archive.log`.
 ### Install or resume the log archive job
 
 From a clean worktree at the reviewed, merged commit, wait for Andrew's
-`promote fleet <id>` phrase before shipping and installing the job. Install
-the plist from the shipped bundle. A disabled job needs `launchctl enable`
-before `bootstrap`. The two-job `ops/install_watchdog.sh` bootstraps before
-enabling, so use this sequence for the log archive job.
+`promote fleet <id>` phrase before shipping and installing the job. Run this
+block for a new ship. Keep `commit` set for the installation check below.
 
 ```sh
+commit=$(git rev-parse HEAD)
 (
   set -e
-  commit=$(git rev-parse HEAD)
   label=com.rever.cliproxy-log-archive
   domain="gui/$(id -u)"
   launchctl disable "$domain/$label"
@@ -565,24 +564,50 @@ enabling, so use this sequence for the log archive job.
   fi
 
   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
-  bundled="$HOME/cliproxy-live/ops/$label.plist"
+)
+```
+
+#### Install the archive plist from the active bundle
+
+After the bundle ship succeeds, run this block from the reviewed checkout
+with `commit` set to the full expected SHA. This also applies after a bundle
+rollback. The block checks the active release and installs its plist without
+shipping. It assumes the job is disabled and unloaded. Enable the job before
+bootstrapping it.
+
+```sh
+(
+  set -e
+  label=com.rever.cliproxy-log-archive
+  domain="gui/$(id -u)"
+  bundle="$HOME/cliproxy-live/ops"
   installed="$HOME/Library/LaunchAgents/$label.plist"
-  /usr/bin/plutil -lint "$bundled"
-  /usr/bin/install -m 0644 "$bundled" "$installed"
-  /opt/homebrew/bin/python3 - "$installed" <<'PY'
+  staged=$(mktemp -d "${TMPDIR:-/tmp}/cliproxy-archive.XXXXXXXX")
+  trap 'rm -rf -- "$staged"' EXIT
+  /opt/homebrew/bin/python3 - "$bundle" "${commit:?Set the expected bundle SHA}" "$staged/$label.plist" <<'PY'
+from pathlib import Path
 import plistlib
 import sys
 
-with open(sys.argv[1], "rb") as plist:
-    arguments = plistlib.load(plist)["ProgramArguments"]
-expected = [
-    "/opt/homebrew/bin/python3",
-    "/Users/rever/cliproxy-live/ops/archive_logs.py",
-    "--archive-only",
-]
-if arguments != expected:
+from ops import fleet_bundle
+
+root = Path(sys.argv[1]).resolve()
+commit = sys.argv[2]
+staged = Path(sys.argv[3])
+release = fleet_bundle.current_release(root)
+manifest = fleet_bundle.active_manifest(root, release)
+if release is None or manifest.get("commit") != commit:
+    raise SystemExit("Active bundle does not match the expected SHA")
+data, mode = fleet_bundle.read_regular(release / staged.name)
+if fleet_bundle.file_record(data, mode) != manifest["files"].get(f"ops/{staged.name}"):
+    raise SystemExit("Archive plist does not match the active bundle manifest")
+expected = ["/opt/homebrew/bin/python3", str(root / "archive_logs.py"), "--archive-only"]
+if plistlib.loads(data).get("ProgramArguments") != expected:
     raise SystemExit("Unexpected log archive ProgramArguments")
+staged.write_bytes(data)
 PY
+  /usr/bin/plutil -lint "$staged/$label.plist"
+  /usr/bin/install -m 0644 "$staged/$label.plist" "$installed"
   launchctl enable "$domain/$label"
   launchctl bootstrap "$domain" "$installed"
   launchctl print "$domain/$label"
