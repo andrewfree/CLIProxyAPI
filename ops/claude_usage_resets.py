@@ -233,7 +233,7 @@ def request_id_for(state_dir: pathlib.Path, email: str, grant_id: str) -> str:
 def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, receipt_path: pathlib.Path,
           dry_run: bool, sleep: Callable[[float], None] = time.sleep,
           min_fable_percent: int | None = None, host: str | None = None,
-          host_flag: str = "local") -> dict[str, Any]:
+          status_hint: str = "status --host local") -> dict[str, Any]:
     if min_fable_percent is not None and not 0 <= min_fable_percent <= 100:
         raise ResetError("minimum Fable percent must be between 0 and 100")
     receipt: dict[str, Any] = {"started_at": now_iso(), "account": email, "grant_id": grant_id, "dry_run": dry_run}
@@ -271,7 +271,7 @@ def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, rece
             status, body = proxy.upstream(email, "POST", CLAIM_URL.format(org=org),
                                           {"program": PROGRAM, "grant_id": grant_id, "request_id": request_id})
         except urllib.error.HTTPError as err:
-            if err.code < 500:
+            if 400 <= err.code < 500:
                 # The management API rejects 4xx requests before forwarding them, so nothing was sent.
                 receipt["result"] = "refused"
                 receipt["claim_error"] = f"management HTTP {err.code}"
@@ -291,8 +291,8 @@ def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, rece
             receipt["finished_at"] = now_iso()
             write_receipt(receipt_path, receipt)
             raise ResetError(f"the claim may have been sent ({indeterminate}). Receipt: {receipt_path}. Check "
-                             f"`status --host {host_flag}` before anything else. If the grant is still usable, "
-                             f"rerunning the same command with --host {host_flag} reuses request {request_id}.")
+                             f"`{status_hint}` before anything else. If the grant is still usable, rerunning the "
+                             f"same command on the same host reuses request {request_id}.")
         receipt["claim_http_status"] = status
         receipt["claim_response"] = body
         receipt["result"] = body.get("result") if isinstance(body, dict) else f"http_{status}"
@@ -381,6 +381,15 @@ def cmd_watch(proxy: Proxy, args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def status_hint(args: argparse.Namespace) -> str:
+    """The `status` command that asks the same proxy this claim used."""
+    if args.host == "will":
+        return "status --host will"
+    options = "".join(f"{flag} {value} " for flag, value in (("--root", args.root), ("--base-url", args.base_url))
+                      if value)
+    return f"{options}status --host local"
+
+
 def cmd_claim(proxy: Proxy, args: argparse.Namespace) -> int:
     if not (args.yes or args.dry_run):
         print("claim consumes a reset grant; pass --yes to redeem or --dry-run to check", file=sys.stderr)
@@ -389,7 +398,7 @@ def cmd_claim(proxy: Proxy, args: argparse.Namespace) -> int:
     receipt_path = args.receipt or STATE_DIR / f"claim-{args.grant}-{stamp}{'-dryrun' if args.dry_run else ''}.json"
     receipt = claim(proxy, args.account, args.grant, STATE_DIR, receipt_path, args.dry_run,
                     min_fable_percent=args.min_fable_percent, host=getattr(args, "label", None),
-                    host_flag=args.host or "local")
+                    status_hint=status_hint(args))
     print(json.dumps(receipt, indent=2))
     print(f"receipt: {receipt_path}", file=sys.stderr)
     return 0 if receipt["result"] in ("reset", "dry_run") else 1
@@ -423,8 +432,10 @@ def is_loopback(url: str) -> bool:
     try:
         parts = urllib.parse.urlsplit(url)
         host = parts.hostname
-        if parts.scheme not in ("http", "https") or host is None or parts.username or parts.password:
+        if (parts.scheme not in ("http", "https") or host is None
+                or parts.username is not None or parts.password is not None):
             return False
+        parts.port  # raises ValueError for a malformed port
         return host == "localhost" or ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False

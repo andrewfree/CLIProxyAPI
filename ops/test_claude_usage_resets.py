@@ -226,6 +226,15 @@ class CliGuardTest(unittest.TestCase):
         self.assertIn("below required 99%", err)
         self.assertEqual(proxy.posts(), [])
 
+    def test_status_hint_repeats_the_claims_proxy(self):
+        parse = resets.build_parser().parse_args
+        self.assertEqual(resets.status_hint(parse(["claim", "--host", "will", "--account", EMAIL,
+                                                   "--grant", "g", "--yes"])), "status --host will")
+        args = parse(["--root", "/srv/x", "--base-url", "http://127.0.0.2:8327", "claim", "--host", "local",
+                      "--account", EMAIL, "--grant", "g", "--yes"])
+        self.assertEqual(resets.status_hint(args),
+                         "--root /srv/x --base-url http://127.0.0.2:8327 status --host local")
+
     def test_bundled_copy_refuses_to_run_as_a_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             release = pathlib.Path(tmp).resolve() / ".fleet-releases" / "20261118T000000Z-test"
@@ -373,7 +382,8 @@ class WillEntryTest(unittest.TestCase):
 
     def test_a_non_loopback_base_url_never_receives_the_key(self):
         for url in ("http://10.0.0.9:8317", "http://will.local:8317", "file:///etc/passwd", "http://[::1",
-                    "http://127.0.0.1@evil.example", "http://user@127.0.0.1:8317"):
+                    "http://127.0.0.1@evil.example", "http://user@127.0.0.1:8317", "http://@127.0.0.2:8317",
+                    "http://127.0.0.2:bad"):
             args = resets.build_parser().parse_args(["--base-url", url, "status"])
             with self.subTest(url=url), mock.patch.object(resets, "load_management_key") as key, \
                     contextlib.redirect_stderr(io.StringIO()) as err:
@@ -552,12 +562,13 @@ class RemoteProgramTest(unittest.TestCase):
         return result, json.loads(receipt.read_text())
 
     def test_a_claim_whose_answer_is_lost_is_indeterminate_and_pinned_to_its_host(self):
-        for on_claim in (None, 502):  # a dropped connection, or the proxy failing after it forwarded the claim
+        for on_claim in (None, 502, 303):  # dropped, failed after forwarding, or redirected: all unknown
             with self.subTest(on_claim=on_claim):
                 result, saved = self.claim_against(on_claim)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("the claim may have been sent", result.stderr)
                 self.assertIn("Check `status --host will`", result.stderr)
+                self.assertIn("same command on the same host", result.stderr)
                 self.assertEqual((saved["result"], saved["host"]), ("indeterminate", "Will (will.local)"))
                 for receipt in pathlib.Path(self.root, "ops", "runtime", "claude-resets").glob("claim-*.json"):
                     receipt.unlink()
