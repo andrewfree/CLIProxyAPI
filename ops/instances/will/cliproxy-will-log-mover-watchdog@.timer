@@ -6,6 +6,3 @@ OnActiveSec=30s
 OnUnitActiveSec=30s
 AccuracySec=1s
 Unit=cliproxy-will-log-mover-watchdog@%i.service
-
-[Install]
-WantedBy=timers.target

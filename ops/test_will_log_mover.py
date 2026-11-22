@@ -10,9 +10,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import Future
-from contextlib import contextmanager, redirect_stderr
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 import zlib
 
@@ -60,8 +62,8 @@ class FakeWatch:
         pass
 
     def events(self):
-        yield from self.pending
-        self.pending.clear()
+        pending, self.pending = self.pending, []
+        yield from pending
 
 
 def portable_publish(parent, staging, archive_id):
@@ -82,10 +84,12 @@ class LogMoverTests(unittest.TestCase):
         self.source.mkdir()
         self.disk = self.root / "disk"
         self.disk.mkdir()
-        self.destination = self.disk / "archive"
-        self.destination.mkdir(mode=0o700)
+        self.destination = self.disk / "archive/requests"
+        self.destination.mkdir(parents=True, mode=0o700)
+        self.meta = self.disk / "archive/meta"
+        self.meta.mkdir(mode=0o700)
         self.mount = FakeMount(self.disk)
-        self.archive = mover.Archive(self.mount, TestCodec(), ("archive",),
+        self.archive = mover.Archive(self.mount, TestCodec(), ("archive", "requests"),
                                      20 * mover.CHUNK_SIZE, 25 * mover.CHUNK_SIZE)
         self.pilot = self.start_pilot()
         if sys.platform != "linux":
@@ -103,98 +107,135 @@ class LogMoverTests(unittest.TestCase):
     def source_path(self, name=NORMAL):
         return self.source / os.fsdecode(name)
 
+    def events(self, *events):
+        self.pilot.watch.pending.extend(events)
+        return self.pilot.drain(time.monotonic())
+
     def offer(self, name=NORMAL, data=SYNTHETIC):
         self.source_path(name).write_bytes(data)
-        self.pilot.watch.pending.append((mover.CLOSE_WRITE, name))
-        self.pilot.drain(10)
-        return self.pilot.next_record(10)
+        self.events((mover.CREATE, name), (mover.CLOSE_WRITE, name))
+        return self.pilot.next_record(time.monotonic())
 
     def capture(self, record):
         job = Future()
         try:
-            job.set_result(self.archive.capture(record))
-        except (OSError, mover.IntegrityError, mover.Paused) as error:
+            job.set_result(self.pilot.capture(record, os.dup(record.fd)))
+        except (OSError, mover.IntegrityError, mover.Paused, mover.CaptureCancelled) as error:
             job.set_exception(error)
-        self.pilot.capture_result(record, job, 10)
+        self.pilot.capture_result(record, job, time.monotonic())
 
     def directories(self):
         return [item for item in self.destination.glob("*/*/*/*/*")
                 if item.is_dir() and not item.name.startswith(".")]
 
+    def scan(self):
+        self.pilot.reconcile(self.source, time.monotonic())
+
+    def make_old(self, path):
+        old = time.time() - mover.UNCONFIRMED_AGE - 5
+        os.utime(path, (old, old))
+
     def test_close_captures_and_verifies_content_once(self):
-        with patch.object(mover, "Inotify", return_value=self.pilot.watch):
-            with self.source_path().open("wb") as writer:
-                writer.write(SYNTHETIC)
-                writer.flush()
-                self.pilot.reconcile(self.source, None)
-                self.assertIsNone(self.pilot.next_record(10))
-                self.assertEqual(self.pilot.unconfirmed, (1, len(SYNTHETIC)))
-        self.pilot.watch.pending.extend([(mover.CLOSE_WRITE, NORMAL)] * 2)
-        self.pilot.drain(10)
-        self.capture(self.pilot.next_record(10))
+        with self.source_path().open("wb") as writer:
+            writer.write(SYNTHETIC)
+            writer.flush()
+            self.scan()
+            self.assertIsNone(self.pilot.next_record(time.monotonic()))
+        self.events((mover.CLOSE_WRITE, NORMAL), (mover.CLOSE_WRITE, NORMAL))
+        self.capture(self.pilot.next_record(time.monotonic()))
         self.assertEqual(len(self.directories()), 1)
         self.assertEqual(self.source_path().read_bytes(), SYNTHETIC)
         self.assertEqual(self.pilot.counts["completed"]["files"], 1)
         self.assertEqual(self.pilot.counts["archived"]["bytes"], len(SYNTHETIC))
 
     @unittest.skipUnless(sys.platform == "linux", "Linux inotify")
-    def test_kernel_delivers_close_and_move_events(self):
+    def test_kernel_confirms_close_but_does_not_confirm_move(self):
         self.pilot.disarm()
         self.pilot.arm(self.source)
         self.assertIsNotNone(self.pilot.watch)
-        self.assertFalse(self.pilot.drain(1))
         with self.source_path().open("wb") as writer:
             writer.write(SYNTHETIC)
             writer.flush()
-            self.pilot.drain(10)
-            self.assertIsNone(self.pilot.next_record(10))
+            self.pilot.drain(time.monotonic())
+            self.assertIsNone(self.pilot.next_record(time.monotonic()))
         ready, _, _ = select.select([self.pilot.watch.fd], [], [], 2)
         self.assertTrue(ready)
-        self.pilot.drain(10)
-        self.assertEqual(self.pilot.next_record(10).evidence, "close_write")
-        self.capture(self.pilot.next_record(10))
+        self.pilot.drain(time.monotonic())
+        self.capture(self.pilot.next_record(time.monotonic()))
 
         temporary = self.root / "ready"
         temporary.write_bytes(SYNTHETIC)
         temporary.rename(self.source_path(ERROR))
         ready, _, _ = select.select([self.pilot.watch.fd], [], [], 2)
         self.assertTrue(ready)
-        self.pilot.drain(10)
-        self.assertEqual(self.pilot.next_record(10).evidence, "moved_to")
-        self.capture(self.pilot.next_record(10))
-        self.assertEqual(len(self.directories()), 2)
+        self.pilot.drain(time.monotonic())
+        self.assertIsNone(self.pilot.next_record(time.monotonic()))
+        self.assertEqual(len(self.directories()), 1)
+        self.assertEqual(self.pilot.counts["completed"]["files"], 1)
 
     @unittest.skipUnless(sys.platform == "linux", "Linux inotify")
-    def test_service_loop_finishes_with_aggregate_status(self):
+    def test_unlinked_writer_close_cannot_confirm_replacement(self):
+        self.pilot.disarm()
+        self.pilot.arm(self.source)
+        with self.source_path().open("wb") as old_writer:
+            old_writer.write(SYNTHETIC)
+            self.pilot.drain(time.monotonic())
+            self.source_path().unlink()
+            with self.source_path().open("wb") as replacement:
+                replacement.write(SYNTHETIC)
+                replacement.flush()
+                self.pilot.drain(time.monotonic())
+                old_writer.close()
+                self.pilot.drain(time.monotonic())
+                self.assertIsNone(self.pilot.next_record(time.monotonic()))
+        self.pilot.drain(time.monotonic())
+        self.assertEqual(self.pilot.next_record(time.monotonic()).evidence, "close_write")
+        self.assertEqual(self.pilot.counts["completed"]["files"], 1)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux inotify")
+    def test_stalled_destination_probe_does_not_block_event_intake(self):
         pilot = mover.Pilot(self.archive)
-        watch_ready = threading.Event()
+        blocked = threading.Event()
+        release = threading.Event()
+        received = threading.Event()
         archived = threading.Event()
         stop = threading.Event()
-        write_status = mover.replace_json
+        write_status, probe = mover.replace_json, self.archive.probe
+
+        def wait_on_disk(*args):
+            blocked.set()
+            if not release.wait(5):
+                raise RuntimeError("synthetic disk was never released")
+            return probe(*args)
 
         def observe_status(fd, name, value):
             write_status(fd, name, value)
             if name == mover.STATUS_NAME and value["source_watch_active"]:
-                watch_ready.set()
+                if value["completed"]["files"]:
+                    received.set()
                 if value["archived"]["files"]:
                     archived.set()
 
         with (
             mover.directory(self.root) as fd,
+            patch.object(self.archive, "probe", side_effect=wait_on_disk),
             patch.object(mover, "replace_json", observe_status),
-            patch.object(mover, "HEARTBEAT_INTERVAL", 0.05),
+            patch.object(mover, "HEARTBEAT_INTERVAL", 0.10),
         ):
-            runner = threading.Thread(
-                target=pilot.run, args=(self.source, fd, stop.is_set), daemon=True
-            )
+            runner = threading.Thread(target=pilot.run, args=(self.source, fd, stop.is_set),
+                                      daemon=True)
             runner.start()
             try:
-                self.assertTrue(watch_ready.wait(3))
+                self.assertTrue(blocked.wait(3))
                 self.source_path().write_bytes(SYNTHETIC)
+                self.assertTrue(received.wait(3))
+                self.assertFalse(archived.is_set())
+                release.set()
                 self.assertTrue(archived.wait(3))
             finally:
+                release.set()
                 stop.set()
-                runner.join(3)
+                runner.join(5)
             self.assertFalse(runner.is_alive())
             self.assertEqual(mover.read_json(fd, mover.STATUS_NAME)["watch_gaps"], 0)
         self.assertEqual(len(self.directories()), 1)
@@ -209,23 +250,34 @@ class LogMoverTests(unittest.TestCase):
 
     def test_cleaner_unlinks_before_open(self):
         self.source_path().write_bytes(SYNTHETIC)
+        self.events((mover.CREATE, NORMAL))
         self.source_path().unlink()
-        self.pilot.watch.pending.append((mover.CLOSE_WRITE, NORMAL))
-        self.pilot.drain(10)
+        self.events((mover.CLOSE_WRITE, NORMAL))
         self.assertEqual(self.pilot.counts["missed"], {"files": 1, "bytes": 0})
-        self.assertEqual(self.pilot.unknown_miss_bytes, 1)
-        self.assertEqual(self.directories(), [])
+        self.assertEqual(self.pilot.counts["completed"]["files"], 0)
 
-    def test_reused_name_does_not_copy_a_new_writer_on_an_old_close(self):
+    def test_inode_change_between_create_and_close_is_ambiguous(self):
         self.source_path().write_bytes(SYNTHETIC)
-        self.source_path().unlink()
-        with self.source_path().open("wb") as writer:
-            writer.write(SYNTHETIC)
-            writer.flush()
-            self.pilot.watch.pending.extend([(mover.CLOSE_WRITE, NORMAL), (mover.CREATE, NORMAL)])
-            self.pilot.drain(10)
-            self.assertIsNone(self.pilot.next_record(10))
-        self.assertEqual(self.pilot.counts["missed"]["files"], 1)
+        self.events((mover.CREATE, NORMAL))
+        incoming = self.root / "replacement"
+        incoming.write_bytes(SYNTHETIC)
+        incoming.replace(self.source_path())
+        self.events((mover.CLOSE_WRITE, NORMAL))
+        self.assertIsNone(self.pilot.next_record(time.monotonic()))
+        self.assertEqual(self.pilot.ambiguous_closes, 1)
+        self.make_old(self.source_path())
+        self.scan()
+        self.capture(self.pilot.next_record(time.monotonic()))
+        self.assertEqual(self.pilot.counts["completed"]["files"], 0)
+        self.assertEqual(self.pilot.counts["archived_unconfirmed"]["files"], 1)
+
+    def test_later_create_disqualifies_close_in_same_event_batch(self):
+        self.source_path().write_bytes(SYNTHETIC)
+        applied = self.events((mover.CREATE, NORMAL), (mover.CLOSE_WRITE, NORMAL),
+                              (mover.DELETE, NORMAL), (mover.CREATE, NORMAL))
+        self.assertFalse(applied)
+        self.assertEqual(self.pilot.ambiguous_closes, 1)
+        self.assertIsNone(self.pilot.next_record(time.monotonic()))
 
     def test_excludes_application_logs_temps_and_nonregular_entries(self):
         excluded = (b"main.log", b"main-2026-11-22T05-03-00.000.log", b"main.log.1",
@@ -234,31 +286,42 @@ class LogMoverTests(unittest.TestCase):
             self.source_path(name).write_bytes(SYNTHETIC)
         self.source_path(NORMAL).symlink_to(self.source_path(excluded[0]))
         self.source_path(ERROR).mkdir()
-        self.pilot.watch.pending.extend((mover.CLOSE_WRITE, name) for name in (*excluded, NORMAL))
-        self.pilot.watch.pending.append((mover.IS_DIR | mover.CLOSE_WRITE, ERROR))
-        self.pilot.drain(10)
-        self.assertIsNone(self.pilot.next_record(10))
+        self.events(*((mover.CLOSE_WRITE, name) for name in (*excluded, NORMAL)),
+                    (mover.IS_DIR | mover.CLOSE_WRITE, ERROR))
+        self.assertIsNone(self.pilot.next_record(time.monotonic()))
         self.assertEqual(self.pilot.counts["completed"]["files"], 0)
 
-    def test_overflow_requests_reconcile_without_copying_unconfirmed_file(self):
+    def test_overflow_discards_observation_and_scans_as_unconfirmed(self):
         self.source_path().write_bytes(SYNTHETIC)
-        self.pilot.watch.pending.append((mover.OVERFLOW, b""))
-        self.assertTrue(self.pilot.drain(10))
-        self.pilot.reconcile(self.source, None)
+        self.make_old(self.source_path())
+        self.events((mover.CREATE, NORMAL), (mover.CLOSE_WRITE, NORMAL))
+        stale = self.pilot.next_record(time.monotonic())
+        self.assertTrue(self.events((mover.OVERFLOW, b"")))
+        self.assertTrue(stale.cancelled.is_set())
+        with patch.object(mover, "Inotify", return_value=FakeWatch()):
+            self.scan()
+        self.capture(self.pilot.next_record(time.monotonic()))
+        manifest = json.loads((self.directories()[0] / "manifest.json").read_bytes())
+        self.assertEqual(manifest["completion"], "unconfirmed")
         self.assertEqual(self.pilot.watch_gaps, 1)
-        self.assertEqual(self.pilot.unconfirmed, (1, len(SYNTHETIC)))
-        self.assertIsNone(self.pilot.next_record(10))
+        self.assertEqual(self.pilot.counts["completed"]["files"], 1)
+        self.assertEqual(self.pilot.counts["archived_unconfirmed"]["files"], 1)
+        self.assertEqual(self.pilot.counts["abandoned_pending"]["files"], 1)
 
-    def test_restart_idempotence_preserves_committed_inode(self):
+    def test_restart_preserves_committed_inode_and_ignores_old_staging(self):
         self.capture(self.offer())
         archive = self.directories()[0]
         before = archive.stat()
+        abandoned = archive.parent / ".pending-old"
+        abandoned.mkdir()
+        (abandoned / "body.zst").write_bytes(SYNTHETIC)
         self.pilot = self.start_pilot()
-        record = self.pilot.offer(NORMAL, "close_write", 10)
-        self.capture(record)
+        self.events((mover.CREATE, NORMAL), (mover.CLOSE_WRITE, NORMAL))
+        self.capture(self.pilot.next_record(time.monotonic()))
         self.assertEqual(len(self.directories()), 1)
         self.assertEqual(archive.stat().st_ino, before.st_ino)
-        self.assertEqual(self.pilot.counts["archived"]["files"], 0)
+        self.assertEqual(self.archive.probe(False, True, None), (None, 1, False))
+        self.assertEqual((abandoned / "body.zst").read_bytes(), SYNTHETIC)
 
     def test_corrupt_or_truncated_data_never_publishes(self):
         class BrokenCodec(TestCodec):
@@ -272,67 +335,114 @@ class LogMoverTests(unittest.TestCase):
         self.assertEqual(self.directories(), [])
         self.assertEqual(self.pilot.counts["integrity_failures"]["files"], 1)
 
-    def test_recovers_completed_staging_after_interrupted_rename(self):
+    def test_source_changing_during_read_fails_verification(self):
         record = self.offer()
-        with patch.object(mover, "publish", side_effect=OSError(errno.EIO, "synthetic")):
+        compress = self.archive.codec.compress
+
+        def change_after_read(source, target, limit):
+            result = compress(source, target, limit)
+            with self.source_path().open("ab") as writer:
+                writer.write(b"synthetic modification")
+            return result
+
+        with patch.object(self.archive.codec, "compress", side_effect=change_after_read):
             self.capture(record)
         self.assertEqual(self.directories(), [])
-        self.source_path().unlink()
-        restarted = self.start_pilot()
-        for result in self.archive.recover():
-            restarted.recovery_result(result, 10)
-        self.assertEqual(len(self.directories()), 1)
-        self.assertEqual(restarted.counts["recovered_after_unlink"]["files"], 1)
-        self.assertEqual(restarted.counts["resumed_stages"]["files"], 1)
+        self.assertEqual(self.pilot.counts["integrity_failures"]["files"], 1)
 
-    def test_restarts_incomplete_staging_from_unchanged_source(self):
+    def test_deadline_rejects_new_captures_and_blocks_inflight_publication(self):
         record = self.offer()
-        with patch.object(self.archive.codec, "compress", side_effect=OSError(errno.EIO, "synthetic")):
-            self.capture(record)
-        self.pilot = self.start_pilot()
-        for result in self.archive.recover():
-            self.pilot.recovery_result(result, 10)
-        recovered = self.pilot.next_record(10)
-        self.assertIsNotNone(recovered)
-        self.capture(recovered)
-        self.assertEqual(len(self.directories()), 1)
+        compress = self.archive.codec.compress
 
-    def test_pending_fds_and_bytes_are_bounded(self):
+        def reach_deadline(*args):
+            result = compress(*args)
+            self.pilot.deadline = time.monotonic()
+            return result
+
+        with patch.object(self.archive.codec, "compress", side_effect=reach_deadline):
+            self.capture(record)
+        self.assertEqual(self.directories(), [])
+        self.assertIsNone(self.offer(ERROR))
+        self.assertEqual(self.pilot.counts["abandoned_pending"]["files"], 1)
+
+    def test_expired_run_writes_finished_status_without_opening_source(self):
+        pilot = mover.Pilot(self.archive, deadline=time.monotonic() - 1)
+        with mover.directory(self.root) as fd, patch.object(pilot, "arm") as arm:
+            pilot.run(self.source, fd, lambda: False)
+            arm.assert_not_called()
+            status = mover.read_json(fd, mover.STATUS_NAME)
+        self.assertEqual(status["phase"], "finished")
+        self.assertFalse(status["source_watch_active"])
+
+    def test_pending_budget_refills_oldest_first_and_records_peaks(self):
         self.pilot = self.start_pilot(max_fds=1, max_bytes=len(SYNTHETIC))
         first = self.offer()
-        self.offer(ERROR)
+        newer = b"v1-responses-2026-11-22T050305-abcd.log"
+        for name, seconds_ago in ((newer, 2), (ERROR, 5)):
+            self.source_path(name).write_bytes(SYNTHETIC)
+            mtime = time.time() - seconds_ago
+            os.utime(self.source_path(name), (mtime, mtime))
+            self.events((mover.CREATE, name), (mover.CLOSE_WRITE, name))
         self.assertEqual(self.pilot.held_fds, 1)
         self.assertEqual(self.pilot.held_bytes, len(SYNTHETIC))
-        self.assertEqual(self.pilot.status(10)["pending"]["files"], 2)
         self.capture(first)
-        self.pilot.reconcile(self.source, None)
-        self.capture(self.pilot.next_record(10))
-        self.assertEqual(self.pilot.counts["archived"]["files"], 2)
+        self.pilot.refill()
+        self.assertTrue(self.pilot.next_record(time.monotonic()).name == ERROR)
+        self.capture(self.pilot.next_record(time.monotonic()))
+        stats = self.pilot.status(time.monotonic())
+        self.assertEqual(stats["max_pending_files"], 3)
+        self.assertEqual(stats["max_pending_bytes"], len(SYNTHETIC) * 3)
+        self.assertGreater(stats["max_oldest_pending_seconds"], 0)
+        self.assertIsNotNone(stats["close_to_publish_seconds"]["p50"])
+        self.assertIsNotNone(stats["close_to_publish_seconds"]["p90"])
 
     def test_space_floor_hysteresis_and_reserve(self):
         record = self.offer()
         self.mount.free = self.archive.floor - 1
         self.capture(record)
         self.assertEqual(self.pilot.paused, "low_space")
-        self.assertEqual(self.pilot.status(10)["pending"]["files"], 1)
         self.mount.free = self.archive.floor + 1
-        self.assertEqual(self.archive.pause_reason(True), "low_space")
-        self.assertIsNone(self.archive.pause_reason(False))
+        self.assertEqual(self.archive.probe(True, False, None)[0], "low_space")
+        self.assertIsNone(self.archive.probe(False, False, None)[0])
         self.capture(record)
         self.assertEqual(self.directories(), [])
         self.mount.free = self.archive.resume
-        self.assertIsNone(self.archive.pause_reason(True))
+        self.assertIsNone(self.archive.probe(True, False, None)[0])
         self.capture(record)
         self.assertEqual(len(self.directories()), 1)
 
-    def test_missing_or_wrong_mount_writes_no_archive_entries(self):
+    @unittest.skipUnless(sys.platform == "linux", "Linux mount identity")
+    def test_real_mount_checker_rejects_plain_directory_without_writing(self):
+        uuid = "ef584c76-19ce-4672-8123-b71f5b048e67"
+        disk = mover.Disk12(uuid, self.disk)
+        os_stat = os.stat
+
+        def stat_device(path, *args, **kwargs):
+            if path == "/dev/disk/by-uuid/" + uuid:
+                return SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=os.makedev(8, 33))
+            return os_stat(path, *args, **kwargs)
+
+        with (
+            patch.object(mover.os, "stat", side_effect=stat_device),
+            patch.object(disk, "verify_mount", wraps=disk.verify_mount) as checked,
+        ):
+            with self.assertRaises(mover.Paused):
+                with disk.open():
+                    self.fail("plain directory was accepted as disk12")
+            checked.assert_called_once()
+        self.assertEqual(list(self.destination.iterdir()), [])
+        self.assertEqual(list(self.meta.iterdir()), [])
+
+    def test_missing_or_wrong_mount_writes_no_archive_or_history(self):
         record = self.offer()
         for reason in ("mount_unavailable", "mount_identity"):
             self.mount.reason = reason
             self.capture(record)
             self.assertEqual(self.pilot.paused, reason)
+            self.assertEqual(self.archive.probe(True, True, self.pilot.status(time.monotonic())),
+                             (reason, None, False))
             self.assertEqual(list(self.destination.iterdir()), [])
-            self.assertEqual(self.pilot.status(10)["pending"]["files"], 1)
+            self.assertEqual(list(self.meta.iterdir()), [])
 
     def test_symlinked_archive_path_is_rejected(self):
         decoy = self.root / "decoy"
@@ -343,38 +453,70 @@ class LogMoverTests(unittest.TestCase):
         self.assertEqual(list(decoy.iterdir()), [])
         self.assertEqual(self.pilot.counts["archive_failures"]["files"], 1)
 
-    def test_private_modes_and_aggregate_status(self):
+    def test_private_modes_and_aggregate_status_and_history(self):
         previous = os.umask(0o077)
         try:
             self.capture(self.offer(ERROR))
+            row = self.pilot.status(time.monotonic())
             with mover.directory(self.root) as fd:
-                mover.replace_json(fd, mover.STATUS_NAME, self.pilot.status(10))
+                mover.replace_json(fd, mover.STATUS_NAME, row)
+            self.assertEqual(self.archive.probe(False, True, row), (None, 0, True))
+            self.assertEqual(self.archive.probe(False, False, row), (None, None, True))
         finally:
             os.umask(previous)
         for item in self.destination.rglob("*"):
             self.assertEqual(stat.S_IMODE(item.stat().st_mode), 0o700 if item.is_dir() else 0o600)
         status = self.root / mover.STATUS_NAME
-        self.assertEqual(stat.S_IMODE(status.stat().st_mode), 0o600)
-        data = status.read_bytes()
-        self.assertEqual(json.loads(data)["archived"]["files"], 1)
-        self.assertFalse(ERROR in data or SYNTHETIC[:30] in data)
+        history = next(self.meta.iterdir())
+        for path in (status, history):
+            data = path.read_bytes()
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(json.loads(data.splitlines()[0])["archived"]["files"], 1)
+            self.assertFalse(ERROR in data or SYNTHETIC[:30] in data)
+        self.assertEqual(len(history.read_bytes().splitlines()), 2)
 
-    def test_watchdog_warns_on_mount_and_stale_heartbeat(self):
+    def test_watchdog_alert_hook_only_fires_on_state_changes(self):
         self.mount.reason = "mount_unavailable"
-        with mover.directory(self.root) as fd:
-            mover.replace_json(fd, mover.STATUS_NAME, {"heartbeat_unix": 0})
-        stderr = io.StringIO()
+        messages = []
         with (
+            mover.directory(self.root) as fd,
             patch.object(mover, "STATUS_PATH", self.root),
-            patch.object(mover.subprocess, "run", return_value=subprocess.CompletedProcess([], 3)),
-            redirect_stderr(stderr),
+            patch.object(mover.subprocess, "run") as command,
         ):
-            mover.watchdog(self.mount, "cliproxy-will-log-mover@synthetic.service")
-        self.assertIn("mount is unavailable", stderr.getvalue())
-        self.assertIn("heartbeat is missing or stale", stderr.getvalue())
-        self.assertIn("pilot service is inactive", stderr.getvalue())
+            command.return_value.returncode = 3
+            mover.replace_json(fd, mover.STATUS_NAME, {"heartbeat_unix": 0})
+            watch = lambda: mover.watchdog(self.mount, "synthetic.service", fd, messages.append)
+            watch()
+            self.assertEqual(len(messages), 3)
+            watch()
+            self.assertEqual(len(messages), 3)
+            command.return_value.returncode = 0
+            self.mount.reason = None
+            mover.replace_json(fd, mover.STATUS_NAME,
+                               {"heartbeat_unix": time.time(), "watch_gaps": 1,
+                                "paused_reason": "low_space", "missed": {"files": 1},
+                                "integrity_failures": {"files": 1}})
+            watch()
+            self.assertEqual(len(messages), 10)
+            watch()
+            self.assertEqual(len(messages), 10)
 
-    @unittest.skipUnless(mover.zstd is not None or shutil.which("zstd"), "zstd unavailable")
+    def test_stop_post_only_disarms_timer_after_clean_deadline(self):
+        with (
+            mover.directory(self.root) as fd,
+            patch.object(mover, "STATUS_PATH", self.root),
+            patch.object(mover.subprocess, "run") as command,
+            patch.dict(os.environ, {"SERVICE_RESULT": "success"}),
+        ):
+            command.return_value.returncode = 0
+            mover.replace_json(fd, mover.STATUS_NAME, {"phase": "interrupted"})
+            self.assertEqual(mover.stop_post("synthetic"), 0)
+            command.assert_not_called()
+            mover.replace_json(fd, mover.STATUS_NAME, {"phase": "finished"})
+            self.assertEqual(mover.stop_post("synthetic"), 0)
+            command.assert_called_once()
+
+    @unittest.skipUnless(mover.zstd is not None, "in-process zstd requires Python 3.14")
     def test_production_codec_round_trip(self):
         self.archive.codec = mover.ZstdCodec()
         self.capture(self.offer())
@@ -382,7 +524,8 @@ class LogMoverTests(unittest.TestCase):
         self.assertEqual(self.pilot.counts["archived"]["bytes"], len(SYNTHETIC))
 
 
-@unittest.skipUnless(shutil.which("systemd-analyze"), "systemd-analyze unavailable")
+@unittest.skipUnless(shutil.which("systemd-analyze") and Path("/usr/bin/python3.14").exists(),
+                     "unit verification needs systemd-analyze and the pinned interpreter path")
 class SystemdUnitTests(unittest.TestCase):
     def test_verify(self):
         instance = Path(__file__).parent / "instances/will"

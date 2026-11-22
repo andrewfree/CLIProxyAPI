@@ -48,71 +48,70 @@ without a model generation and does not qualify a provider or client update.
 
 ## Copy-only request-log pilot
 
-Install only after Andrew approves `promote fleet <id>` for this pilot.
-Keep `logs-max-total-size-mb: 1024` throughout. The mover reads closed request
-logs and writes verified zstd level 3 copies on disk12. The existing CLIProxy
-cleaner continues to apply the cap. Pre-existing files and files seen only
-during a scan have no close evidence and are counted as unconfirmed. A close
-can also result from an interrupted writer. Treat move-in events as publication
-of a closed file and record them separately in the independent event count.
-The current CLIProxy producer writes directly to the final pathname.
+Before activation, obtain Andrew's explicit acceptance of **unencrypted pilot
+archives on disk12** and the `promote fleet <id>` approval for the reviewed
+installation. Keep `logs-max-total-size-mb: 1024` throughout. The mover writes
+verified zstd level 3 copies and has read-only access to the source. A close
+confirms that the writer released the same observed inode. It can also result
+from an interrupted writer. Startup files, ambiguous closes and files found
+after a watch gap can be copied after 60 seconds without an mtime change.
+Those copies are marked `unconfirmed` in their manifests and reported
+separately. Move-in events do not establish completion.
 
-Disk12 is unencrypted. Andrew approved plaintext storage for this 24-hour
-pilot. The Samba `[will]` share exports `/srv/share` and maps its authorized
-identity to `andrew`, which can read private files. Apply the separately
-approved Samba veto before the first archive write. Under `[will]`, add
+The Samba `[will]` share exports `/srv/share` and maps its authorized identity
+to `andrew`, which can read private files. Obtain separate approval for the
+Samba veto and apply it before the first archive write. Under `[will]`, add
 `/cliproxy-request-archive/` to `veto files` and keep `delete veto files = no`.
-Preserve existing veto patterns and check alternate shares and aliases. After
-provisioning the private tree, confirm the authorized SMB client can list the
-parent but cannot see or traverse the archive or read a synthetic marker by
-explicit path. Keep the veto in place while the archive holds sensitive data.
-Keep request names, hashes and contents out of terminal output, receipts and
-aggregate status. Private manifests carry the encoded basename and both hashes
-for verification.
+Preserve existing veto patterns and check alternate shares and aliases. Finish
+the authorized SMB client probe after provisioning the tree and before starting
+the mover. Confirm that the client can list the parent but cannot see or
+traverse the archive or read a synthetic marker by explicit path. Keep the veto
+in place while the archive holds sensitive data. Keep request names, hashes
+and contents out of terminal output, receipts and aggregate status.
 
 ### Install and verify
 
-From the reviewed checkout on the workstation, copy the script and units to a
-private upload directory on Will. Install the code on Will's executable disk.
+From the reviewed checkout, upload the script and units to a private temporary
+directory on Will. The installed script is outside the fleet bundle and owned
+by root.
 
 ```sh
-ssh will.local 'umask 077 && mkdir -p /home/andrew/cliproxy/ops/runtime/will-log-mover-upload'
+ssh will.local 'umask 077 && mkdir -p /home/andrew/.cache/cliproxy-will-log-mover-upload'
 scp ops/will_log_mover.py ops/instances/will/cliproxy-will-log-mover@.service \
   ops/instances/will/cliproxy-will-log-mover-watchdog@.service \
   ops/instances/will/cliproxy-will-log-mover-watchdog@.timer \
-  will.local:/home/andrew/cliproxy/ops/runtime/will-log-mover-upload/
+  will.local:/home/andrew/.cache/cliproxy-will-log-mover-upload/
 ssh will.local
 ```
 
-On Will, confirm the disk's identity against the reviewed preflight. That
-preflight observed `/dev/sdc1` with ext4. If the mount differs, verify the
-device and filesystem UUID before proceeding. Pin the UUID so the mover can
-reject a replacement disk. The subshell pins its working directory on disk12
-while creating the private archive tree.
+On Will, confirm the disk identity against the reviewed preflight. It observed
+`/dev/sdc1` with ext4. If the mount differs, verify the replacement device and
+UUID before proceeding. The subshell holds its working directory on the
+verified mount while it creates the private archive tree.
 
 ```sh
-set -eu
+set -euo pipefail
 umask 077
-instance=/home/andrew/cliproxy
-upload="$instance/ops/runtime/will-log-mover-upload"
+upload=/home/andrew/.cache/cliproxy-will-log-mover-upload
 mountpoint=/srv/share/drives/disk12
 archive_root=cliproxy-request-archive
 archive_dir="$mountpoint/$archive_root/will/requests"
-pilot_service="cliproxy-will-log-mover@$archive_root.service"
-pilot_timer="cliproxy-will-log-mover-watchdog@$archive_root.timer"
-pilot_watchdog="cliproxy-will-log-mover-watchdog@$archive_root.service"
-pilot_path=/usr/local/bin:/usr/bin:/bin:/home/andrew/.local/bin
+pilot_service="cliproxy-will-log-mover@${archive_root}.service"
+pilot_timer="cliproxy-will-log-mover-watchdog@${archive_root}.timer"
+pilot_watchdog="cliproxy-will-log-mover-watchdog@${archive_root}.service"
+status_file=/run/cliproxy-will-log-mover/status.json
 sudo testparm -s --section-name=will --parameter-name='veto files' | grep -F "/$archive_root/"
 sudo testparm -s --section-name=will --parameter-name='delete veto files' | grep -ix no
-env PATH="$pilot_path" python3.14 -I --version
+/usr/bin/python3.14 -I -c 'from compression import zstd; assert zstd.ZstdFile'
 findmnt --mountpoint "$mountpoint" -o TARGET,SOURCE,FSTYPE,UUID,OPTIONS
+df -B1 --output=avail / "$mountpoint"
 disk_uuid=$(findmnt -rn --mountpoint "$mountpoint" -t ext4 -o UUID)
 test -n "$disk_uuid"
 (
   cd -P -- "$mountpoint"
   test "$(findmnt -rn --mountpoint "$mountpoint" -o UUID)" = "$disk_uuid"
   test "$(stat -c %d .)" = "$(stat -Lc %r "/dev/disk/by-uuid/$disk_uuid")"
-  for directory in "$archive_root" "$archive_root/will" "$archive_root/will/requests"; do
+  for directory in "$archive_root" "$archive_root/will" "$archive_root/will/requests" "$archive_root/meta"; do
     test ! -L "$directory"
     if [ ! -d "$directory" ]; then
       mkdir -m 0700 -- "$directory"
@@ -120,77 +119,108 @@ test -n "$disk_uuid"
     test "$(stat -c '%a:%U:%G' "$directory")" = 700:andrew:andrew
   done
 )
-install -d -m 0700 "$instance/ops/runtime/will-log-mover"
-install -m 0600 "$upload/will_log_mover.py" "$instance/ops/will_log_mover.py"
-printf 'WILL_LOG_MOVER_DISK_UUID=%s\nPATH=%s\n' "$disk_uuid" "$pilot_path" > "$upload/disk.env"
-sudo install -m 0600 "$upload/disk.env" /etc/cliproxy-will-log-mover.env
-sudo install -m 0644 "$upload/cliproxy-will-log-mover@.service" \
+sudo install -d -o root -g root -m 0755 /usr/local/lib/cliproxy-will-log-mover
+sudo install -o root -g root -m 0755 "$upload/will_log_mover.py" \
+  /usr/local/lib/cliproxy-will-log-mover/will_log_mover.py
+printf 'WILL_LOG_MOVER_DISK_UUID=%s\n' "$disk_uuid" > "$upload/disk.env"
+sudo install -o root -g root -m 0600 "$upload/disk.env" /etc/cliproxy-will-log-mover.env
+sudo install -o root -g root -m 0644 "$upload/cliproxy-will-log-mover@.service" \
   "$upload/cliproxy-will-log-mover-watchdog@.service" \
   "$upload/cliproxy-will-log-mover-watchdog@.timer" /etc/systemd/system/
 sudo systemd-analyze verify "$pilot_service" "$pilot_watchdog" "$pilot_timer"
 sudo systemctl daemon-reload
 ```
 
-The systemd instance name supplies the archive root to both the mover and its
-writable path. Use a single instance for this pilot. Finish the SMB client check
-with a synthetic marker before starting it.
-
-Start the independent, aggregate-only close counter before starting the service.
-Record the current image digest and publisher revision first. Start the pilot
-without enabling it at boot. A fresh run gets its own status counters.
-Record the manifest count immediately before and after the run, with the mover
-stopped. This counts published manifests without printing archive identifiers.
-Check the expected mount before each count and keep any traversal failure out of
-the acceptance comparison.
+Use the literal instance name from the install block. It selects the archive
+root for both the mover and the systemd write paths. Use one instance.
+Finish the SMB client probe, record the current image digest and publisher
+revision, and start the independent aggregate-only close counter before the
+mover. Record the count of published manifests before and after the run while
+the mover is stopped.
 
 ```sh
-set -o pipefail
+test "$(findmnt -rn --mountpoint "$mountpoint" -o UUID)" = "$disk_uuid"
 find "$archive_dir" \
   -type d -name '.pending-*' -prune -o -type f -name manifest.json -printf '.' \
   2>/dev/null | wc -c
 ```
 
 ```sh
+start_time=$(date +%s.%N)
 sudo systemctl start "$pilot_service" "$pilot_timer"
+/usr/bin/python3.14 -I - "$status_file" "$start_time" <<'PYTHON'
+import json
+from pathlib import Path
+import sys
+import time
+
+path = Path(sys.argv[1])
+start_time = float(sys.argv[2])
+deadline = time.monotonic() + 30
+while time.monotonic() < deadline:
+    try:
+        status = json.loads(path.read_text())
+        if (status["heartbeat_unix"] > start_time
+                and status["started_at_unix"] >= start_time
+                and status["phase"] == "capturing" and status["source_watch_active"]):
+            print(json.dumps(status, indent=2))
+            break
+    except (OSError, ValueError, KeyError):
+        pass
+    time.sleep(1)
+else:
+    raise SystemExit("Fresh pilot heartbeat with an armed watch did not appear")
+PYTHON
 systemctl is-active "$pilot_service" "$pilot_timer"
 systemctl list-timers "$pilot_timer"
-python3.14 -m json.tool /home/andrew/cliproxy/ops/runtime/will-log-mover/status.json
 sudo journalctl -u "$pilot_watchdog" --since '-2 minutes' --no-pager
 ```
 
-The service stops itself after 24 hours. It has neither automatic restart nor
-boot enablement. The watchdog warns if the service exits early. The mover
-pauses capture below 200 GiB
-available, when an item would cross that floor or when it cannot use the
-expected mount. It resumes with a writable archive and at least 250 GiB free.
-The watcher still counts completed and pending records while copying is paused.
-The held-descriptor budget is 512 files and 2 GiB. Backlog beyond that budget
-keeps completion metadata for reconciliation, but the cleaner can remove those
-files before they are reopened. Staged work survives a restart. Check the
-watchdog and status during the run, including peak activity.
+The mover pauses below 200 GiB free, when an item would cross that floor, or
+when the expected mount is unavailable. It resumes with at least 250 GiB free
+and a writable archive. The watcher retains up to 512 source descriptors
+covering 2 GiB and continues reading events independently of disk12. Pending
+entries beyond that budget can disappear before they are reopened. A writer
+that closes after unlink cannot supply a capture pathname. Old staging
+directories stay private and untouched. The status reports their startup count.
+
+The watchdog journals each transition for early exit, stale heartbeat,
+disk12 pause or loss, missing captures, watch gaps and integrity failures.
+Will's existing root-space alarm uses a privileged Wazuh notification relay.
+The pilot watchdog has no access to that relay's configuration. Andrew or his
+designated pilot operator checks the watchdog journal and aggregate status
+after startup and every 15 minutes through the recorded end.
 
 ### Acceptance and rollback
 
-- Compare an independent matching close and move-in count with the durable
-  manifests over the 24-hour interval and a representative busy period. Record
-  boundary counts, any restarts, and any files recovered from an earlier stage
-  so they do not enter the new-event total. Report missed records, captures
-  after cleaner unlink, unconfirmed records, and any watch gaps.
+- Check the 24-hour pilot window with a representative busy period. The
+  capture cutoff is 23 hours 55 minutes after startup, followed by up to five
+  minutes to finish cleanup and write final status. The mover takes no new
+  captures or publication attempts after the cutoff. Compare independent
+  matching closes through the cutoff with confirmed archives and report the
+  cutoff boundary separately. Report missed, unconfirmed, recovered-after-
+  unlink, abandoned pending and watch gap counts. Any restart fails acceptance.
 - Require zero integrity failures, misses, late captures, watch gaps and
-  queue overflows. Check that only CLIProxy's existing cap can delete source
-  files. Verify a timed restore by comparing bytes and SHA-256 to the
-  manifest and report only the aggregate result.
-- Record oldest pending age, peak byte ingress per minute, verified drain
-  throughput and disk12 I/O. Run a synthetic drain at twice the busiest
-  measured minute, at least 13 MiB/s, before accepting the pilot. Confirm
-  headroom during live peaks and record disk12's remaining free space.
-- Record the planned and actual pilot end times. At the recorded end, or for
-  rollback, stop the watchdog timer and the mover. Preserve all archived
-  copies, the Samba veto and the final status for comparison.
+  queue overflows. Verify a timed restore by comparing bytes and SHA-256 to the
+  manifest, and report the aggregate result.
+- Read the once-a-minute counter history under `$mountpoint/$archive_root/meta/`.
+  Record peak pending files, bytes and age, the p50, p90 and maximum
+  observed close-to-publish latency, minute ingress, verified drain rate,
+  disk12 I/O and free space. The percentiles use 0.1-second buckets below one
+  minute and one-second buckets after that. Run a synthetic drain of at least
+  13 MiB/s, twice the busiest measured minute, before accepting the pilot.
+- Check both units at the recorded end. A clean deadline exit leaves the
+  mover inactive with a successful result and automatically stops the
+  watchdog timer. The final status remains under `/run` until reboot.
+  A `RuntimeMaxSec` timeout means the deadline logic failed. For rollback,
+  stop the timer, mover and watchdog. The units are static and will only
+  start when invoked. Preserve the archive, Samba veto and final status.
 
 ```sh
+systemctl show -p ActiveState -p Result "$pilot_service"
+systemctl show -p ActiveState -p UnitFileState "$pilot_timer"
+/usr/bin/python3.14 -I -m json.tool "$status_file"
 sudo systemctl stop "$pilot_timer" "$pilot_service" "$pilot_watchdog"
-sudo systemctl disable "$pilot_timer"
 systemctl show -p ActiveState -p UnitFileState "$pilot_service" "$pilot_timer"
 ```
 
