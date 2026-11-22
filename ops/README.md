@@ -529,13 +529,18 @@ Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/c
 
 Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`.
 Each new copy is SHA-256 verified and recorded in the append-only `SHA256SUMS`
-manifest. Archive-only runs keep a verification index in
+manifest. The command keeps local copies by default. `--archive-only` explicitly
+selects that mode, and `--prune` explicitly allows deletion after verification.
+The flags are mutually exclusive. Archive-only runs keep a verification index in
 `ops/runtime/archive-index.json` under the instance root. The job counts a
 file as `skipped_by_index` when the source and archive metadata still match,
-the archive device is unchanged, and `SHA256SUMS` is the same file at least as
-long as recorded. A missing or corrupt index or a missing, replaced, or
+and `SHA256SUMS` has the recorded inode and is at least as long as recorded.
+Device numbers assigned during attachment are excluded from the index.
+A missing or corrupt index or a missing, replaced, or
 shortened manifest triggers fresh verification. The first index miss in a
-run reads the full manifest. A run with only index hits checks metadata.
+run reads the full manifest. A run with only index hits checks metadata and
+the manifest's final byte. The job reports an unterminated tail as a failure
+for review and separates it from any appended record.
 Publishing a new archive copy requires hard-link support on the archive
 filesystem so competing writers can preserve both copies. Archive failures
 are reported in `ops/runtime/archive.log`.
@@ -553,9 +558,10 @@ enabling, so use this sequence for the log archive job.
   set -e
   commit=$(git rev-parse HEAD)
   label=com.rever.cliproxy-log-archive
-  launchctl disable "gui/501/$label"
-  if launchctl print "gui/501/$label" >/dev/null 2>&1; then
-    launchctl bootout "gui/501/$label"
+  domain="gui/$(id -u)"
+  launchctl disable "$domain/$label"
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then
+    launchctl bootout "$domain/$label"
   fi
 
   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
@@ -577,9 +583,9 @@ expected = [
 if arguments != expected:
     raise SystemExit("Unexpected log archive ProgramArguments")
 PY
-  launchctl enable "gui/501/$label"
-  launchctl bootstrap gui/501 "$installed"
-  launchctl print "gui/501/$label"
+  launchctl enable "$domain/$label"
+  launchctl bootstrap "$domain" "$installed"
+  launchctl print "$domain/$label"
 )
 ```
 
@@ -593,9 +599,10 @@ To roll back the activation, return the job to its disabled and unloaded state.
 
 ```sh
 label=com.rever.cliproxy-log-archive
-launchctl disable "gui/501/$label"
-if launchctl print "gui/501/$label" >/dev/null 2>&1; then
-  launchctl bootout "gui/501/$label"
+domain="gui/$(id -u)"
+launchctl disable "$domain/$label"
+if launchctl print "$domain/$label" >/dev/null 2>&1; then
+  launchctl bootout "$domain/$label"
 fi
 ```
 

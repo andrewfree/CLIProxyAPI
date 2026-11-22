@@ -33,14 +33,14 @@ DEFAULT_ARCHIVE_ROOT = Path(
 DEFAULT_MOUNT_POINT = Path("/Users/rever/Volumes/TheCloud")
 
 FileFingerprint = tuple[int, int, int, int, int]
-ManifestFingerprint = tuple[int, int, int]
-ArchiveIdentity = tuple[str, int]
+CachedFileFingerprint = tuple[int, int, int, int]
+ManifestFingerprint = tuple[int, int]
 
 
 class VerifiedCopy(NamedTuple):
-    source: FileFingerprint
+    source: CachedFileFingerprint
     relative: str
-    destination: FileFingerprint
+    destination: CachedFileFingerprint
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,7 @@ class ArchiveConfig:
     archive_root: Path
     mount_point: Path
     min_age_seconds: int = 3_600
-    prune: bool = True
+    prune: bool = False
     require_mounted_destination: bool = True
     index_path: Path | None = None
 
@@ -152,14 +152,12 @@ class LogArchiver:
     def _valid_fingerprint(value: object, length: int) -> bool:
         return isinstance(value, list) and len(value) == length and all(type(part) is int for part in value)
 
-    def _read_index(
-        self, path: Path, archive: ArchiveIdentity
-    ) -> dict[str, VerifiedCopy] | None:
+    def _read_index(self, path: Path, archive: str) -> dict[str, VerifiedCopy] | None:
         try:
             index = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(index, dict) or not self._valid_fingerprint(index.get("manifest"), 3):
+            if not isinstance(index, dict) or not self._valid_fingerprint(index.get("manifest"), 2):
                 raise ValueError("invalid index header")
-            if index.get("archive") != list(archive) or not self._manifest_covers(
+            if index.get("archive") != archive or not self._manifest_covers(
                 self._manifest_state, tuple(index["manifest"])
             ):
                 self.logger.warning("Rebuilding archive index %s: archive or manifest changed", path)
@@ -172,7 +170,7 @@ class LogArchiver:
                 if not isinstance(record, list) or len(record) != 3:
                     raise ValueError("invalid index entry")
                 source, relative, destination = record
-                if (not self._valid_fingerprint(source, 5) or not self._valid_fingerprint(destination, 5)
+                if (not self._valid_fingerprint(source, 4) or not self._valid_fingerprint(destination, 4)
                         or not isinstance(relative, str) or not relative.startswith("requests/")
                         or ".." in relative.split("/") or "\0" in relative):
                     raise ValueError("invalid index entry")
@@ -184,7 +182,7 @@ class LogArchiver:
 
     @staticmethod
     def _write_index(
-        path: Path, archive: ArchiveIdentity, manifest: ManifestFingerprint,
+        path: Path, archive: str, manifest: ManifestFingerprint,
         files: dict[str, VerifiedCopy],
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -207,7 +205,7 @@ class LogArchiver:
 
     def _archive_copy_matches(self, copy: VerifiedCopy) -> bool:
         try:
-            return self._fingerprint(self.config.archive_root / copy.relative) == copy.destination
+            return self._fingerprint(self.config.archive_root / copy.relative)[1:] == copy.destination
         except OSError:
             return False
 
@@ -219,7 +217,9 @@ class LogArchiver:
     def _manifest_fingerprint(stat: os.stat_result) -> ManifestFingerprint:
         if not S_ISREG(stat.st_mode):
             raise OSError("archive manifest is not a regular file")
-        return stat.st_dev, stat.st_ino, stat.st_size
+        if stat.st_nlink != 1:
+            raise OSError("archive manifest must have exactly one link")
+        return stat.st_ino, stat.st_size
 
     def _stat_manifest(self) -> ManifestFingerprint | None:
         try:
@@ -229,7 +229,23 @@ class LogArchiver:
 
     @staticmethod
     def _manifest_covers(current: ManifestFingerprint | None, recorded: ManifestFingerprint) -> bool:
-        return current is not None and current[:2] == recorded[:2] and current[2] >= recorded[2]
+        return current is not None and current[0] == recorded[0] and current[1] >= recorded[1]
+
+    @staticmethod
+    def _manifest_tail_complete(handle: BinaryIO, size: int) -> bool:
+        if not size:
+            return True
+        handle.seek(-1, os.SEEK_END)
+        return handle.read(1) == b"\n"
+
+    def _inspect_manifest(self) -> tuple[ManifestFingerprint | None, bool]:
+        try:
+            descriptor = os.open(self._manifest_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None, True
+        with os.fdopen(descriptor, "rb", buffering=0) as handle:
+            state = self._manifest_fingerprint(os.fstat(handle.fileno()))
+            return state, self._manifest_tail_complete(handle, state[1])
 
     def _load_manifest(self, handle: BinaryIO) -> None:
         content = handle.read()
@@ -254,11 +270,7 @@ class LogArchiver:
                     self._manifest_state = state
                 if line in self._manifest_lines and self._manifest_terminated:
                     return
-                prefix = b""
-                if state[2]:
-                    handle.seek(-1, os.SEEK_END)
-                    if handle.read(1) != b"\n":
-                        prefix = b"\n"
+                prefix = b"" if self._manifest_tail_complete(handle, state[1]) else b"\n"
                 record = b"" if line in self._manifest_lines else line + b"\n"
                 if prefix or record:
                     handle.write(prefix + record)
@@ -336,7 +348,8 @@ class LogArchiver:
             result.pruned += 1
             self.logger.info("Pruned verified local copy %s", source.name)
         relative = destination.relative_to(self.config.archive_root).as_posix()
-        return VerifiedCopy(fingerprint, relative, archived_fingerprint)
+        # Device numbers can change on reattachment, so keep them in memory only.
+        return VerifiedCopy(fingerprint[1:], relative, archived_fingerprint[1:])
 
     def run(self, *, check_only: bool = False) -> ArchiveResult:
         result = ArchiveResult()
@@ -356,14 +369,16 @@ class LogArchiver:
         self._manifest_lines = None
         # Pruning always requires a fresh content check before deleting a source.
         index_path = None if self.config.prune else self.config.index_path
+        previous = None
         try:
-            self._manifest_state = self._stat_manifest()
+            self._manifest_state, manifest_terminated = self._inspect_manifest()
+            if not manifest_terminated:
+                result.failures += 1
+                self.logger.error("SHA256SUMS has an unterminated final record; review the manifest")
             if index_path is not None:
-                root = self.config.archive_root.resolve()
-                archive = (str(root), root.stat().st_dev)
-                previous = self._read_index(index_path, archive)
-            else:
-                previous = None
+                archive = str(self.config.archive_root.resolve())
+                if manifest_terminated:
+                    previous = self._read_index(index_path, archive)
         except OSError as error:
             result.failures += 1
             self.logger.error("Cannot check archive state: %s", error)
@@ -373,7 +388,7 @@ class LogArchiver:
             cached = verified.pop(source.name, None)
             try:
                 fingerprint = self._fingerprint(source)
-                if cached is not None and cached.source == fingerprint and self._archive_copy_matches(cached):
+                if cached is not None and cached.source == fingerprint[1:] and self._archive_copy_matches(cached):
                     verified[source.name] = cached
                     result.skipped_by_index += 1
                     continue
@@ -444,9 +459,9 @@ def main() -> int:
         type=int,
         default=int(os.environ.get("CLIPROXY_LOG_MIN_AGE_SECONDS", "3600")),
     )
-    parser.add_argument(
-        "--archive-only", action="store_true", help="Verify archive copies but keep local logs"
-    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--archive-only", action="store_true", help="Keep local logs (the default)")
+    mode.add_argument("--prune", action="store_true", help="Delete local logs after archive verification")
     parser.add_argument(
         "--check-only", action="store_true", help="Check mount and report eligible logs"
     )
@@ -474,7 +489,7 @@ def main() -> int:
             archive_root=args.destination,
             mount_point=args.mount_point,
             min_age_seconds=args.min_age_seconds,
-            prune=not args.archive_only,
+            prune=args.prune,
             index_path=runtime / "archive-index.json",
         )
         result = LogArchiver(config, logger=logger).run(check_only=args.check_only)

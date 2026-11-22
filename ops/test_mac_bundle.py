@@ -57,6 +57,34 @@ class BundleLaunchAgentsTest(unittest.TestCase):
             self.assertIn("Cannot install com.rever.cliproxy-log-archive", result.stderr)
             self.assertFalse((root / "Library").exists())
 
+    @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
+    def test_installer_requires_archive_only_before_installing_either_job(self):
+        ops = Path(__file__).resolve().parent
+        for args, allowed in (
+            ([], False), (["--prune"], False), (["--archive-only", "--prune"], False),
+            (["--prune", "--archive-only"], False), (["--verbose", "--archive-only"], True),
+        ):
+            with self.subTest(args=args), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                installer = root / "install_watchdog.sh"
+                installer.write_text((ops / installer.name).read_text().replace("/bin/launchctl", "/usr/bin/true"))
+                for job, arguments in (("watchdog", []), ("log-archive", args)):
+                    label = f"com.rever.cliproxy-{job}"
+                    script = root / f"{job}.py"
+                    script.touch()
+                    plist = {"Label": label, "ProgramArguments": [sys.executable, str(script), *arguments]}
+                    (root / f"{label}.plist").write_bytes(plistlib.dumps(plist))
+
+                result = subprocess.run(
+                    ["/bin/zsh", "-f", str(installer), str(root)], env={"HOME": str(root)},
+                    capture_output=True, text=True, check=False,
+                )
+
+                self.assertEqual(result.returncode, 0 if allowed else 1, result)
+                self.assertEqual((root / "Library/LaunchAgents").exists(), allowed)
+                if not allowed:
+                    self.assertIn("requires --archive-only and forbids --prune", result.stderr)
+
 
 class BundleJobsTest(unittest.TestCase):
     def setUp(self):

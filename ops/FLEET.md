@@ -187,16 +187,48 @@ CLIPROXY_ROOT="$PWD" /opt/homebrew/bin/python3 \
 rm -f ops/runtime/watchdog.pause
 ```
 
+**Mac rollback safety.** Before any bundle rollback, disable the log archive
+job and unload it if loaded. Stop if either operation fails. Keep the job
+disabled and unloaded when the rollback bundle's archive plist lacks
+`--archive-only` or contains `--prune`. A pre-archive-only bundle can prune
+Mac logs as soon as its old job loads.
+
+```sh
+domain="gui/$(id -u)"
+archive_label=com.rever.cliproxy-log-archive
+launchctl disable "$domain/$archive_label"
+if launchctl print "$domain/$archive_label" >/dev/null 2>&1; then
+  launchctl bootout "$domain/$archive_label"
+fi
+```
+
 **First cutover rollback.** Use the private `backup` from step 2. Restore the
-T3 paths, reinstall the saved checkout plists, and restore the token helper.
+T3 paths, the saved watchdog plist, and the token helper. Keep the saved
+archive job disabled and unloaded.
 
 ```sh
 rollback_settings=$(mktemp -d "$backup/t3-rollback.XXXXXXXX")
 node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" \
   --rollback --backup-dir "$rollback_settings"
-/bin/zsh ops/install_watchdog.sh "$backup"
 /usr/bin/install -m 0700 "$backup/cliproxy-codex-token" "$HOME/.local/bin/cliproxy-codex-token"
 node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report
+```
+
+Reinstall the watchdog on its own with `plist_source` set to the private
+backup. For a later bundle rollback, set `plist_source` to the shipped
+`$HOME/cliproxy-live/ops` directory instead.
+
+```sh
+plist_source="$backup"
+watchdog_label=com.rever.cliproxy-watchdog
+installed="$HOME/Library/LaunchAgents/$watchdog_label.plist"
+/usr/bin/plutil -lint "$plist_source/$watchdog_label.plist"
+if launchctl print "$domain/$watchdog_label" >/dev/null 2>&1; then
+  launchctl bootout "$domain/$watchdog_label"
+fi
+/usr/bin/install -m 0644 "$plist_source/$watchdog_label.plist" "$installed"
+launchctl enable "$domain/$watchdog_label"
+launchctl bootstrap "$domain" "$installed"
 ```
 
 Check the loaded jobs again. The saved settings take effect for new T3
@@ -205,10 +237,11 @@ To roll back a later bundle ship, use a previously shipped bundle-aware
 commit with `ship --host m5 --commit <previous-shipped-sha> --apply`. Ship
 refuses pre-bundle commits.
 
-After a later ship or bundle rollback, reinstall the token helper and
-LaunchAgents from the bundle using step 3 whenever their tracked files
-changed. They are installed as copies. Step 3 covers the watchdog and
-archiver. Reinstall the monitor's plist with the block in
+After a later ship or bundle rollback, reinstall the token helper from the
+bundle when it changed and use the watchdog-only block above for watchdog
+plist changes. When the archive plist has `--archive-only` and omits
+`--prune`, use [Install or resume the log archive job](README.md#install-or-resume-the-log-archive-job)
+to resume it. LaunchAgents are installed as copies. Reinstall the monitor's plist with the block in
 [Install or resume on the Mac](#install-or-resume-on-the-mac) when
 `ops/com.rever.cliproxy-fleet-monitor.plist` changed. P0 reports
 `P0/com.rever.cliproxy-fleet-monitor` while an installed copy differs from the

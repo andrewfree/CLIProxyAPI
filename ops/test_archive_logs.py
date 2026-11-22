@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr
+import io
 import logging
 import os
 import sys
@@ -114,21 +116,22 @@ class LogArchiverTest(unittest.TestCase):
         ).splitlines()
         self.assertEqual(len(manifest_lines), 2)
 
-    def test_index_hit_does_not_hash_or_read_manifest(self) -> None:
+    def test_index_hit_does_not_hash_or_load_full_manifest(self) -> None:
         source = self.write_log("existing.log", b"closed\n", age_seconds=7_200)
         self.assertEqual(self.archiver(prune=False).run().archived, 1)
         inode = self.index.stat().st_ino
         self.assertEqual(self.index.stat().st_mode & 0o777, 0o600)
 
+        job = self.archiver(prune=False)
         with (patch.object(LogArchiver, "_sha256", wraps=LogArchiver._sha256) as sha256,
               patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as read_text,
-              patch.object(archive_logs.os, "open", wraps=os.open) as open_file,
+              patch.object(job, "_load_manifest", wraps=job._load_manifest) as load_manifest,
               self.assertLogs(self.logger, level="INFO") as logs):
-            result = self.archiver(prune=False).run()
+            result = job.run()
 
         sha256.assert_not_called()
         self.assertEqual([call.args[0] for call in read_text.call_args_list], [self.index])
-        self.assertNotIn(self.archive / "SHA256SUMS", [call.args[0] for call in open_file.call_args_list])
+        load_manifest.assert_not_called()
         self.assertEqual((result.skipped_by_index, result.failures), (1, 0))
         self.assertIn("skipped_by_index=1", logs.output[-1])
         self.assertEqual(self.index.stat().st_ino, inode)
@@ -180,23 +183,27 @@ class LogArchiverTest(unittest.TestCase):
                 self.assertEqual(repaired.read_bytes(), source.read_bytes())
                 self.assertEqual(destination.read_bytes(), b"after!\n")
 
-    def test_archive_device_change_reverifies_existing_copy(self) -> None:
+    def test_index_survives_device_number_changes(self) -> None:
         self.write_log("existing.log", b"closed\n", age_seconds=7_200)
         self.assertEqual(self.archiver(prune=False).run().archived, 1)
-        root = self.archive.resolve()
         stat = Path.stat
+        fstat = os.fstat
+
+        def remap(metadata):
+            mode, inode, device, *rest = metadata
+            times = {name: getattr(metadata, name) for name in ("st_atime_ns", "st_mtime_ns", "st_ctime_ns")}
+            return os.stat_result((mode, inode, device + 1, *rest), times)
 
         def observe(path, *args, **kwargs):
-            metadata = stat(path, *args, **kwargs)
-            if path == root:
-                mode, inode, device, *rest = metadata
-                return os.stat_result((mode, inode, device + 1, *rest))
-            return metadata
+            return remap(stat(path, *args, **kwargs))
 
-        with patch.object(Path, "stat", autospec=True, side_effect=observe):
+        with (patch.object(Path, "stat", autospec=True, side_effect=observe),
+              patch.object(archive_logs.os, "fstat", side_effect=lambda fd: remap(fstat(fd))),
+              patch.object(LogArchiver, "_sha256", wraps=LogArchiver._sha256) as sha256):
             result = self.archiver(prune=False).run()
 
-        self.assertEqual((result.already_archived, result.skipped_by_index, result.failures), (1, 0, 0))
+        sha256.assert_not_called()
+        self.assertEqual((result.skipped_by_index, result.failures), (1, 0))
 
     def test_missing_or_short_archive_copy_is_rearchived(self) -> None:
         source = self.write_log("repair.log", b"closed\n", age_seconds=7_200)
@@ -265,9 +272,11 @@ class LogArchiverTest(unittest.TestCase):
         manifest.write_bytes(first)
         self.write_log("b.log", b"second\n", age_seconds=7_200)
 
-        result = self.archiver(prune=False).run()
+        with self.assertLogs(self.logger, level="ERROR") as logs:
+            result = self.archiver(prune=False).run()
 
-        self.assertEqual((result.archived, result.failures), (1, 0))
+        self.assertEqual((result.archived, result.failures), (1, 1))
+        self.assertIn("unterminated", "\n".join(logs.output))
         records = manifest.read_bytes().splitlines()
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0], first)
@@ -283,6 +292,18 @@ class LogArchiverTest(unittest.TestCase):
 
         sha256.assert_not_called()
         self.assertEqual((result.skipped_by_index, result.failures), (1, 0))
+
+    def test_partial_append_is_reported_even_with_a_warm_index(self) -> None:
+        self.write_log("existing.log", b"closed\n", age_seconds=7_200)
+        self.assertEqual(self.archiver(prune=False).run().archived, 1)
+        with (self.archive / "SHA256SUMS").open("ab") as manifest:
+            manifest.write(b"partial record")
+
+        with self.assertLogs(self.logger, level="ERROR") as logs:
+            result = self.archiver(prune=False).run()
+
+        self.assertEqual((result.skipped_by_index, result.failures), (0, 1))
+        self.assertIn("unterminated", "\n".join(logs.output))
 
     def test_symlink_manifest_keeps_its_source_target_untouched(self) -> None:
         source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)
@@ -301,16 +322,35 @@ class LogArchiverTest(unittest.TestCase):
         manifest = self.archive / "SHA256SUMS"
         open_file = os.open
 
-        def install_symlink(path, *args, **kwargs):
-            if path == manifest:
+        def install_symlink(path, flags, *args, **kwargs):
+            if path == manifest and flags & os.O_RDWR:
                 manifest.symlink_to(source)
-            return open_file(path, *args, **kwargs)
+            return open_file(path, flags, *args, **kwargs)
 
         with patch.object(archive_logs.os, "open", side_effect=install_symlink):
             result = self.archiver().run()
 
         self.assertEqual((result.pruned, result.failures), (0, 1))
         self.assertTrue(manifest.is_symlink())
+        self.assertEqual(source.read_bytes(), b"closed\n")
+
+    def test_manifest_hard_link_created_before_append_is_refused(self) -> None:
+        source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)
+        manifest = self.archive / "SHA256SUMS"
+        open_file = os.open
+
+        def install_link(path, flags, *args, **kwargs):
+            if path == manifest and flags & os.O_RDWR:
+                os.link(source, manifest)
+            return open_file(path, flags, *args, **kwargs)
+
+        with (patch.object(archive_logs.os, "open", side_effect=install_link),
+              self.assertLogs(self.logger, level="ERROR") as logs):
+            result = self.archiver().run()
+
+        self.assertEqual((result.pruned, result.failures), (0, 1))
+        self.assertIn("exactly one link", "\n".join(logs.output))
+        self.assertEqual(manifest.read_bytes(), b"closed\n")
         self.assertEqual(source.read_bytes(), b"closed\n")
 
     def test_failed_source_listing_keeps_existing_index(self) -> None:
@@ -352,24 +392,36 @@ class LogArchiverTest(unittest.TestCase):
         collision = next(destination.parent.glob(f"{source.name}.sha256-*"))
         self.assertEqual(collision.read_bytes(), source.read_bytes())
 
-    def test_archive_only_cli_never_unlinks_source(self) -> None:
-        source = self.write_log("keep.log", b"closed\n", age_seconds=7_200)
-        timestamp = time.time() - 7_200
-        os.utime(source, (timestamp, timestamp))
-        argv = ["archive_logs.py", "--archive-only", "--destination", str(self.archive),
-                "--mount-point", str(self.root)]
-        with (patch.dict(os.environ, {"CLIPROXY_ROOT": str(self.root)}, clear=True),
-              patch.object(sys, "argv", argv),
-              patch.object(Path, "is_mount", return_value=True),
-              patch.object(archive_logs, "build_logger", return_value=self.logger),
-              patch.object(Path, "unlink", autospec=True, side_effect=Path.unlink) as unlink,
-              self.assertLogs(self.logger, level="INFO") as logs):
-            self.assertEqual(archive_logs.main(), 0)
+    def test_cli_pruning_requires_explicit_opt_in(self) -> None:
+        env = {
+            "CLIPROXY_ROOT": str(self.root),
+            "CLIPROXY_LOG_ARCHIVE_ROOT": str(self.archive),
+            "CLIPROXY_LOG_ARCHIVE_MOUNT": str(self.root),
+        }
+        for flags, prune in (((), False), (("--archive-only",), False), (("--prune",), True)):
+            with self.subTest(flags=flags):
+                source = self.write_log("keep.log", b"closed\n", age_seconds=7_200).resolve()
+                timestamp = time.time() - 7_200
+                os.utime(source, (timestamp, timestamp))
+                with (patch.dict(os.environ, env, clear=True),
+                      patch.object(sys, "argv", ["archive_logs.py", *flags]),
+                      patch.object(Path, "is_mount", return_value=True),
+                      patch.object(archive_logs, "build_logger", return_value=self.logger),
+                      patch.object(Path, "unlink", autospec=True, side_effect=Path.unlink) as unlink,
+                      self.assertLogs(self.logger, level="INFO") as logs):
+                    self.assertEqual(archive_logs.main(), 0)
+                self.assertEqual(source in [call.args[0] for call in unlink.call_args_list], prune)
+                self.assertEqual(source.exists(), not prune)
+                self.assertIn(f"pruned={int(prune)}", logs.output[-1])
 
-        self.assertNotIn(source.resolve(), [call.args[0] for call in unlink.call_args_list])
-        self.assertTrue(source.exists())
-        self.assertTrue(self.index.exists())
-        self.assertIn("pruned=0", logs.output[-1])
+    def test_cli_rejects_both_archive_modes(self) -> None:
+        argv = ["archive_logs.py", "--archive-only", "--prune"]
+        with (patch.object(sys, "argv", argv), redirect_stderr(io.StringIO()) as stderr,
+              self.assertRaises(SystemExit) as exit_):
+            archive_logs.main()
+
+        self.assertEqual(exit_.exception.code, 2)
+        self.assertIn("not allowed with argument --archive-only", stderr.getvalue())
 
     def test_unmounted_destination_never_prunes(self) -> None:
         source = self.write_log(

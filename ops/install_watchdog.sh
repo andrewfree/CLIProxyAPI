@@ -15,6 +15,21 @@ for label in "${labels[@]}"; do
         printf 'Cannot install %s because its ProgramArguments script is missing. See the Mac ops bundle cutover in ops/FLEET.md.\n' "$label" >&2
         exit 1
     fi
+    if [[ "$label" == com.rever.cliproxy-log-archive ]]; then
+        count=$(/usr/bin/plutil -extract ProgramArguments raw -expect array -o - "$source_plist")
+        archive_only=false
+        for ((i = 2; i < count; i++)); do
+            argument=$(/usr/bin/plutil -extract "ProgramArguments.$i" raw -expect string -o - "$source_plist")
+            case "$argument" in
+                --archive-only) archive_only=true ;;
+                --prune) archive_only=false; break ;;
+            esac
+        done
+        if [[ "$archive_only" != true ]]; then
+            printf 'Cannot install %s: ProgramArguments requires --archive-only and forbids --prune.\n' "$label" >&2
+            exit 1
+        fi
+    fi
 done
 
 /bin/mkdir -p "$launch_agents_dir"
