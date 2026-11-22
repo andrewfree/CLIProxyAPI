@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import http.client
 import json
 import math
 import pathlib
@@ -41,6 +42,7 @@ SSH_ARGS = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
             "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"]
 SSH_FAILED = 255
 PROXY_UNREACHABLE = 3
+DEFAULT_BASE_URL = "http://127.0.0.1:8317"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 CLAIM_URL = "https://api.anthropic.com/api/organizations/{org}/reset_rate_limits"
@@ -59,6 +61,19 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 class ResetError(RuntimeError):
     """A precondition failed; nothing was claimed."""
+
+
+class ProxyConnectionError(ResetError):
+    """The management API could not be reached, or the connection broke."""
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None  # urllib then raises the 3xx as an HTTPError
+
+
+# The management key goes only to the base URL: no ambient HTTP proxy, no redirects.
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirects)
 
 
 def now_iso() -> str:
@@ -86,9 +101,15 @@ class Proxy:
             data=None if payload is None else json.dumps(payload).encode(),
             headers={"Authorization": "Bearer " + self.key, "Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        try:
+            with OPENER.open(req, timeout=60) as resp:
+                self.answered = True
+                return json.load(resp)
+        except urllib.error.HTTPError:
             self.answered = True
-            return json.load(resp)
+            raise
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
+            raise ProxyConnectionError(str(getattr(err, "reason", err) or type(err).__name__)) from None
 
     def claude_accounts(self) -> list[dict[str, Any]]:
         files = self.mgmt("/v0/management/auth-files")["files"]
@@ -204,10 +225,12 @@ def request_id_for(state_dir: pathlib.Path, email: str, grant_id: str) -> str:
 
 def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, receipt_path: pathlib.Path,
           dry_run: bool, sleep: Callable[[float], None] = time.sleep,
-          min_fable_percent: int | None = None) -> dict[str, Any]:
+          min_fable_percent: int | None = None, host: str | None = None) -> dict[str, Any]:
     if min_fable_percent is not None and not 0 <= min_fable_percent <= 100:
         raise ResetError("minimum Fable percent must be between 0 and 100")
     receipt: dict[str, Any] = {"started_at": now_iso(), "account": email, "grant_id": grant_id, "dry_run": dry_run}
+    if host is not None:
+        receipt["host"] = host
     status, profile = proxy.upstream(email, "GET", PROFILE_URL)
     if status != 200 or (profile.get("account") or {}).get("email") != email:
         raise ResetError(f"profile check failed for {email} (HTTP {status})")
@@ -234,8 +257,18 @@ def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, rece
     if dry_run:
         receipt["result"] = "dry_run"
     else:
-        status, body = proxy.upstream(email, "POST", CLAIM_URL.format(org=org),
-                                      {"program": PROGRAM, "grant_id": grant_id, "request_id": request_id})
+        receipt["result"] = "sending"
+        write_receipt(receipt_path, receipt)  # proves the receipt is writable before anything is spent
+        try:
+            status, body = proxy.upstream(email, "POST", CLAIM_URL.format(org=org),
+                                          {"program": PROGRAM, "grant_id": grant_id, "request_id": request_id})
+        except ProxyConnectionError as err:
+            receipt["result"] = "indeterminate"
+            receipt["claim_error"] = str(err)
+            receipt["finished_at"] = now_iso()
+            write_receipt(receipt_path, receipt)
+            raise ResetError(f"the claim may have been sent ({err}). Rerun the same command on the same host: "
+                             f"it repeats request {request_id}. Receipt: {receipt_path}") from None
         receipt["claim_http_status"] = status
         receipt["claim_response"] = body
         receipt["result"] = body.get("result") if isinstance(body, dict) else f"http_{status}"
@@ -329,38 +362,65 @@ def cmd_claim(proxy: Proxy, args: argparse.Namespace) -> int:
     stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     receipt_path = args.receipt or STATE_DIR / f"claim-{args.grant}-{stamp}{'-dryrun' if args.dry_run else ''}.json"
     receipt = claim(proxy, args.account, args.grant, STATE_DIR, receipt_path, args.dry_run,
-                    min_fable_percent=args.min_fable_percent)
+                    min_fable_percent=args.min_fable_percent, host=getattr(args, "label", None))
     print(json.dumps(receipt, indent=2))
     print(f"receipt: {receipt_path}", file=sys.stderr)
     return 0 if receipt["result"] in ("reset", "dry_run") else 1
 
 
-def will_host() -> dict[str, Any] | None:
-    """Return Will's fleet entry, or None when this process cannot or need not reach Will over SSH."""
+def fleet_hosts() -> dict[str, Any] | None:
     try:
-        host = json.loads(HOSTS_FILE.read_text(encoding="utf-8"))["will"]
-        destination, root, port = host["ssh"], pathlib.PurePosixPath(host["instance_root"]), int(host["port"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None  # no fleet hosts file, as in Will's hand-copied ops subset
-    if not isinstance(destination, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", destination):
+        hosts = json.loads(HOSTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None  # Will's hand-copied ops subset has no fleet hosts file
+    return hosts if isinstance(hosts, dict) else None
+
+
+def in_wills_instance() -> bool:
+    try:
+        return str(ROOT) == str(pathlib.PurePosixPath((fleet_hosts() or {})["will"]["instance_root"]))
+    except (KeyError, TypeError):
+        return False
+
+
+def will_host() -> dict[str, Any] | None:
+    """Return Will's SSH route from the fleet hosts file, or None without a usable entry."""
+    hosts = fleet_hosts()
+    if hosts is None:
         return None
-    if str(root) == str(ROOT):
-        return None  # already running in Will's instance
-    return {"ssh": destination, "instance_root": str(root), "port": port}
+    try:
+        host = hosts["will"]
+        destination, root, port = host["ssh"], str(pathlib.PurePosixPath(host["instance_root"])), int(host["port"])
+    except (KeyError, TypeError, ValueError):
+        destination = None
+    if not isinstance(destination, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", destination):
+        print(f"warning: no usable Will entry in {HOSTS_FILE}; asking only the local proxy", file=sys.stderr)
+        return None
+    return {"ssh": destination, "instance_root": root, "port": port}
+
+
+def local_root(command: str) -> pathlib.Path:
+    """The instance root whose .env holds the local proxy's key, when --root is not given."""
+    if command == "claim" or (ROOT / ".env").exists():
+        return ROOT  # a claim keeps its request IDs under the checkout that sends it
+    try:
+        return pathlib.Path((fleet_hosts() or {})["m5"]["instance_root"])  # a worktree has no .env
+    except (KeyError, TypeError):
+        return ROOT
 
 
 def remote_program(argv: list[str], host: dict[str, Any]) -> str:
-    """Source for `python3 -` on Will: this file, run as if it lived in Will's instance root."""
+    """Source for `python3 -` on Will: this file, run against Will's instance root, proxy and .env."""
     source = pathlib.Path(__file__).read_text(encoding="utf-8")
     remote_file = str(pathlib.PurePosixPath(host["instance_root"]) / "ops" / "claude_usage_resets.py")
+    call = (argv, "http://127.0.0.1:%d" % host["port"], "Will (%s)" % host["ssh"], host["instance_root"])
     return (
         "import sys, types\n"
         "module = types.ModuleType('claude_usage_resets')\n"
         f"module.__file__ = {remote_file!r}\n"
         "sys.modules[module.__name__] = module\n"
         f"exec(compile({source!r}, module.__file__, 'exec'), module.__dict__)\n"
-        f"sys.exit(module.run_remote({argv!r}, {'http://127.0.0.1:%d' % host['port']!r}, "
-        f"{'Will (%s)' % host['ssh']!r}))\n"
+        f"sys.exit(module.run_remote(*{call!r}))\n"
     )
 
 
@@ -371,16 +431,21 @@ def ask_will(argv: list[str], host: dict[str, Any], live: bool) -> tuple[int, st
     it arrives, for `watch`. The management key never leaves Will: the remote
     process reads Will's own .env.
     """
+    program = remote_program(argv, host)  # read before ssh starts, so a failure cannot strand it on stdin
     try:
         proc = subprocess.Popen([*SSH_ARGS, "--", host["ssh"], "python3", "-I", "-B", "-"],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, encoding="utf-8")
     except OSError:
         return SSH_FAILED, "", True
     try:
-        proc.stdin.write(remote_program(argv, host))
-        proc.stdin.close()
+        proc.stdin.write(program)
     except OSError:
         pass  # ssh exited early; its exit status says why
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
     lines = []
     for line in proc.stdout:
         lines.append(line)
@@ -392,53 +457,75 @@ def ask_will(argv: list[str], host: dict[str, Any], live: bool) -> tuple[int, st
 
 
 def run_local(args: argparse.Namespace, label: str = "the local proxy") -> int:
-    """Run the command against the proxy at `--base-url`, with the key from `--root`/.env."""
+    """Run the command against the proxy at `--base-url`, with the key from the instance root's .env."""
+    root = args.root or local_root(args.command)
+    base_url = args.base_url or DEFAULT_BASE_URL
     try:
-        key = load_management_key(args.root)
+        key = load_management_key(root)
     except FileNotFoundError:
-        print(f"error: {args.root / '.env'} not found; pass --root with the instance root", file=sys.stderr)
+        print(f"error: {root / '.env'} not found; pass --root with the instance root", file=sys.stderr)
         return 1
-    proxy = Proxy(args.base_url, key)
+    except ResetError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    proxy = Proxy(base_url, key)
+    args.label = label
     try:
         return {"status": cmd_status, "watch": cmd_watch, "claim": cmd_claim}[args.command](proxy, args)
+    except ProxyConnectionError as err:
+        if proxy.answered:
+            # Something may already have happened, so this is not "unreachable".
+            print(f"error: lost the connection to {label} at {base_url} after it answered ({err})",
+                  file=sys.stderr)
+            return 1
+        print(f"error: {label} did not answer at {base_url} ({err})", file=sys.stderr)
+        return PROXY_UNREACHABLE
     except ResetError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
     except urllib.error.HTTPError as err:
-        print(f"error: the management API at {args.base_url} returned HTTP {err.code}", file=sys.stderr)
+        print(f"error: {label} at {base_url} returned HTTP {err.code}", file=sys.stderr)
         return 1
-    except (urllib.error.URLError, ConnectionError, TimeoutError) as err:
-        print(f"error: no CLIProxy answered at {args.base_url} ({getattr(err, 'reason', err)})", file=sys.stderr)
-        return PROXY_UNREACHABLE
     finally:
         if proxy.answered:
-            print(f"answered by {label} at {args.base_url}", file=sys.stderr)
+            print(f"answered by {label} at {base_url}", file=sys.stderr)
 
 
-def run_remote(argv: list[str], base_url: str, label: str) -> int:
-    """Entry point on Will: the same command against Will's own proxy and .env."""
+def run_remote(argv: list[str], base_url: str, label: str, root: str) -> int:
+    """Entry point on Will: the command against Will's own proxy, .env and claim state.
+
+    The root comes from the fleet hosts file, not from this module's path, so a
+    bundle symlink on Will cannot move the key, request IDs or receipts.
+    """
+    global STATE_DIR
+    STATE_DIR = pathlib.Path(root) / "ops" / "runtime" / "claude-resets"
     args = build_parser().parse_args(argv)
-    args.host, args.root, args.base_url = "local", ROOT, base_url
-    args.notify = False  # Will has no notification centre; the Mac shows it
+    args.root, args.base_url = pathlib.Path(root), base_url
+    args.notify = False  # Will has no notification centre; the caller shows it
     return run_local(args, label)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--root", type=pathlib.Path, default=ROOT, help="deployment root holding .env")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8317", help="the local proxy")
-    host = argparse.ArgumentParser(add_help=False)
-    host.add_argument("--host", choices=("auto", "will", "local"),
-                      help="auto (status and watch default): ask Will over SSH, and use the local proxy only "
-                           "if SSH or Will's proxy is unreachable. will or local: that host only. "
-                           "claim defaults to local and never falls back")
+    parser.add_argument("--root", type=pathlib.Path,
+                        help="local instance root holding .env (default: this checkout; for status and watch "
+                             "from a worktree, the Mac instance root in fleet/hosts.json)")
+    parser.add_argument("--base-url", help=f"the local proxy (default {DEFAULT_BASE_URL})")
+    read_host = argparse.ArgumentParser(add_help=False)
+    read_host.add_argument("--host", choices=("auto", "will", "local"), default="auto",
+                           help="auto (default): ask Will over SSH, and use the local proxy only if SSH or "
+                                "Will's proxy cannot be reached. will or local: that host only")
+    claim_host = argparse.ArgumentParser(add_help=False)
+    claim_host.add_argument("--host", choices=("will", "local"), default="local",
+                            help="the only host this claim uses (default local); it never falls back, because "
+                                 "the request ID and receipt stay on that host")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("status", parents=[host], help="read-only usage, scoped limits, and reset grants")
+    p = sub.add_parser("status", parents=[read_host], help="read-only usage, scoped limits, and reset grants")
     p.add_argument("--account", help="Claude account email; default all")
     p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("watch", parents=[host], help="poll one limit and exit 0 when it reaches the threshold")
+    p = sub.add_parser("watch", parents=[read_host], help="poll one limit and exit 0 when it reaches the threshold")
     p.add_argument("--account", required=True)
     p.add_argument("--limit", default="Fable", help="scoped model name, or 'all' for the weekly total")
     p.add_argument("--threshold", type=int, default=99)
@@ -446,10 +533,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-failures", type=int, default=10)
     p.add_argument("--notify", action="store_true", help="show a macOS notification on trigger")
 
-    p = sub.add_parser("claim", parents=[host], help="redeem one reset grant (consumes it)")
+    p = sub.add_parser("claim", parents=[claim_host], help="redeem one reset grant (consumes it)")
     p.add_argument("--account", required=True)
     p.add_argument("--grant", required=True, help="grant id from `status`, e.g. launch-2610-fable")
-    p.add_argument("--receipt", type=pathlib.Path)
+    p.add_argument("--receipt", type=pathlib.Path, help="receipt path; with --host will, a path on Will")
     p.add_argument("--min-fable-percent", type=int, metavar="0..100",
                    help="refuse a claim unless a fresh read reports a finite Fable usage of at least this percent")
     mode = p.add_mutually_exclusive_group()
@@ -467,31 +554,34 @@ def main(argv: list[str] | None = None) -> int:
         # resolve inside a release that the next ship replaces.
         print("error: run ops/claude_usage_resets.py from the checkout, not the ops bundle", file=sys.stderr)
         return 2
-    host = args.host or ("local" if args.command == "claim" else "auto")
-    if args.command == "claim" and host == "auto":
-        # A claim's request ID and receipt stay on the host that sends it, so
-        # switching hosts after a failure could spend a second grant.
-        print("error: claim runs on one named host: pass --host will or --host local", file=sys.stderr)
-        return 2
-    will = None if host == "local" else will_host()
-    if host == "will" and will is None:
-        print(f"error: --host will needs Will's entry in {HOSTS_FILE} and must run outside Will's instance",
-              file=sys.stderr)
-        return 2
+    if args.host != "local" and in_wills_instance():
+        return run_local(args, "Will (this host)")
+    will = None if args.host == "local" else will_host()
+    if args.host == "will":
+        if will is None:
+            print(f"error: --host will needs Will's entry in {HOSTS_FILE}", file=sys.stderr)
+            return 2
+        if args.root or args.base_url:
+            print("error: --root and --base-url name the local proxy; drop them with --host will", file=sys.stderr)
+            return 2
     if will is not None:
         live = args.command == "watch"
         code, output, unreachable = ask_will(argv, will, live)
         # Fall back only before Will has shown anything, so a watch never
         # switches hosts halfway, and never when the host was named.
-        if not unreachable or (live and output) or host == "will":
+        if not unreachable or (live and output) or args.host == "will":
             if not live:
                 sys.stdout.write(output)
             if code == SSH_FAILED:
                 print(f"error: the SSH session to Will ({will['ssh']}) failed", file=sys.stderr)
+                if args.command == "claim" and args.yes:
+                    print("The claim may have been sent. Rerun the same command with --host will: it repeats "
+                          "the request ID stored on Will. A rerun on another host could spend a second grant.",
+                          file=sys.stderr)
             if code == 0 and live and args.notify:
                 notify(f"{args.account}: {args.limit} reached {args.threshold}%")
             return code
-        print(f"Will ({will['ssh']}) did not answer; asking the local proxy at {args.base_url}", file=sys.stderr)
+        print(f"Will ({will['ssh']}) did not answer; asking the local proxy", file=sys.stderr)
     return run_local(args)
 
 
