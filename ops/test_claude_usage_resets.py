@@ -220,7 +220,7 @@ class CliGuardTest(unittest.TestCase):
 
     def test_cli_min_fable_percent_reaches_claim_and_refuses(self):
         proxy = FakeProxy([(200, usage_body(fable=98))])
-        code, spy, err = self.run_claim_cli(proxy, ["--yes", "--min-fable-percent", "99"])
+        code, spy, err = self.run_claim_cli(proxy, ["--host", "local", "--yes", "--min-fable-percent", "99"])
         self.assertEqual(code, 1)
         self.assertEqual(spy.call_args.kwargs["min_fable_percent"], 99)
         self.assertIn("below required 99%", err)
@@ -252,7 +252,7 @@ UNREACHABLE = (resets.SSH_FAILED, "", True)
 
 
 class HostSelectionTest(unittest.TestCase):
-    def run_main(self, argv, will_result=(0, "", False), will=WILL, on_will=False):
+    def run_main(self, argv, will_result=(0, "", False), will=WILL):
         """Run `main` with Will's SSH session and the local proxy replaced by recorders."""
         calls = {"will": [], "local": []}
 
@@ -262,10 +262,10 @@ class HostSelectionTest(unittest.TestCase):
 
         def run_local(args, label="the local proxy"):
             calls["local"].append(label)
+            self.local_args = args
             return 0
 
-        with mock.patch.object(resets, "will_host", return_value=will), \
-                mock.patch.object(resets, "in_wills_instance", return_value=on_will), \
+        with mock.patch.object(resets, "will_entry", return_value=will), \
                 mock.patch.object(resets, "ask_will", side_effect=ask_will), \
                 mock.patch.object(resets, "run_local", side_effect=run_local), \
                 mock.patch.object(resets, "notify") as notify, \
@@ -285,7 +285,9 @@ class HostSelectionTest(unittest.TestCase):
                 code, calls, out, err, _ = self.run_main(["status"], result)
                 self.assertEqual((code, calls["local"]), (0, ["the local proxy"]))
                 self.assertNotIn("partial", out)
-                self.assertIn("did not answer; asking the local proxy", err)
+                self.assertIn("asking the local proxy", err)
+                self.assertIn("the SSH session failed" if result[0] == resets.SSH_FAILED
+                              else "its proxy did not answer", err)
         code, calls, out, _, _ = self.run_main(["status"], (1, "", False))
         self.assertEqual((code, calls["local"]), (1, []))
 
@@ -297,20 +299,31 @@ class HostSelectionTest(unittest.TestCase):
         self.assertEqual(calls, {"will": [], "local": ["the local proxy"]})
 
     def test_on_will_itself_will_is_the_local_proxy(self):
+        here = dict(WILL, instance_root=str(resets.ROOT), port=8327)
         for host in ("auto", "will"):
             with self.subTest(host=host):
-                code, calls, _, _, _ = self.run_main(["status", "--host", host], on_will=True)
+                code, calls, _, _, _ = self.run_main(["status", "--host", host], will=here)
                 self.assertEqual((code, calls), (0, {"will": [], "local": ["Will (this host)"]}))
+                self.assertEqual((self.local_args.root, self.local_args.base_url),
+                                 (resets.ROOT, "http://127.0.0.1:8327"))
+        code, calls, _, err, _ = self.run_main(["--base-url", "http://10.0.0.9:1", "status", "--host", "will"],
+                                               will=here)
+        self.assertEqual((code, calls), (2, {"will": [], "local": []}))
 
     def test_claim_runs_only_on_the_named_host(self):
         claim = ["claim", "--account", EMAIL, "--grant", "launch-2610-fable", "--yes"]
-        code, calls, _, _, _ = self.run_main(claim)
+        code, calls, _, err, _ = self.run_main(claim)
+        self.assertEqual((code, calls), (2, {"will": [], "local": []}))
+        self.assertIn("claim --yes needs --host will or --host local", err)
+        code, calls, _, _, _ = self.run_main(claim[:-1] + ["--dry-run"])
+        self.assertEqual((code, calls), (0, {"will": [], "local": ["the local proxy"]}))
+        code, calls, _, _, _ = self.run_main(claim + ["--host", "local"])
         self.assertEqual((code, calls), (0, {"will": [], "local": ["the local proxy"]}))
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.run_main(claim + ["--host", "auto"])
         code, calls, _, err, _ = self.run_main(claim + ["--host", "will"], UNREACHABLE)
         self.assertEqual((code, calls), (resets.SSH_FAILED, {"will": [False], "local": []}))
-        self.assertIn("Rerun the same command with --host will", err)
+        self.assertIn("rerun the same command with --host will", err)
 
     def test_host_will_refuses_without_an_entry_or_with_local_options(self):
         cases = ((["status", "--host", "will"], None, "needs Will's entry"),
@@ -337,24 +350,29 @@ class HostSelectionTest(unittest.TestCase):
         notify.assert_not_called()
 
 
-class WillHostTest(unittest.TestCase):
+class WillEntryTest(unittest.TestCase):
     def test_reads_will_from_the_fleet_hosts_file(self):
-        with mock.patch.object(resets, "ROOT", pathlib.Path("/elsewhere/cliproxy")):
-            self.assertEqual(resets.will_host(), WILL)
-            self.assertFalse(resets.in_wills_instance())
-        with mock.patch.object(resets, "ROOT", pathlib.Path(WILL["instance_root"])):
-            self.assertTrue(resets.in_wills_instance())
+        self.assertEqual(resets.will_entry(), WILL)
 
     def test_missing_hosts_file_is_silent_and_a_bad_entry_warns(self):
         with tempfile.TemporaryDirectory() as tmp:
             hosts = pathlib.Path(tmp) / "hosts.json"
             with mock.patch.object(resets, "HOSTS_FILE", hosts), \
                     contextlib.redirect_stderr(io.StringIO()) as err:
-                self.assertIsNone(resets.will_host())
+                self.assertIsNone(resets.will_entry())
                 self.assertEqual(err.getvalue(), "")
                 hosts.write_text(json.dumps({"will": dict(WILL, ssh="-oProxyCommand=x")}))
-                self.assertIsNone(resets.will_host())
+                self.assertIsNone(resets.will_entry())
                 self.assertIn("no usable Will entry", err.getvalue())
+
+    def test_a_non_loopback_base_url_never_receives_the_key(self):
+        for url in ("http://10.0.0.9:8317", "http://will.local:8317", "file:///etc/passwd"):
+            args = resets.build_parser().parse_args(["--base-url", url, "status"])
+            with self.subTest(url=url), mock.patch.object(resets, "load_management_key") as key, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(resets.run_local(args), 2)
+                key.assert_not_called()
+                self.assertIn("must be a loopback URL", err.getvalue())
 
     def test_worktree_without_env_uses_the_mac_instance_root_except_for_claims(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(resets, "ROOT", pathlib.Path(tmp)):
@@ -430,10 +448,16 @@ class FakeManagementAPI:
             def do_POST(self):
                 seen.append((self.path, self.headers.get("Authorization")))
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                if api_call is None or api_call(payload) is None:
+                result = None if api_call is None else api_call(payload)
+                if result is None:
                     self.close_connection = True  # drop the connection without a response
                     return
-                self.reply(api_call(payload))
+                if isinstance(result, int):
+                    self.send_response(result)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.reply(result)
 
             def log_message(self, *args):
                 pass
@@ -494,14 +518,20 @@ class RemoteProgramTest(unittest.TestCase):
         self.assertIn("returned HTTP 302", result.stderr)
         self.assertEqual(target.seen, [])
 
-    def test_a_claim_whose_answer_is_lost_is_indeterminate_and_pinned_to_its_host(self):
+    def claim_against(self, on_claim, after=None):
+        """Run a Will claim whose POST gets `on_claim` and whose usage reread gets `after`."""
+        reads = []
+
         def api_call(payload):
             if payload["url"] == resets.PROFILE_URL:
                 body = {"account": {"email": EMAIL}, "organization": {"uuid": "org-1"}}
             elif payload["url"] == resets.USAGE_URL:
+                reads.append(1)
+                if len(reads) > 1 and after is not None:
+                    return after
                 body = usage_body()
             else:
-                return None  # the claim POST: drop the connection
+                return on_claim
             return {"status_code": 200, "body": json.dumps(body)}
 
         api = FakeManagementAPI(files=[{"provider": "claude", "email": EMAIL, "auth_index": 0}], api_call=api_call)
@@ -510,13 +540,27 @@ class RemoteProgramTest(unittest.TestCase):
                                        "--grant", "launch-2610-fable", "--yes"], api.port)
         finally:
             api.close()
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("the claim may have been sent", result.stderr)
-        self.assertIn("same host", result.stderr)
         [receipt] = pathlib.Path(self.root, "ops", "runtime", "claude-resets").glob("claim-*.json")
-        saved = json.loads(receipt.read_text())
-        self.assertEqual((saved["result"], saved["host"]), ("indeterminate", "Will (will.local)"))
         self.assertNotIn("org-1", receipt.read_text())
+        return result, json.loads(receipt.read_text())
+
+    def test_a_claim_whose_answer_is_lost_is_indeterminate_and_pinned_to_its_host(self):
+        for on_claim in (None, 502):  # a dropped connection, or the proxy failing after it forwarded the claim
+            with self.subTest(on_claim=on_claim):
+                result, saved = self.claim_against(on_claim)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("the claim may have been sent", result.stderr)
+                self.assertIn("same host", result.stderr)
+                self.assertEqual((saved["result"], saved["host"]), ("indeterminate", "Will (will.local)"))
+                for receipt in pathlib.Path(self.root, "ops", "runtime", "claude-resets").glob("claim-*.json"):
+                    receipt.unlink()
+
+    def test_a_confirmed_claim_survives_a_failed_reread(self):
+        reset = {"status_code": 200, "body": json.dumps({"result": "reset", "resets_left": 0})}
+        result, saved = self.claim_against(reset, after=403)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["result"], "reset")
+        self.assertEqual((saved["result"], saved["after_error"]), ("reset", "management HTTP 403"))
 
 
 if __name__ == "__main__":

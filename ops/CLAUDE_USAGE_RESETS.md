@@ -17,7 +17,8 @@ sends its own source to Will over SSH stdin (`python3 -I -B -`), using the
 SSH destination, instance root, and port in `fleet/hosts.json`. On Will it reads
 the `.env` under that instance root and calls Will's proxy at `127.0.0.1`, so no
 management key leaves its host. The management client ignores `HTTP_PROXY`
-settings and refuses redirects, so the key goes only to that URL.
+settings and refuses redirects, and `--base-url` must be a loopback URL, so
+the key goes only to a proxy on the same host.
 
 The tool falls back to the local proxy only when SSH fails or Will's proxy never
 answered, and only before Will has printed anything, so a `watch` never
@@ -33,11 +34,12 @@ example `answered by Will (will.local) at http://127.0.0.1:8317`.
 - From a worktree, which has no `.env`, `status` and `watch` read the local key
   from the Mac instance root in `fleet/hosts.json`. Global options go before the
   subcommand: `python3 ops/claude_usage_resets.py --root ~/cliproxy status --host local`.
-- `claim` accepts only `--host will` or `--host local` (default `local`) and
-  never falls back, because its request ID and receipt stay on the host that
-  sent it. A rerun on another host would carry a new request ID and could
-  spend a second grant. Run local claims from the checkout, as before, so their
-  request IDs stay in one place.
+- `claim` accepts only `--host will` or `--host local`. `--yes` requires one
+  of them; a dry run without `--host` stays local. A claim never falls back,
+  because its request ID and receipt stay on the host that sent it, and a
+  rerun on another host would carry a new request ID and could spend a second
+  grant. Run local claims from the checkout, as before, so their request IDs
+  stay in one place.
 - Run on Will itself, `auto` and `will` use Will's own proxy. A hand-copied
   `ops/` without `fleet/hosts.json` also answers from the local proxy, as before.
 - Exit status 3 means no proxy answered at the URL tried.
@@ -110,11 +112,16 @@ instance root, and a `--receipt` path is a path on Will (relative to the SSH
 user's home directory). Each receipt records the host that sent it.
 
 The receipt is written with `result: sending` before the claim goes out. If the
-connection drops before the response arrives, the receipt says
-`indeterminate`, the tool exits 1, and the claim may have been sent. If SSH
-drops during `--host will --yes`, the outcome is unknown in the same way.
-Either way, rerun the same command on the same host. It repeats the stored
-request ID, so a rerun on another host could spend a second grant.
+connection drops before the response arrives, or the proxy answers the claim
+with an HTTP error, the receipt says `indeterminate`, the tool exits 1, and the
+claim may have been sent. If SSH drops during `--host will --yes`, the outcome
+is unknown in the same way. Either way, read the receipt and run `status` on
+the same host first. If the grant is still usable, rerun the same command on
+that host: it reuses the stored request ID. A fresh threshold check can refuse
+the rerun, for example when the first claim already worked. A rerun on another
+host would use a new request ID and could spend a second grant. Once the claim
+result is known, a failed usage reread is recorded as `after_error` and the
+result is kept.
 
 For a conditional redemption, add `--min-fable-percent 99` to the claim.
 The claim checks the account profile and reads usage again before spending
