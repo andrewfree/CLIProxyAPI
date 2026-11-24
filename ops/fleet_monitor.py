@@ -422,8 +422,29 @@ def summary_records(state, records, now):
     return displayed
 
 
+def newest_log_rows(stream):
+    stream.seek(0, os.SEEK_END)
+    offset = stream.tell()
+    oldest_offset = max(0, offset - 8 * 1024 * 1024)
+    first = b""
+    while offset > oldest_offset:
+        size = min(offset - oldest_offset, 64 * 1024)
+        offset -= size
+        stream.seek(offset)
+        first, *lines = (stream.read(size) + first).split(b"\n")
+        yield from reversed(lines)
+    if oldest_offset:
+        raise OSError("Startup log tail exceeds the scan limit")
+    yield first
+
+
 def previous_day_failovers(runtime, day):
     previous_day = day - timedelta(days=1)
+    # Appends may land out of timestamp order across processes. Read an hour
+    # before midnight to cover delayed writes around the day boundary.
+    start = datetime.combine(previous_day, local_time()).astimezone()
+    end = datetime.combine(day, local_time()).astimezone()
+    oldest = start - timedelta(hours=1)
     counts = {}
     sources = (
         ("Claude", "failover.jsonl", {"event": "primary_down", "reason": "startup_probe"}),
@@ -434,15 +455,20 @@ def previous_day_failovers(runtime, day):
         counts[provider] = 0
         try:
             with (runtime / filename).open("rb") as stream:
-                for line in stream:
+                for line in newest_log_rows(stream):
                     try:
                         row = json.loads(line)
-                    except ValueError:
+                    except (ValueError, RecursionError):
                         continue
-                    if not isinstance(row, dict) or any(row.get(key) != value for key, value in fields.items()):
+                    if not isinstance(row, dict):
                         continue
                     at = probes.timestamp(row.get("ts"))
-                    if at is not None and at.astimezone().date() == previous_day:
+                    if at is None:
+                        continue
+                    if at < oldest:
+                        break
+                    if (start <= at < end
+                            and all(row.get(key) == value for key, value in fields.items())):
                         counts[provider] += 1
         except FileNotFoundError:
             pass
@@ -477,7 +503,7 @@ def daily_message(day, records, hosts, parity, seen_outages, failovers):
     lines.append("Outages since last summary: " + (", ".join(seen_outages) if seen_outages else "none observed") + ".")
     totals = ", ".join(f"{name} {count if count is not None else 'unavailable'}"
                        for name, count in failovers.items())
-    lines.append(f"Session starts failed over to the Mac yesterday: {totals}.")
+    lines.append(f"Startup routing decisions to the Mac yesterday: {totals}.")
     return "\n".join(lines)
 
 

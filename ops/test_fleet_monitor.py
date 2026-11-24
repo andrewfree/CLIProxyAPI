@@ -406,7 +406,7 @@ class MonitorTests(unittest.TestCase):
             messages = [call.args[0] for call in notify.call_args_list]
             self.assertEqual(len(messages), 6)
             self.assertEqual(sum("daily summary" in message for message in messages), 1)
-            self.assertIn("Session starts failed over to the Mac yesterday: Claude 1, Codex 1.", messages[0])
+            self.assertIn("Startup routing decisions to the Mac yesterday: Claude 1, Codex 1.", messages[0])
             self.assertIn("92% used", messages[1])
             self.assertIn("Will proxy unreachable", messages[2])
             self.assertIn("weekly capped", messages[3])
@@ -630,12 +630,33 @@ class MonitorTests(unittest.TestCase):
                 dict(codex, ts="invalid"),
             ])
             with (runtime / "codex-failover.jsonl").open("ab") as stream:
-                stream.write(b'[]\n{"ts":')
+                stream.write(b'[]\n' + b'[' * 2000 + b']' * 2000 + b'\n\xff\n{"ts":')
             try:
                 with patch.dict(os.environ, {"TZ": "America/Los_Angeles"}):
                     system_time.tzset()
                     self.assertEqual(monitor.previous_day_failovers(runtime, date(2026, 11, 2)),
                                      {"Claude": 2, "Codex": 2})
+            finally:
+                system_time.tzset()
+
+    def test_previous_day_failovers_stops_before_old_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            log = runtime / "failover.jsonl"
+            with log.open("wb") as stream:
+                stream.seek(16 * 1024 * 1024)
+                stream.write(b"\n")
+            startup = {"event": "primary_down", "reason": "startup_probe"}
+            monitor.append_history(log, [
+                dict(startup, ts="2026-11-15T12:00:00Z"),
+                dict(startup, ts="2026-11-17T12:00:00Z"),
+                dict(startup, ts="2026-11-18T12:00:00Z"),
+            ])
+            try:
+                with patch.dict(os.environ, {"TZ": "UTC"}):
+                    system_time.tzset()
+                    self.assertEqual(monitor.previous_day_failovers(runtime, date(2026, 11, 18)),
+                                     {"Claude": 1, "Codex": 0})
             finally:
                 system_time.tzset()
 
@@ -658,7 +679,7 @@ class MonitorTests(unittest.TestCase):
         summary = monitor.daily_message("fixture day", [], {"m5": healthy}, parity, [], failovers)
         self.assertIn("Parity: equal.", summary)
         self.assertNotIn("Mac: paused", summary)
-        self.assertIn("Session starts failed over to the Mac yesterday: Claude 0, Codex unavailable.", summary)
+        self.assertIn("Startup routing decisions to the Mac yesterday: Claude 0, Codex unavailable.", summary)
 
     def test_short_cooldowns_share_one_episode_until_an_hour_quiet(self):
         state = {}
