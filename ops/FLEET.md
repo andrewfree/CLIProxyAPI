@@ -117,6 +117,12 @@ the instance root for Compose, the host's logs, and private runtime state.
      python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply &&
      (cd "$instance" && CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 \
        "$bundle/cliproxy_watchdog.py" --record-compose-activation --verbose)
+   ship_status=$?
+   archive_disable_verified=
+   [ "$ship_status" -eq 0 ] || {
+     print -u2 'STOP: archive disable not verified or ship failed'
+     false
+   }
    ```
 
    Keep the printed ship receipt and the value of `backup`. The activation
@@ -299,6 +305,12 @@ block above before shipping the target SHA.
 ```sh
 [ "${archive_disable_verified:-}" = yes ] &&
   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+ship_status=$?
+archive_disable_verified=
+[ "$ship_status" -eq 0 ] || {
+  print -u2 'STOP: archive disable not verified or ship failed'
+  false
+}
 ```
 
 After a later ship or bundle rollback, reinstall the token helper from the
