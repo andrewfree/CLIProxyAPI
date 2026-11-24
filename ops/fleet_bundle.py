@@ -25,6 +25,7 @@ JOBS = {
     "com.rever.cliproxy-log-archive": "archive_logs.py",
 }
 MONITOR = "com.rever.cliproxy-fleet-monitor"
+HEARTBEAT = "com.rever.cliproxy-fleet-heartbeat"
 
 
 class BundleError(Exception):
@@ -349,17 +350,18 @@ def verify_bundle(host, manifest, launchers):
             except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
                 issues.append("P0/" + label)
 
-        # The monitor plist is installed verbatim from the bundle once Andrew activates
-        # it, so an installed copy must match the shipped bytes. Not installed is fine.
-        monitor = home / "Library/LaunchAgents" / (MONITOR + ".plist")
-        if os.path.lexists(monitor):
-            expected = manifest["files"].get("ops/" + MONITOR + ".plist", {}).get("sha256")
+        # Andrew installs these plists verbatim when he activates each job.
+        for label in (MONITOR, HEARTBEAT):
+            installed_plist = home / "Library/LaunchAgents" / (label + ".plist")
+            if not os.path.lexists(installed_plist):
+                continue
+            expected = manifest["files"].get("ops/" + label + ".plist", {}).get("sha256")
             try:
-                actual = hashlib.sha256(read_regular(monitor)[0]).hexdigest()
+                actual = hashlib.sha256(read_regular(installed_plist)[0]).hexdigest()
             except (OSError, BundleError):
                 actual = None
             if expected is None or actual != expected:
-                issues.append("P0/" + MONITOR)
+                issues.append("P0/" + label)
 
         token = home / ".local/bin/cliproxy-codex-token"
         try:

@@ -490,11 +490,14 @@ across deferred readings. The cooldown alert re-arms an hour after the
 latest observed cooldown ends. Transitions in one tick share
 a text. The first tick at or after 09:00 Mac local time sends the day's
 summary. It includes quota resets, outages observed since the last summary,
-and the previous Mac-local calendar day's Claude and Codex session starts that
-failed over to the Mac. The count reads startup probe failures from
-`failover.jsonl` and successful `app-server` fallback decisions from
-`codex-failover.jsonl`. A missing log counts as zero. A log that cannot be
-read is reported as unavailable. If the Mac was asleep,
+and the previous Mac-local calendar day's Claude and Codex startup routing
+decisions to the Mac. The count reads Claude startup probe failures from
+`failover.jsonl` and Codex `app-server` fallback selections from
+`codex-failover.jsonl`. Both launchers log the choice before the child starts.
+The monitor reads back from the end of each log and skips malformed rows.
+A missing log counts as zero. The count is unavailable if the log cannot be
+read or the 8 MiB scan limit is reached before the day boundary. If the Mac
+was asleep,
 the next tick catches up that day's summary. Z.ai windows are named by type
 and length (`credits-5h`, `credits-1w`, `mcp-monthly`) using the unit codes in
 CodexBar's Z.ai plugin, so a weekly Z.ai window warns at 90%. Unknown codes keep
@@ -578,80 +581,136 @@ is in `health.json`, and failures are logged to
 
 ### Install the independent heartbeat watcher
 
-Mint checks the timestamp from the Mac monitor's `health.json` every five
-minutes through its systemd user timer. A separate M5 LaunchAgent sends only
-that timestamp to Mint over the existing tailnet SSH connection. It also asks
-Mint for the freshness result and uses the M5's existing Text Me service for
-delivery. The watcher and relay keep running if the monitor is unloaded.
-The relay needs the M5 awake with SSH access to Mint and Text Me reachable.
+A separate M5 LaunchAgent checks the timestamp in the monitor's
+`health.json` every five minutes. Staleness requires 20 minutes of age and
+20 minutes since the Mac last woke or booted. The relay sends the timestamp
+to Mint over the existing tailnet SSH connection to record what Mint saw.
+Mint serves this check on demand. The M5 owns alerting, so a Mint timer
+would repeat the freshness calculation without adding a delivery path.
 
-A timestamp over 20 minutes old triggers one text per stale period on the
-relay's next poll. A missing snapshot leaves the last timestamp in place.
-If the watcher has never received a timestamp, it waits 20 minutes after
-the first relay check. A fresh snapshot re-arms delivery. A definite send
-failure retries on the next relay poll. An unconfirmed attempt stays
-recorded until a fresh snapshot arrives.
+After more than 20 awake minutes of failed Mint checks, the M5 judges
+snapshot age locally. A stale snapshot triggers a text with its age and the
+Mint failure. A missing or invalid snapshot uses the last readable timestamp.
+If there has never been a readable snapshot, the relay waits 20 minutes
+from its first check before alerting.
 
-After live approval, run the following from the source checkout on the M5
-at the merged commit. The SSH settings use the existing `mint.local` host
-key for Mint's tailnet name.
+The snapshot timestamp identifies an alert episode. The relay persists
+Text Me's acknowledgment and skips further sends for that episode. While
+the same snapshot remains stale, it retries requests that lack an
+acknowledgment with the same idempotency key and text. The current Text Me
+server ignores idempotency keys. If it sends a text and the response is lost,
+the retry can send a duplicate. Text Me must honor the key and return a
+durable acknowledgment to close this gap. Sending requires an awake M5
+and a reachable Text Me service.
 
-```sh
-mint=olerever@mint.tail98889d.ts.net
-ssh -o BatchMode=yes -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes "$mint" \
-  'mkdir -p ~/.config/systemd/user && install -d -m 700 ~/.local/lib/cliproxy-fleet-heartbeat'
-scp -B -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes \
-  ops/fleet_heartbeat.py "${mint}:.local/lib/cliproxy-fleet-heartbeat/"
-scp -B -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes \
-  ops/cliproxy-fleet-heartbeat.service ops/cliproxy-fleet-heartbeat.timer "${mint}:.config/systemd/user/"
-ssh -o BatchMode=yes -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes "$mint" \
-  'systemctl --user daemon-reload &&
-   systemctl --user enable --now cliproxy-fleet-heartbeat.timer &&
-   systemctl --user list-timers cliproxy-fleet-heartbeat.timer &&
-   loginctl show-user "$USER" -p Linger'
-```
+The M5 relay logs failed checks and delivery attempts to
+`~/Library/Logs/cliproxy-fleet-heartbeat.log`. It also asks macOS Notification
+Center to report a sustained Mint failure or a failed Text Me attempt.
+Its observations and current delivery receipt are in
+`ops/runtime/fleet/heartbeat-watch.json` and
+`ops/runtime/fleet/heartbeat-alert.json` under the instance root.
 
-If Mint reports `Linger=no`, run `loginctl enable-linger olerever` on
-Mint and approve its authorization prompt if shown. Confirm `Linger=yes`
-so the timer runs after logout and starts when Mint boots.
+After live approval, run this block from the source checkout on the M5
+at the merged commit. The preflight checks the source plist and Text Me
+before shipping and checks the Mint helper and shipped plist before
+replacing a loaded LaunchAgent.
 
-Ship the merged commit's Mac bundle, then install the separate relay.
-
-```sh
+```bash
+bash <<'BASH'
+set -euo pipefail
 commit=$(git rev-parse HEAD)
-python3 ops/fleetctl.py ship --host m5 --commit "$commit" --dry-run
-python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
-
-bundle="$HOME/cliproxy-live/ops"
+mint=olerever@mint.tail98889d.ts.net
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=5 -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes)
 label=com.rever.cliproxy-fleet-heartbeat
 agent="$HOME/Library/LaunchAgents/$label.plist"
 domain="gui/$(id -u)"
-plutil -lint "$bundle/$label.plist"
+job="$domain/$label"
+bundle="$HOME/cliproxy-live/ops"
+
+plutil -lint "ops/$label.plist"
 curl --noproxy '*' --fail --silent --show-error --max-time 5 \
   --output /dev/null http://127.0.0.1:8787/health
-if launchctl print "$domain/$label" >/dev/null 2>&1; then
-  launchctl bootout "$domain/$label"
+python3 ops/fleetctl.py ship --host m5 --commit "$commit" --dry-run
+
+ssh "${ssh_opts[@]}" "$mint" 'install -d -m 700 ~/.local/lib/cliproxy-fleet-heartbeat'
+scp "${ssh_opts[@]}" ops/fleet_heartbeat.py "${mint}:.local/lib/cliproxy-fleet-heartbeat/"
+mint_watch='/usr/bin/python3 -I -B ~/.local/lib/cliproxy-fleet-heartbeat/fleet_heartbeat.py watch'
+before_sync=$(ssh "${ssh_opts[@]}" "$mint" "$mint_watch" | /usr/bin/python3 -c 'import json, sys; print(json.load(sys.stdin)["synced_at"] or 0)')
+
+python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+plutil -lint "$bundle/$label.plist"
+if launchctl print "$job" >/dev/null 2>&1; then
+  launchctl bootout "$job"
+else
+  status=$?
+  if [ "$status" -ne 113 ]; then
+    printf 'LaunchAgent lookup failed with exit %s\n' "$status" >&2
+    exit "$status"
+  fi
 fi
 install -m 644 "$bundle/$label.plist" "$agent"
+launchctl enable "$job"
+started=$(date +%s)
 launchctl bootstrap "$domain" "$agent"
-launchctl print "$domain/$label"
+
+exit_code=
+for attempt in {1..30}; do
+  job_status=$(launchctl print "$job")
+  if awk '$1 == "runs" && $3 == 1 {ran = 1}
+          $1 == "state" && !state++ {stopped = ($3 == "not" && $4 == "running")}
+          END {exit !(ran && stopped)}' <<< "$job_status"; then
+    exit_code=$(awk '$1 == "last" && $2 == "exit" && $3 == "code" {print $5}' <<< "$job_status")
+    break
+  fi
+  sleep 2
+done
+if [ "$exit_code" != 0 ]; then
+  printf 'Expected first relay run to exit 0. Observed %s.\n' "${exit_code:-no completed run}" >&2
+  exit 1
+fi
+
+ssh "${ssh_opts[@]}" "$mint" "$mint_watch" | /usr/bin/python3 -c '
+import json
+import sys
+import time
+
+record = json.load(sys.stdin)
+started, before_sync = map(int, sys.argv[1:])
+now = int(time.time())
+synced_at = record["synced_at"]
+snapshot = record["checked_at"]
+if (record["status"] != "fresh" or type(synced_at) is not int
+        or synced_at <= before_sync or not started - 60 <= synced_at <= now + 60
+        or type(snapshot) is not int or not 0 <= now - snapshot <= 1200):
+    sys.exit("Mint has no fresh snapshot from the first relay run.")
+print("First relay exit 0. Mint sync and snapshot verified.", synced_at, snapshot)
+' "$started" "$before_sync"
+BASH
 ```
 
-After the relay's first run, verify Mint sees a fresh snapshot and check
-the timer's recorded result.
+The verification allows up to 60 seconds of clock skew and requires Mint
+to report a newer sync than the preflight. For the live alert check, verify
+the actual text and the acknowledged receipt after approval.
 
-```sh
-ssh -o BatchMode=yes -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes "$mint" \
-  '/usr/bin/python3 -B ~/.local/lib/cliproxy-fleet-heartbeat/fleet_heartbeat.py watch &&
-   journalctl --user -u cliproxy-fleet-heartbeat.service -n 5 --no-pager'
+To roll back before shipping an older bundle, disable the relay
+persistently and unload it if loaded. Remove the installed plist so P0
+can verify the older manifest, and keep the private receipt for diagnosis.
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+label=com.rever.cliproxy-fleet-heartbeat
+job="gui/$(id -u)/$label"
+launchctl disable "$job"
+if launchctl print "$job" >/dev/null 2>&1; then
+  launchctl bootout "$job"
+else
+  status=$?
+  [ "$status" -eq 113 ] || exit "$status"
+fi
+rm -f "$HOME/Library/LaunchAgents/$label.plist"
+BASH
 ```
-
-The M5 relay logs failed checks or deliveries to
-`~/Library/Logs/cliproxy-fleet-heartbeat.log`. The delivery receipt lives in
-`ops/runtime/fleet/heartbeat-alert.json` under the instance root while the
-snapshot stays stale. To stop the watcher and relay, run
-`systemctl --user disable --now cliproxy-fleet-heartbeat.timer` on Mint and
-`launchctl bootout "gui/$(id -u)/com.rever.cliproxy-fleet-heartbeat"` on the M5.
 
 ### Read the reports or chart the history
 

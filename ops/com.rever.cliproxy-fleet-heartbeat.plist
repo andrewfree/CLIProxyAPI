@@ -7,6 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
+        <string>-I</string>
         <string>-B</string>
         <string>/Users/rever/cliproxy-live/ops/fleet_heartbeat.py</string>
         <string>relay</string>

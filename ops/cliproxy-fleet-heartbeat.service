@@ -1,6 +1,0 @@
-[Unit]
-Description=Check the CLIProxy fleet monitor heartbeat
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 -B %h/.local/lib/cliproxy-fleet-heartbeat/fleet_heartbeat.py watch
