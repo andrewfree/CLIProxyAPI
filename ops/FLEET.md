@@ -489,7 +489,12 @@ proxy quota cooldown without a known active cap. The monitor remembers caps
 across deferred readings. The cooldown alert re-arms an hour after the
 latest observed cooldown ends. Transitions in one tick share
 a text. The first tick at or after 09:00 Mac local time sends the day's
-summary, including quota resets and outages observed since the last summary. If the Mac was asleep,
+summary. It includes quota resets, outages observed since the last summary,
+and the previous Mac-local calendar day's Claude and Codex session starts that
+failed over to the Mac. The count reads startup probe failures from
+`failover.jsonl` and successful `app-server` fallback decisions from
+`codex-failover.jsonl`. A missing log counts as zero. A log that cannot be
+read is reported as unavailable. If the Mac was asleep,
 the next tick catches up that day's summary. Z.ai windows are named by type
 and length (`credits-5h`, `credits-1w`, `mcp-monthly`) using the unit codes in
 CodexBar's Z.ai plugin, so a weekly Z.ai window warns at 90%. Unknown codes keep
@@ -570,6 +575,83 @@ response are recorded as unconfirmed and consumed to avoid duplicate texts.
 A nonzero exit from a custom notifier is also unconfirmed. Delivery status
 is in `health.json`, and failures are logged to
 `~/Library/Logs/cliproxy-fleet-monitor.log`.
+
+### Install the independent heartbeat watcher
+
+Mint checks the timestamp from the Mac monitor's `health.json` every five
+minutes through its systemd user timer. A separate M5 LaunchAgent sends only
+that timestamp to Mint over the existing tailnet SSH connection. It also asks
+Mint for the freshness result and uses the M5's existing Text Me service for
+delivery. The watcher and relay keep running if the monitor is unloaded.
+The relay needs the M5 awake with SSH access to Mint and Text Me reachable.
+
+A timestamp over 20 minutes old triggers one text per stale period on the
+relay's next poll. A missing snapshot leaves the last timestamp in place.
+If the watcher has never received a timestamp, it waits 20 minutes after
+the first relay check. A fresh snapshot re-arms delivery. A definite send
+failure retries on the next relay poll. An unconfirmed attempt stays
+recorded until a fresh snapshot arrives.
+
+After live approval, run the following from the source checkout on the M5
+at the merged commit. The SSH settings use the existing `mint.local` host
+key for Mint's tailnet name.
+
+```sh
+mint=olerever@mint.tail98889d.ts.net
+ssh -o BatchMode=yes -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes "$mint" \
+  'mkdir -p ~/.config/systemd/user && install -d -m 700 ~/.local/lib/cliproxy-fleet-heartbeat'
+scp -B -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes \
+  ops/fleet_heartbeat.py "${mint}:.local/lib/cliproxy-fleet-heartbeat/"
+scp -B -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes \
+  ops/cliproxy-fleet-heartbeat.service ops/cliproxy-fleet-heartbeat.timer "${mint}:.config/systemd/user/"
+ssh -o BatchMode=yes -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes "$mint" \
+  'systemctl --user daemon-reload &&
+   systemctl --user enable --now cliproxy-fleet-heartbeat.timer &&
+   systemctl --user list-timers cliproxy-fleet-heartbeat.timer &&
+   loginctl show-user "$USER" -p Linger'
+```
+
+If Mint reports `Linger=no`, run `loginctl enable-linger olerever` on
+Mint and approve its authorization prompt if shown. Confirm `Linger=yes`
+so the timer runs after logout and starts when Mint boots.
+
+Ship the merged commit's Mac bundle, then install the separate relay.
+
+```sh
+commit=$(git rev-parse HEAD)
+python3 ops/fleetctl.py ship --host m5 --commit "$commit" --dry-run
+python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+
+bundle="$HOME/cliproxy-live/ops"
+label=com.rever.cliproxy-fleet-heartbeat
+agent="$HOME/Library/LaunchAgents/$label.plist"
+domain="gui/$(id -u)"
+plutil -lint "$bundle/$label.plist"
+curl --noproxy '*' --fail --silent --show-error --max-time 5 \
+  --output /dev/null http://127.0.0.1:8787/health
+if launchctl print "$domain/$label" >/dev/null 2>&1; then
+  launchctl bootout "$domain/$label"
+fi
+install -m 644 "$bundle/$label.plist" "$agent"
+launchctl bootstrap "$domain" "$agent"
+launchctl print "$domain/$label"
+```
+
+After the relay's first run, verify Mint sees a fresh snapshot and check
+the timer's recorded result.
+
+```sh
+ssh -o BatchMode=yes -o HostKeyAlias=mint.local -o StrictHostKeyChecking=yes "$mint" \
+  '/usr/bin/python3 -B ~/.local/lib/cliproxy-fleet-heartbeat/fleet_heartbeat.py watch &&
+   journalctl --user -u cliproxy-fleet-heartbeat.service -n 5 --no-pager'
+```
+
+The M5 relay logs failed checks or deliveries to
+`~/Library/Logs/cliproxy-fleet-heartbeat.log`. The delivery receipt lives in
+`ops/runtime/fleet/heartbeat-alert.json` under the instance root while the
+snapshot stays stale. To stop the watcher and relay, run
+`systemctl --user disable --now cliproxy-fleet-heartbeat.timer` on Mint and
+`launchctl bootout "gui/$(id -u)/com.rever.cliproxy-fleet-heartbeat"` on the M5.
 
 ### Read the reports or chart the history
 

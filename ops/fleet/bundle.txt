@@ -23,3 +23,5 @@ ops/fleet_monitor_probe.py
 ops/fleet_quota_chart.py
 ops/claude_usage_resets.py
 ops/com.rever.cliproxy-fleet-monitor.plist
+ops/fleet_heartbeat.py
+ops/com.rever.cliproxy-fleet-heartbeat.plist
