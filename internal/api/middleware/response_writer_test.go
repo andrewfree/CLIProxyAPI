@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -198,7 +199,7 @@ func TestStreamingLogMarksMiddlewareQueueDrops(t *testing.T) {
 			nByte, errByte := wrapper.Write([]byte(first))
 			nString, errString := wrapper.WriteString(second)
 			if tc.saturated {
-				go wrapper.processStreamingChunks(wrapper.streamDone, wrapper.chunkChannel, wrapper.streamWriter)
+				go processStreamingChunks(wrapper.streamDone, wrapper.chunkChannel, wrapper.streamWriter, nil)
 			}
 			if errFinalize := wrapper.Finalize(c); errFinalize != nil {
 				t.Fatal(errFinalize)
@@ -239,8 +240,136 @@ func TestStreamingLogMarksMiddlewareQueueDrops(t *testing.T) {
 	}
 }
 
+func TestStreamingLogFlushWithStuckQueue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		wrapper := NewResponseWriterWrapper(c.Writer, &testRequestLogger{enabled: true}, &RequestInfo{})
+		wrapper.isStreaming = true
+		wrapper.chunkChannel = make(chan []byte, 1)
+		wrapper.chunkChannel <- []byte("retained")
+
+		const frames = 100
+		const data = "data: frame"
+		start := time.Now()
+		for range frames {
+			if _, errWrite := wrapper.Write([]byte(data)); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			if _, errWrite := wrapper.WriteString("\n\n"); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+		}
+		if errFlush := wrapper.FlushError(); errFlush != nil {
+			t.Fatal(errFlush)
+		}
+		if elapsed := time.Since(start); elapsed != 3*time.Millisecond {
+			t.Errorf("%d frames and flush took %s, want 3ms", frames, elapsed)
+		}
+		if !recorder.Flushed || recorder.Body.String() != strings.Repeat(data+"\n\n", frames) {
+			t.Fatal("flush did not deliver all client frames unchanged")
+		}
+	})
+}
+
+func TestStreamingLogFinalizeCancelsSinkQueueWaits(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		writer := &stalledStreamingLogWriter{}
+		logger := &testRequestLogger{enabled: true, streamWriter: writer}
+		wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{})
+		wrapper.Header().Set("Content-Type", "text/event-stream")
+		wrapper.WriteHeader(http.StatusOK)
+		if _, errWrite := wrapper.WriteString("in flight"); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		synctest.Wait()
+		for range logging.StreamLogQueueDepth {
+			if _, errWrite := wrapper.WriteString("queued"); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+		}
+		start := time.Now()
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatal(errFinalize)
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("Finalize advanced time by %s while draining a stalled sink", elapsed)
+		}
+		if !writer.closed || writer.attempts != 1+logging.StreamLogQueueDepth {
+			t.Fatalf("sink closed = %t, attempts = %d, want closed with %d attempts", writer.closed, writer.attempts, 1+logging.StreamLogQueueDepth)
+		}
+	})
+}
+
+type stalledStreamingLogWriter struct {
+	testStreamingLogWriter
+	attempts int
+}
+
+func (w *stalledStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.WriteChunkAsyncUntil(chunk, nil)
+}
+
+func (w *stalledStreamingLogWriter) WriteChunkAsyncUntil(_ []byte, drain <-chan struct{}) {
+	w.attempts++
+	timer := time.NewTimer(3 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-drain:
+	case <-timer.C:
+	}
+}
+
+func TestStreamingLogLegacyWriterReceivesOnlyResponseChunks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		writer := &legacyStreamingLogWriter{chunks: make(chan string, 1)}
+		wrapper := NewResponseWriterWrapper(c.Writer, &testRequestLogger{enabled: true}, &RequestInfo{})
+		wrapper.isStreaming = true
+		wrapper.streamWriter = writer
+		wrapper.chunkChannel = make(chan []byte, 1)
+		wrapper.chunkChannel <- []byte("retained")
+		wrapper.streamDone = make(chan struct{})
+		if _, errWrite := wrapper.WriteString("dropped"); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+
+		go processStreamingChunks(wrapper.streamDone, wrapper.chunkChannel, writer, nil)
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatal(errFinalize)
+		}
+		select {
+		case got := <-writer.chunks:
+			if got != "retained" || !writer.closed {
+				t.Fatalf("legacy writer retained %q and closed = %t", got, writer.closed)
+			}
+		default:
+			t.Fatal("legacy writer did not receive the retained chunk")
+		}
+		if writer.attempts != 1 {
+			t.Fatalf("legacy writer received %d enqueue attempts, want one response chunk", writer.attempts)
+		}
+	})
+}
+
+type legacyStreamingLogWriter struct {
+	testStreamingLogWriter
+	chunks   chan string
+	attempts int
+}
+
+func (w *legacyStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.attempts++
+	select {
+	case w.chunks <- string(chunk):
+	default:
+	}
+}
+
 type testRequestLogger struct {
-	enabled bool
+	enabled      bool
+	streamWriter logging.StreamingLogWriter
 }
 
 func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
@@ -248,6 +377,9 @@ func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []by
 }
 
 func (l *testRequestLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error) {
+	if l.streamWriter != nil {
+		return l.streamWriter, nil
+	}
 	return &testStreamingLogWriter{}, nil
 }
 

@@ -49,6 +49,67 @@ func TestStreamLogQueueCountsDropsAtDeadline(t *testing.T) {
 	})
 }
 
+func TestStreamLogQueueWaitsOncePerStall(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		queue := make(chan []byte, 1)
+		queue <- []byte("first")
+		var drops StreamLogDrops
+		const writes = 100
+		for stall := range 2 {
+			start := time.Now()
+			for range writes {
+				drops.Enqueue(queue, []byte("missed"))
+			}
+			if elapsed := time.Since(start); elapsed != streamLogQueueWait {
+				t.Errorf("stall %d: %d writes took %s, want %s", stall+1, writes, elapsed, streamLogQueueWait)
+			}
+			<-queue
+			drops.Enqueue(queue, []byte("recovered"))
+		}
+		if chunks, byteCount := drops.Counts(); chunks != 2*writes || byteCount != 2*writes*6 {
+			t.Fatalf("dropped %d chunks and %d bytes, want %d chunks and %d bytes", chunks, byteCount, 2*writes, 2*writes*6)
+		}
+	})
+}
+
+func TestStreamLogQueueDrainCancelsPendingWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		queue := make(chan []byte, 1)
+		queue <- []byte("retained")
+		stopWaiting := make(chan struct{})
+		var drops StreamLogDrops
+		const writes = 100
+		start := time.Now()
+		go func() {
+			for range writes {
+				drops.enqueueUntil(queue, []byte("missed"), stopWaiting)
+			}
+		}()
+		synctest.Wait()
+		if chunks, _ := drops.Counts(); chunks != 0 {
+			t.Errorf("dropped %d chunks before drain started, want 0", chunks)
+		}
+		close(stopWaiting)
+		synctest.Wait()
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("draining %d writes advanced time by %s", writes, elapsed)
+		}
+		if chunks, byteCount := drops.Counts(); chunks != writes || byteCount != writes*6 {
+			t.Errorf("dropped %d chunks and %d bytes, want %d chunks and %d bytes", chunks, byteCount, writes, writes*6)
+		}
+		<-queue
+		drops.enqueueUntil(queue, []byte("fits"), stopWaiting)
+		select {
+		case chunk := <-queue:
+			if string(chunk) != "fits" {
+				t.Fatalf("queued chunk = %q, want fits", chunk)
+			}
+		default:
+			t.Fatal("draining dropped a chunk that fit in the queue")
+		}
+	})
+}
+
 func TestFileStreamingLogMarksSpoolQueueDrops(t *testing.T) {
 	dir := t.TempDir()
 	body, errCreate := os.CreateTemp(dir, "response-body-*.tmp")
@@ -67,7 +128,7 @@ func TestFileStreamingLogMarksSpoolQueueDrops(t *testing.T) {
 		errorChan:        make(chan error, 1),
 	}
 
-	// Keep the spooler paused until the queue fills and subsequent writes time out.
+	// Keep the spooler paused while the queue fills and subsequent writes drop.
 	writer.WriteChunkAsync([]byte("data: retained"))
 	writer.WriteChunkAsync([]byte("missing"))
 	writer.WriteChunkAsync([]byte("gone"))

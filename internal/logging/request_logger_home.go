@@ -140,10 +140,14 @@ func (w *homeStreamingLogWriter) asyncWriter() {
 }
 
 func (w *homeStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.WriteChunkAsyncUntil(chunk, nil)
+}
+
+func (w *homeStreamingLogWriter) WriteChunkAsyncUntil(chunk []byte, stopWaiting <-chan struct{}) {
 	if w == nil || w.chunkChan == nil || len(chunk) == 0 {
 		return
 	}
-	w.drops.Enqueue(w.chunkChan, bytes.Clone(chunk))
+	w.drops.enqueueUntil(w.chunkChan, bytes.Clone(chunk), stopWaiting)
 }
 
 // RecordDroppedChunks adds losses from the middleware queue after it drains.

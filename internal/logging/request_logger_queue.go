@@ -3,6 +3,7 @@ package logging
 import (
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -18,23 +19,52 @@ const (
 type StreamLogDrops struct {
 	chunks atomic.Uint64
 	bytes  atomic.Uint64
+
+	mu       sync.Mutex // serializes enqueues and guards the timer and dropping state
+	timer    *time.Timer
+	dropping bool
 }
 
 // Enqueue sends an owned chunk to the spooler or counts it if the queue stays full.
 func (d *StreamLogDrops) Enqueue(queue chan<- []byte, chunk []byte) {
+	d.enqueueUntil(queue, chunk, nil)
+}
+
+func (d *StreamLogDrops) enqueueUntil(queue chan<- []byte, chunk []byte, stopWaiting <-chan struct{}) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	select {
 	case queue <- chunk:
+		d.dropping = false
+		return
+	default:
+	}
+	if d.dropping {
+		d.Add(1, uint64(len(chunk)))
+		return
+	}
+	select {
+	case <-stopWaiting:
+		d.Add(1, uint64(len(chunk)))
 		return
 	default:
 	}
 
-	timer := time.NewTimer(streamLogQueueWait)
-	defer timer.Stop()
+	if d.timer == nil {
+		d.timer = time.NewTimer(streamLogQueueWait)
+	} else {
+		d.timer.Reset(streamLogQueueWait)
+	}
+	defer d.timer.Stop()
 	select {
 	case queue <- chunk:
-	case <-timer.C:
-		d.Add(1, uint64(len(chunk)))
+		return
+	case <-d.timer.C:
+		d.dropping = true
+	case <-stopWaiting:
 	}
+	d.Add(1, uint64(len(chunk)))
 }
 
 // Add records chunks and bytes dropped from a queue.

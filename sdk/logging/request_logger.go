@@ -11,6 +11,12 @@ type RequestLogger = internallogging.RequestLogger
 // StreamingLogWriter handles real-time logging of streaming response chunks.
 type StreamingLogWriter = internallogging.StreamingLogWriter
 
+// StreamingLogDropReporter is an optional interface for recording middleware queue drops before Close.
+// Implement it to include a drop marker in custom logs, storing the counts outside the chunk queue.
+// Built-in file and Home writers include the marker when publishing the completed log.
+// Custom writers without this interface receive only response chunks through WriteChunkAsync.
+type StreamingLogDropReporter = internallogging.StreamingLogDropReporter
+
 // FileRequestLogger implements RequestLogger using file-based storage.
 type FileRequestLogger = internallogging.FileRequestLogger
 

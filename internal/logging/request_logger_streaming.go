@@ -89,11 +89,16 @@ type FileStreamingLogWriter struct {
 // Parameters:
 //   - chunk: The response chunk to write
 func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.WriteChunkAsyncUntil(chunk, nil)
+}
+
+// WriteChunkAsyncUntil queues a copy of a chunk, with queue waits canceled when stopWaiting closes.
+func (w *FileStreamingLogWriter) WriteChunkAsyncUntil(chunk []byte, stopWaiting <-chan struct{}) {
 	if w.chunkChan == nil {
 		return
 	}
 
-	w.drops.Enqueue(w.chunkChan, bytes.Clone(chunk))
+	w.drops.enqueueUntil(w.chunkChan, bytes.Clone(chunk), stopWaiting)
 }
 
 // RecordDroppedChunks adds losses from the middleware queue after it drains.

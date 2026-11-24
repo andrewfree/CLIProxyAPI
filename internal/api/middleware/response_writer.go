@@ -46,6 +46,7 @@ type ResponseWriterWrapper struct {
 	chunkChannel        chan []byte                 // chunkChannel is a channel for asynchronously passing response chunks to the logger.
 	streamLogDrops      logging.StreamLogDrops      // streamLogDrops counts chunks that could not reach the log writer.
 	streamDone          chan struct{}               // streamDone signals when the streaming goroutine completes.
+	streamDrain         chan struct{}               // streamDrain cancels sink queue waits when finalization starts draining.
 	logger              logging.RequestLogger       // logger is the instance of the request logger service.
 	requestInfo         *RequestInfo                // requestInfo holds the details of the original request.
 	ginContext          *gin.Context                // ginContext holds the Gin request context for mid-stream error inspection.
@@ -236,12 +237,14 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 				if err == nil {
 					chunkChan := make(chan []byte, logging.StreamLogQueueDepth)
 					doneChan := make(chan struct{})
+					drainChan := make(chan struct{})
 					w.streamWriter = streamWriter
 					w.chunkChannel = chunkChan
 					w.streamDone = doneChan
+					w.streamDrain = drainChan
 
 					// Start async chunk processor with captured locals so Finalize clearing fields cannot race.
-					go w.processStreamingChunks(doneChan, chunkChan, streamWriter)
+					go processStreamingChunks(doneChan, chunkChan, streamWriter, drainChan)
 
 					// Write status immediately
 					_ = streamWriter.WriteStatus(statusCode, w.headers)
@@ -332,19 +335,31 @@ func (w *ResponseWriterWrapper) currentCapturedRequestBody() []byte {
 
 // processStreamingChunks runs in a separate goroutine to process response chunks from the chunkChannel.
 // It asynchronously writes each chunk to the streaming log writer.
-func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}, chunkChan <-chan []byte, streamWriter logging.StreamingLogWriter) {
-	if done == nil {
-		return
-	}
-
+func processStreamingChunks(done chan struct{}, chunkChan <-chan []byte, streamWriter logging.StreamingLogWriter, drain <-chan struct{}) {
 	defer close(done)
 
-	if streamWriter == nil || chunkChan == nil {
-		return
+	writeChunk := streamWriter.WriteChunkAsync
+	if writer, ok := streamWriter.(interface{ WriteChunkAsyncUntil([]byte, <-chan struct{}) }); ok {
+		writeChunk = func(chunk []byte) { writer.WriteChunkAsyncUntil(chunk, drain) }
 	}
 
 	for chunk := range chunkChan {
-		streamWriter.WriteChunkAsync(chunk)
+		writeChunk(chunk)
+	}
+}
+
+func (w *ResponseWriterWrapper) drainStreamingChunks() {
+	if w.streamDrain != nil {
+		close(w.streamDrain)
+		w.streamDrain = nil
+	}
+	if w.chunkChannel != nil {
+		close(w.chunkChannel)
+		w.chunkChannel = nil
+	}
+	if w.streamDone != nil {
+		<-w.streamDone
+		w.streamDone = nil
 	}
 }
 
@@ -400,22 +415,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	if w.isStreaming && w.streamWriter != nil {
-		if w.chunkChannel != nil {
-			close(w.chunkChannel)
-			w.chunkChannel = nil
-		}
-
-		if w.streamDone != nil {
-			<-w.streamDone
-			w.streamDone = nil
-		}
+		w.drainStreamingChunks()
 
 		if chunks, byteCount := w.streamLogDrops.Counts(); chunks > 0 {
-			if writer, ok := w.streamWriter.(interface{ RecordDroppedChunks(uint64, uint64) }); ok {
+			if writer, ok := w.streamWriter.(logging.StreamingLogDropReporter); ok {
 				writer.RecordDroppedChunks(chunks, byteCount)
-			} else {
-				// SDK writers can still record the marker through the existing interface.
-				w.streamWriter.WriteChunkAsync([]byte(logging.StreamLogDropMarker(chunks, byteCount)))
 			}
 		}
 		w.streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
@@ -881,14 +885,7 @@ func (w *ResponseWriterWrapper) discardStreamingLogWriter() error {
 	if w == nil || w.streamWriter == nil {
 		return nil
 	}
-	if w.chunkChannel != nil {
-		close(w.chunkChannel)
-		w.chunkChannel = nil
-	}
-	if w.streamDone != nil {
-		<-w.streamDone
-		w.streamDone = nil
-	}
+	w.drainStreamingChunks()
 	streamWriter := w.streamWriter
 	w.streamWriter = nil
 	if discarder, ok := streamWriter.(interface{ Discard() error }); ok {
