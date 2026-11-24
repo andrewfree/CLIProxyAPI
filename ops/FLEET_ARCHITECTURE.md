@@ -8,7 +8,7 @@ It is an explanation, not a procedure:
 - [FLEET.md](FLEET.md) is the runbook: commands, release records, rollback paths.
 - [FLEET_DESIGN.md](FLEET_DESIGN.md) is the reviewed proposal. Parts of it are built and parts are
   not; its status line says which.
-- [README.md](README.md) documents the launcher, the watchdog and the log archiver.
+- [README.md](README.md) documents the launcher, the watchdog and Mac log retention.
 
 Where this document and FLEET.md disagree, FLEET.md and the live verifiers win. Sentences marked
 "(session record)" come from the November 17 and 18 working sessions and are not stated elsewhere
@@ -568,7 +568,7 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | Location | What it is | Consequence |
 | --- | --- | --- |
 | `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. Since the November 18 cutover the installed jobs and new T3 sessions use the bundle, not its checkout paths. | A pull, checkout, or uncommitted edit no longer changes a job or new session. Compose inputs here are still live. |
-| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`, and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and monitor LaunchAgents, the five T3 Claude launcher paths, and the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`. The archive job retired on November 23 and its files left the allowlist. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
 | `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |

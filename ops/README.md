@@ -514,4 +514,19 @@ claim request copied from Claude Code, and the 2026-11-11 Fable reset record.
 
 Since 2026-11-23, closed request logs on the Mac are ingested raw, with credentials redacted, into Will's OpenObserve (stream `cliproxy_requests_v3`) by the M5 log sweeper (LaunchAgent `com.rever.log-sweeper`, scripts in `~/.local/share/log-sweeper`, not part of this repository). It runs hourly. It takes closed `.log` and `.log.gz` files in `logs/` that have not changed for at least one hour, other than the active `main.log`. It deletes a local file only after a later run verifies that file's record counts, lengths and SHA-256 in OpenObserve and re-hashes the file. Failures show as a macOS notification and in `~/Library/Logs/log-sweeper/sweep.log`.
 
-Andrew decided on 2026-11-23 that Innie and Storage hold no logs. The `com.rever.cliproxy-log-archive` job, which copied closed logs to `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` (TheCloud until November 18), was disabled that day and removed from the bundle. The logs it had archived were ingested and verified the same way and then deleted. A rollback to a bundle from before this change brings back `ops/com.rever.cliproxy-log-archive.plist`: do not install or load it (see [Mac rollback safety](FLEET.md)).
+Andrew decided on 2026-11-23 that Innie and Storage hold no logs. The
+`com.rever.cliproxy-log-archive` job, which copied closed logs to
+`/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` (TheCloud until November 18),
+was disabled and unloaded that day. The logs it had archived were ingested
+and verified the same way and then deleted. `ops/archive_logs.py` and
+`ops/com.rever.cliproxy-log-archive.plist` are off the bundle allowlist.
+Each ship carries forward any existing copies under `~/cliproxy-live/ops`
+as retained files outside P0's checksum checks.
+
+Before every forward Mac ship, run `launchctl disable` for the archive
+label, then `launchctl bootout` if it is loaded. Stop if either operation
+fails. After the ship and P0 `ok`, remove the installed
+`~/Library/LaunchAgents/com.rever.cliproxy-log-archive.plist`. Keep the
+persistent disable and confirm it with `launchctl print-disabled`.
+Follow the [Mac ship and rollback procedure](FLEET.md#mac-archive-retirement-for-forward-ships-and-rollbacks)
+for the commands and the warning about older installers.

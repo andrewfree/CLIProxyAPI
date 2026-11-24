@@ -21,22 +21,20 @@ class BundleLaunchAgentsTest(unittest.TestCase):
         # The Innie log archive job was retired on 2026-11-23; the M5 log sweeper ingests logs into OpenObserve.
         self.assertNotIn("ops/com.rever.cliproxy-log-archive.plist", allowlist)
         self.assertNotIn("ops/archive_logs.py", allowlist)
-        for job, script, seconds, args in (
-            ("watchdog", "cliproxy_watchdog.py", 120, []),
-        ):
-            label = "com.rever.cliproxy-" + job
-            with self.subTest(label=label):
-                self.assertIn(f"ops/{label}.plist", allowlist)
-                self.assertIn(f"ops/{script}", allowlist)
-                with (ops / (label + ".plist")).open("rb") as stream:
-                    plist = plistlib.load(stream)
-                self.assertEqual(plist["Label"], label)
-                self.assertEqual(plist["ProgramArguments"],
-                                 ["/opt/homebrew/bin/python3", host["bundle_root"] + "/" + script, *args])
-                self.assertEqual(plist["WorkingDirectory"], host["instance_root"])
-                self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], host["instance_root"])
-                self.assertTrue(plist["RunAtLoad"])
-                self.assertEqual(plist["StartInterval"], seconds)
+
+        label = "com.rever.cliproxy-watchdog"
+        script = "cliproxy_watchdog.py"
+        self.assertIn(f"ops/{label}.plist", allowlist)
+        self.assertIn(f"ops/{script}", allowlist)
+        with (ops / f"{label}.plist").open("rb") as stream:
+            plist = plistlib.load(stream)
+        self.assertEqual(plist["Label"], label)
+        self.assertEqual(plist["ProgramArguments"],
+                         ["/opt/homebrew/bin/python3", host["bundle_root"] + "/" + script])
+        self.assertEqual(plist["WorkingDirectory"], host["instance_root"])
+        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], host["instance_root"])
+        self.assertTrue(plist["RunAtLoad"])
+        self.assertEqual(plist["StartInterval"], 120)
 
     @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
     def test_installer_checks_the_script_before_touching_launch_agents(self):
@@ -45,10 +43,9 @@ class BundleLaunchAgentsTest(unittest.TestCase):
             root = Path(directory)
             installer = root / "install_watchdog.sh"
             installer.write_text((ops / installer.name).read_text().replace("/bin/launchctl", "/usr/bin/false"))
-            for job, script in [("watchdog", root / "missing.py")]:
-                label = f"com.rever.cliproxy-{job}"
-                plist = {"Label": label, "ProgramArguments": [sys.executable, str(script)]}
-                (root / (label + ".plist")).write_bytes(plistlib.dumps(plist))
+            label = "com.rever.cliproxy-watchdog"
+            plist = {"Label": label, "ProgramArguments": [sys.executable, str(root / "missing.py")]}
+            (root / f"{label}.plist").write_bytes(plistlib.dumps(plist))
             result = subprocess.run(
                 ["/bin/zsh", "-f", str(installer), str(root)], env={"HOME": str(root)},
                 capture_output=True, text=True, check=False,
@@ -72,16 +69,16 @@ class BundleLaunchAgentsTest(unittest.TestCase):
             switch.write_text('#!/bin/zsh\n/bin/ln -sfn "$HOME/older" "$HOME/current"\n'
                               'exec /usr/bin/install "$@"\n')
             switch.chmod(0o700)
+            label = "com.rever.cliproxy-watchdog"
+            plist_name = f"{label}.plist"
+            script = root / "watchdog.py"
+            script.touch()
             for generation in ("newer", "older"):
                 bundle = root / generation
                 bundle.mkdir()
-                for job in ("watchdog",):
-                    label = f"com.rever.cliproxy-{job}"
-                    script = root / f"{job}.py"
-                    script.touch()
-                    plist = {"Label": label, "ProgramArguments": [sys.executable, str(script)],
-                             "RunAtLoad": True, "Generation": generation}
-                    (bundle / f"{label}.plist").write_bytes(plistlib.dumps(plist))
+                plist = {"Label": label, "ProgramArguments": [sys.executable, str(script)],
+                         "RunAtLoad": True, "Generation": generation}
+                (bundle / plist_name).write_bytes(plistlib.dumps(plist))
             current = root / "current"
             current.symlink_to(root / "newer")
 
@@ -92,8 +89,8 @@ class BundleLaunchAgentsTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result)
             self.assertEqual(current.resolve(), (root / "older").resolve())
-            for original in (root / "newer").iterdir():
-                self.assertEqual((root / "Library/LaunchAgents" / original.name).read_bytes(), original.read_bytes())
+            installed = root / "Library/LaunchAgents" / plist_name
+            self.assertEqual(installed.read_bytes(), (root / "newer" / plist_name).read_bytes())
             self.assertEqual(list(tmp.iterdir()), [])
 
     @unittest.skipUnless(sys.platform == "darwin", "needs macOS mktemp and zsh")
