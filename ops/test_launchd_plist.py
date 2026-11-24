@@ -31,35 +31,6 @@ class LaunchdPlistTest(unittest.TestCase):
             "never",
         )
 
-    def test_archive_job_runs_frequently_and_targets_innie(self) -> None:
-        path = self.ops / "com.rever.cliproxy-log-archive.plist"
-
-        with path.open("rb") as handle:
-            plist = plistlib.load(handle)
-
-        self.assertEqual(plist["Label"], "com.rever.cliproxy-log-archive")
-        self.assertTrue(plist["RunAtLoad"])
-        self.assertLessEqual(plist["StartInterval"], 600)
-        self.assertEqual(plist["WorkingDirectory"], self.host["instance_root"])
-        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], self.host["instance_root"])
-        self.assertEqual(
-            plist["ProgramArguments"],
-            ["/opt/homebrew/bin/python3", str(Path(self.host["bundle_root"]) / "archive_logs.py"),
-             "--archive-only"],
-        )
-        environment = plist["EnvironmentVariables"]
-        self.assertEqual(
-            environment["CLIPROXY_LOG_ARCHIVE_MOUNT"],
-            "/Volumes/Innie",
-        )
-        self.assertEqual(
-            environment["CLIPROXY_LOG_ARCHIVE_ROOT"],
-            "/Volumes/Innie/backups/llm-logs/cliproxy/m5/live",
-        )
-        self.assertGreaterEqual(
-            int(environment["CLIPROXY_LOG_MIN_AGE_SECONDS"]), 3_600
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

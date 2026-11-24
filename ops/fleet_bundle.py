@@ -22,7 +22,6 @@ BUNDLE_MARKER = "ops/fleet_bundle.py"
 LAUNCHER = "ops/claude_account_launcher.mjs"
 JOBS = {
     "com.rever.cliproxy-watchdog": "cliproxy_watchdog.py",
-    "com.rever.cliproxy-log-archive": "archive_logs.py",
 }
 MONITOR = "com.rever.cliproxy-fleet-monitor"
 
@@ -336,8 +335,6 @@ def verify_bundle(host, manifest, launchers):
         home = root.parent.parent
         for label, script in JOBS.items():
             arguments = ["/opt/homebrew/bin/python3", str(root / script)]
-            if script == "archive_logs.py":
-                arguments.append("--archive-only")
             try:
                 with (home / "Library/LaunchAgents" / (label + ".plist")).open("rb") as stream:
                     job = plistlib.load(stream)

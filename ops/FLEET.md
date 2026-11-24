@@ -109,7 +109,7 @@ the instance root for Compose, the host's logs, and private runtime state.
 
    ```sh
    backup=$(mktemp -d "$instance/ops/runtime/mac-bundle-cutover.XXXXXXXX")
-   for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
+   for label in com.rever.cliproxy-watchdog; do
      cp -p "$HOME/Library/LaunchAgents/$label.plist" "$backup/$label.plist"
    done
    cp -p "$HOME/.local/bin/cliproxy-codex-token" "$backup/cliproxy-codex-token"
@@ -132,8 +132,6 @@ the instance root for Compose, the host's logs, and private runtime state.
    checks the saved profile settings. It writes private redacted before and
    after snapshots and prints the five path strings. The shipped token helper
    replaces the locally edited copy so P0 can verify its checksum.
-   For later archive job reinstalls, follow
-   [Install or resume the log archive job](README.md#install-or-resume-the-log-archive-job).
 
    ```sh
    /bin/zsh ops/install_watchdog.sh "$bundle"
@@ -156,7 +154,7 @@ the instance root for Compose, the host's logs, and private runtime state.
    only that block and leaves `commit` and `backup` set for the rollback.
 
    ```sh
-   for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
+   for label in com.rever.cliproxy-watchdog; do
      launchctl print "gui/$(id -u)/$label"
    done
    (
@@ -187,11 +185,13 @@ CLIPROXY_ROOT="$PWD" /opt/homebrew/bin/python3 \
 rm -f ops/runtime/watchdog.pause
 ```
 
-**Mac rollback safety.** Before any bundle rollback, disable the log archive
-job and unload it if loaded. Stop if either operation fails. Keep the job
-disabled and unloaded when the rollback bundle's archive plist lacks
-`--archive-only` or contains `--prune`. A pre-archive-only bundle can prune
-Mac logs as soon as its old job loads.
+**Mac rollback safety.** The Innie log archive job was retired on 2026-11-23
+(logs go to OpenObserve; see [Log retention](README.md#log-retention)). A
+rollback bundle from before then still ships `com.rever.cliproxy-log-archive`
+and its `install_watchdog.sh` installs it. Before any bundle rollback, disable
+the job and unload it if loaded, and keep it disabled and unloaded afterwards:
+it would copy logs back onto Innie, and a pre-archive-only bundle can also
+prune Mac logs as soon as its old job loads. Stop if either operation fails.
 
 ```sh
 domain="gui/$(id -u)"
@@ -241,10 +241,8 @@ refuses pre-bundle commits. Keep `commit` set to the rollback SHA.
 
 After a later ship or bundle rollback, reinstall the token helper from the
 bundle when it changed and use the watchdog-only block above for watchdog
-plist changes. When the archive plist has `--archive-only` and omits
-`--prune`, use [Install the archive plist from the active bundle](README.md#install-the-archive-plist-from-the-active-bundle)
-to resume it. That block verifies the already shipped release against `commit`
-and installs from it. LaunchAgents are installed as copies. Reinstall the
+plist changes. Do not resume the retired archive job, even when the rollback
+bundle still contains its plist. LaunchAgents are installed as copies. Reinstall the
 monitor's plist with the block in
 [Install or resume on the Mac](#install-or-resume-on-the-mac) when
 `ops/com.rever.cliproxy-fleet-monitor.plist` changed. P0 reports
@@ -602,7 +600,7 @@ These changes are live but are not part of a release. Of the changes below, only
 - **Claude date timezone.** Both hosts set `claude-header-defaults.timezone: America/Los_Angeles` (Mac `upstream.claude.header-defaults.timezone`). The containers run in Asia/Shanghai, so the cloaked date was a day ahead from 08:00 to 24:00 Pacific. Config only; `fleetctl parity` compares it on both hosts.
 - **Client key rotation.** Two new CLIProxy client keys were added at the top of both hosts' key lists, and every client moved to them: the five Mac T3 Claude profiles, Will's T3 profile and `client.key`, the Codex token helper, and M1's Codex and OpenCode key files. The two old keys were removed on 2026-11-19 at the end of the 24-hour overlap (see [November 19](#operations-on-november-19-2026)). Review agents had printed them in their own transcripts. The as-run rotation scripts are in [evidence/key-rotation-20261118](evidence/key-rotation-20261118/README.md).
 - **Provider keys.** A new Z.ai Coding Plan key ("CLIProxy fleet 2026-11-18") replaced the old one on both hosts and in CodexBar, and the old key was deleted in the Z.ai dashboard. OpenCode's `zai-coding-plan` credential (used by T3's `opencode` provider) also held the old key and was missed; GLM calls through it failed with "身份验证失败" (authentication failed) until it was replaced that evening with `opencode auth import` and `opencode auth switch`, the stale credential removed with `opencode auth logout`. A later Z.ai rotation must update it too. The NVIDIA key (then Mac only) was rotated the same day: "CLIProxy M5 2026-11-18" replaced "nvidia work" in the Mac config and `~/.config/nvidia/api.env`, a test request returned 200, and the old key was deleted. The new key expires on 2027-11-18 (NVIDIA's 12-month default).
-- **Log archive.** The Mac archive moved from TheCloud, which was full, to Innie; see [the archive section](README.md).
+- **Log archive.** The Mac archive moved from TheCloud, which was full, to Innie; see [the archive section](README.md). On 2026-11-23 the archive job was retired: Mac request logs are ingested into Will's OpenObserve by the M5 log sweeper and deleted after verification ([Log retention](README.md#log-retention)).
 - **Fleet design prechecks 0(b) and 0(c)** for the [design proposal](FLEET_DESIGN.md):
   - A refused connection or an unresolvable name fails in milliseconds. A silently dropped SYN on the Claude dial path waits about 133 to 135 seconds per dial (Mac 132.7 s, Will 135.1 s), because that dial has no connect bound. Both kernels accept the container sysctl `net.ipv4.tcp_syn_retries`: at 2 a dial fails in about 7 seconds, at 3 in about 20. With three credentials and `request-retry: 3` the worst case at 2 is still about 86 seconds, above the design's 30-second target. Both Compose files now set `sysctls: net.ipv4.tcp_syn_retries: 2`. A container picks it up only when it is recreated. Both were recreated later on November 18 (see the parity cleanup below), so the setting is live on both hosts. Will's verifier (`ops/instances/will/verify_live.py`) reports `compose_sysctls_drift` if Will's Compose copy lacks the setting and `container_sysctls_drift` if the running container does. The Mac verifier has no sysctl check; read `/proc/sys/net/ipv4/tcp_syn_retries` inside the container.
   - Traffic never stayed quiet for two consecutive windows: across 80 windows of 15 seconds per host, a 1 KiB per window floor on the two-window gate would have blocked all 79 deploy checks on each host. The design's pre-deploy activity gate needs a different approach before it is used.

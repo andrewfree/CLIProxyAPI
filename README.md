@@ -157,7 +157,7 @@ This checkout keeps high-detail T3 and CLIProxy traces for diagnosing reconnects
 
 The collector writes a timestamped directory under `logs/` containing the matching T3 desktop/server traces, the CLIProxy application log tail, and up to 25 recent full proxy request logs. Pass a window from 1 to 1440 minutes when a different interval is needed.
 
-CLIProxy's delete-based size ceiling is disabled. Closed GPT, Anthropic, and other provider logs are copied to the Innie archive (TheCloud until November 18, 2026), SHA-256 verified, and only then pruned locally by the launchd archive job documented in `ops/README.md`. Authorization, API-key, token, and secret headers are masked, but request bodies and model responses are intentionally retained and may contain private project content. Trace bundles and NAS archives are private and must be reviewed before sharing.
+CLIProxy's delete-based size ceiling is disabled. Since November 23, 2026, closed GPT, Anthropic, and other provider logs are ingested into Will's OpenObserve, verified, and only then deleted locally by the M5 log sweeper documented in `ops/README.md#log-retention`. Authorization, API-key, token, and secret headers are masked, but request bodies and model responses are intentionally retained and may contain private project content. Trace bundles and NAS archives are private and must be reviewed before sharing.
 
 ### Codex failover
 

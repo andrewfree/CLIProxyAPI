@@ -5,7 +5,7 @@ project_root=${0:A:h:h}
 source_dir=${1:-"$project_root/ops"}
 launch_agents_dir="$HOME/Library/LaunchAgents"
 user_domain="gui/$(/usr/bin/id -u)"
-labels=(com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive)
+labels=(com.rever.cliproxy-watchdog)
 
 staging_dir=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/cliproxy-agents.XXXXXXXX")
 trap '/bin/rm -rf -- "$staging_dir"' EXIT
@@ -22,21 +22,6 @@ for label in "${labels[@]}"; do
         [[ "$script" != /* || ! -f "$script" ]]; then
         printf 'Cannot install %s because its ProgramArguments script is missing. See the Mac ops bundle cutover in ops/FLEET.md.\n' "$label" >&2
         exit 1
-    fi
-    if [[ "$label" == com.rever.cliproxy-log-archive ]]; then
-        if ! /usr/bin/python3 -I -c '
-import plistlib
-import sys
-
-with open(sys.argv[1], "rb") as plist:
-    arguments = plistlib.load(plist)["ProgramArguments"]
-valid = (isinstance(arguments, list) and all(isinstance(arg, str) for arg in arguments)
-         and "--archive-only" in arguments[2:] and "--prune" not in arguments[2:])
-sys.exit(not valid)
-' "$source_plist"; then
-            printf 'Cannot install %s: ProgramArguments requires --archive-only and forbids --prune.\n' "$label" >&2
-            exit 1
-        fi
     fi
 done
 
