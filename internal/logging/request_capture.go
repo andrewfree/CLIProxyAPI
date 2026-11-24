@@ -18,17 +18,14 @@ const (
 	// MaxDeferredAPIRequestBodyBytes bounds total deferred upstream request bodies per HTTP request.
 	MaxDeferredAPIRequestBodyBytes = 32 << 20 // 32 MiB
 	// MaxDeferredAPIResponseBodyBytes bounds each upstream attempt's deferred response body.
-	// Fleet change (2026-11-23): raised from upstream's 64 KiB so long streamed answers, including thinking and
-	// reasoning deltas and large tool_use inputs, are logged whole for debugging and audits.
-	MaxDeferredAPIResponseBodyBytes = 4 << 20 // 4 MiB
+	MaxDeferredAPIResponseBodyBytes = 64 << 10 // 64 KiB
 	// MaxDeferredAPIResponseHeaderBytes bounds cloned response headers per upstream attempt.
 	MaxDeferredAPIResponseHeaderBytes = 16 << 10 // 16 KiB
 	// MaxDeferredAPIResponseErrorBytes bounds each recorded upstream error string.
 	MaxDeferredAPIResponseErrorBytes = 16 << 10 // 16 KiB
 	// MaxTotalDeferredAPIResponseBodyBytes bounds total deferred upstream response payload
 	// (body chunks, headers, and error strings) across retries for a single HTTP request.
-	// Fleet change (2026-11-23): raised from upstream's 512 KiB, to keep room for retried attempts at the larger cap.
-	MaxTotalDeferredAPIResponseBodyBytes = 16 << 20 // 16 MiB
+	MaxTotalDeferredAPIResponseBodyBytes = 512 << 10 // 512 KiB
 	// MaxDeferredAPIResponseAttempts bounds the number of upstream response attempt slots retained per HTTP request.
 	MaxDeferredAPIResponseAttempts = 16
 	maxDeferredErrorsPerAttempt    = 8
