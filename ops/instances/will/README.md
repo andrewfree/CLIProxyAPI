@@ -34,10 +34,11 @@ a real `/v1/responses` request, and the affected Codex/T3 thread.
 
 ## Request logging
 
-The owner policy requires normal request logging and file logging, with a
-1,024 MB total log-directory cap. Usage aggregation stays disabled. Logs survive
-container replacement through the existing bind mount, but the size cleaner
-can remove older files. This is bounded local retention, not an archival copy.
+The owner policy requires normal request logging and file logging. The
+61,440 MiB total log-directory cap gives Will more time to retain logs while
+the disk12 archive is being prepared. Usage aggregation stays disabled.
+Logs survive container replacement through the existing bind mount. The size
+cleaner removes older files when the directory reaches the cap.
 
 For a request-log setting change, preserve the mounted config file's inode and
 permissions, then let the config watcher reload it. No container recreation is

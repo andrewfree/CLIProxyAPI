@@ -103,7 +103,7 @@ class FleetCTLTest(unittest.TestCase):
         }
         m5, will = copy.deepcopy(base), copy.deepcopy(base)
         m5.update(debug=True, discovery={"enabled": False}, **{"logs-max-total-size-mb": 0})
-        will.update(debug=False, discovery={"enabled": True}, **{"logs-max-total-size-mb": 1024})
+        will.update(debug=False, discovery={"enabled": True}, **{"logs-max-total-size-mb": 61440})
         m5["openai-compatibility"] = [
             {"name": "nvidia", "api-key-entries": [{"api-key": CANARY}],
              "models": [{"alias": alias, "name": "internal"} for alias in sorted(fleet.NVIDIA_MODELS)]}
