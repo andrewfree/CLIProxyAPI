@@ -512,20 +512,40 @@ claim request copied from Claude Code, and the 2026-11-11 Fable reset record.
 
 `config.yaml` deliberately sets `logs-max-total-size-mb: 0`, disabling CLIProxy's delete-based cleaner. Do not set a positive cap: the cleaner deletes immediately on config reload and cannot check that a log was kept elsewhere first.
 
-Since 2026-11-23, closed request logs on the Mac are ingested raw, with credentials redacted, into Will's OpenObserve (stream `cliproxy_requests_v3`) by the M5 log sweeper (LaunchAgent `com.rever.log-sweeper`, scripts in `~/.local/share/log-sweeper`, not part of this repository). It runs hourly. It takes closed `.log` and `.log.gz` files in `logs/` that have not changed for at least one hour, other than the active `main.log`. It deletes a local file only after a later run verifies that file's record counts, lengths and SHA-256 in OpenObserve and re-hashes the file. Failures show as a macOS notification and in `~/Library/Logs/log-sweeper/sweep.log`.
+The replacement for the Mac archive job is the M5 log sweeper (LaunchAgent
+`com.rever.log-sweeper`, scripts in `~/.local/share/log-sweeper`, outside this
+repository). It is designed to run hourly and ingest closed `.log` and
+`.log.gz` files in `logs/` that have been unchanged for at least one hour.
+It skips the active `main.log` and sends raw logs with credentials redacted
+to Will's OpenObserve stream `cliproxy_requests_v3`. It deletes a local file
+only after a later run verifies its record counts, lengths and SHA-256 in
+OpenObserve and re-hashes the file. Failures surface in macOS notifications
+and `~/Library/Logs/log-sweeper/sweep.log`. Before merging or shipping the
+archive retirement, verify one complete sweeper cycle through ingest,
+verification, and local deletion.
 
 Andrew decided on 2026-11-23 that Innie and Storage hold no logs. The
 `com.rever.cliproxy-log-archive` job, which copied closed logs to
 `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` (TheCloud until November 18),
-was disabled and unloaded that day. The logs it had archived were ingested
-and verified the same way and then deleted. `ops/archive_logs.py` and
+was disabled and unloaded that day. The archived logs were ingested into
+OpenObserve, verified, and then deleted. `ops/archive_logs.py` and
 `ops/com.rever.cliproxy-log-archive.plist` are off the bundle allowlist.
 Each ship carries forward any existing copies under `~/cliproxy-live/ops`
-as retained files outside P0's checksum checks.
+as retained files outside P0's checksum checks. You may remove them after a
+forward ship passes P0 and you remove the installed LaunchAgent plist.
+Confirm that the active `bundle-manifest.json` lists both paths in `retained`
+and that no ship or rollback is in progress. Remove the two bundle aliases
+below. Leave the published release directories and rollback copies in place.
+A rollback to a bundle that manages these files ships them again.
 
-Before every forward Mac ship, run `launchctl disable` for the archive
-label, then `launchctl bootout` if it is loaded. Stop if either operation
-fails. After the ship and P0 `ok`, remove the installed
+```sh
+rm -f "$HOME/cliproxy-live/ops/archive_logs.py" \
+  "$HOME/cliproxy-live/ops/com.rever.cliproxy-log-archive.plist"
+```
+
+Before every forward Mac ship or rollback, disable the archive job, unload it
+if loaded, and verify that it is absent and persistently disabled. After a
+forward ship and P0 `ok`, remove the installed
 `~/Library/LaunchAgents/com.rever.cliproxy-log-archive.plist`. Keep the
 persistent disable and confirm it with `launchctl print-disabled`.
 Follow the [Mac ship and rollback procedure](FLEET.md#mac-archive-retirement-for-forward-ships-and-rollbacks)

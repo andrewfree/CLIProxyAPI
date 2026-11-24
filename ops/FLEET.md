@@ -113,9 +113,10 @@ the instance root for Compose, the host's logs, and private runtime state.
    backup=$(mktemp -d "$instance/ops/runtime/mac-bundle-cutover.XXXXXXXX")
    cp -p "$HOME/Library/LaunchAgents/com.rever.cliproxy-watchdog.plist" "$backup/"
    cp -p "$HOME/.local/bin/cliproxy-codex-token" "$backup/cliproxy-codex-token"
-   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
-   (cd "$instance" && CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 \
-     "$bundle/cliproxy_watchdog.py" --record-compose-activation --verbose)
+   [ "${archive_disable_verified:-}" = yes ] &&
+     python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply &&
+     (cd "$instance" && CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 \
+       "$bundle/cliproxy_watchdog.py" --record-compose-activation --verbose)
    ```
 
    Keep the printed ship receipt and the value of `backup`. The activation
@@ -157,9 +158,10 @@ the instance root for Compose, the host's logs, and private runtime state.
 
    ```sh
    launchctl print "gui/$(id -u)/com.rever.cliproxy-watchdog"
-   launchctl print-disabled "gui/$(id -u)"
    (
      set -o pipefail
+     launchctl print-disabled "gui/$(id -u)" |
+       grep -Fq '"com.rever.cliproxy-log-archive" => disabled' || exit 1
      if ! token_length=$("$HOME/.local/bin/cliproxy-codex-token" | wc -c) ||
        [ "$token_length" -le 0 ]; then
        printf '%s\n' 'Installed Codex token helper failed to return a token. Stop and roll back.' >&2
@@ -189,32 +191,51 @@ rm -f ops/runtime/watchdog.pause
 ### Mac archive retirement for forward ships and rollbacks
 
 Before every forward ship or rollback on the Mac, persistently disable the
-retired Innie archive job, then unload it if it is loaded. Stop before
-shipping or rolling back if either operation fails. If the old job loads,
-it can copy logs back onto Innie, and a bundle from before archive-only
-mode can also prune Mac logs.
+retired Innie archive job, then unload it if it is loaded. Run the block in
+the same zsh session as the ship command. It sets `archive_disable_verified`
+only after both checks pass. If it prints `STOP`, fix the reported problem
+and rerun the block before continuing. If the old job loads, it can copy logs
+back onto Innie, and a bundle from before archive-only mode can also prune
+Mac logs. `launchctl error 113` identifies a missing service on the Mac.
 
 ```sh
 domain="gui/$(id -u)"
-archive_label=com.rever.cliproxy-log-archive
+archive_target="$domain/com.rever.cliproxy-log-archive"
+archive_disable_verified=
 (
-  set -e
-  launchctl disable "$domain/$archive_label"
-  if launchctl print "$domain/$archive_label" >/dev/null 2>&1; then
-    launchctl bootout "$domain/$archive_label"
+  set -o pipefail
+  launchctl disable "$archive_target" || exit 1
+  if probe=$(launchctl print "$archive_target" 2>&1); then
+    launchctl bootout "$archive_target" || exit 1
+  elif [ "$?" -ne 113 ]; then
+    print -ru2 -- "$probe"
+    exit 1
   fi
-)
+
+  if probe=$(launchctl print "$archive_target" 2>&1); then
+    print -u2 'Archive job is still loaded'
+    exit 1
+  elif [ "$?" -ne 113 ]; then
+    print -ru2 -- "$probe"
+    exit 1
+  fi
+  launchctl print-disabled "$domain" |
+    grep -Fq '"com.rever.cliproxy-log-archive" => disabled'
+) && archive_disable_verified=yes || { print -u2 'STOP: archive disable failed'; false; }
 ```
 
-After a forward ship and a P0 result of `ok` for the shipped SHA, remove
-the installed archive plist. The old monitor expects the installed plist,
-so removing it before the ship triggers `P0/com.rever.cliproxy-log-archive`.
-Keep the persistent disable and confirm that `launchctl print-disabled`
-lists `com.rever.cliproxy-log-archive` as disabled.
+After a forward ship, run the step 4 P0 check from a clean checkout at the
+shipped SHA. P0 uses that checkout's `fleetctl.py` and its `fleet_bundle.py`.
+Once P0 reports `ok` and the archive job is still disabled, remove the
+installed plist. Keep the persistent disable.
 
 ```sh
-rm -f "$HOME/Library/LaunchAgents/com.rever.cliproxy-log-archive.plist" &&
-  launchctl print-disabled "gui/$(id -u)"
+(
+  set -o pipefail
+  launchctl print-disabled "gui/$(id -u)" |
+    grep -Fq '"com.rever.cliproxy-log-archive" => disabled' &&
+    rm -f "$HOME/Library/LaunchAgents/com.rever.cliproxy-log-archive.plist"
+)
 ```
 
 **Mac rollback safety.** A bundle from before the archive job retired on
@@ -222,6 +243,19 @@ rm -f "$HOME/Library/LaunchAgents/com.rever.cliproxy-log-archive.plist" &&
 pre-2026-11-23 bundle's `install_watchdog.sh`: it installs and enables the
 archive job. Keep the archive job disabled and unloaded through rollback.
 See [Log retention](README.md#log-retention) for the current ingest path.
+
+After rolling back to an older bundle-aware SHA, run the step 4 P0 check from
+a clean checkout at that rollback SHA. Its `fleet_bundle.py` still lists the
+archive job in `JOBS`, so `P0/com.rever.cliproxy-log-archive` is expected if
+you removed the installed plist. Accept that finding, or copy only the plist
+from the rolled-back bundle. Leave the job unloaded and skip `launchctl
+enable` and `launchctl bootstrap`. The persistent disable blocks loading.
+
+```sh
+/usr/bin/install -m 0644 \
+  "$HOME/cliproxy-live/ops/com.rever.cliproxy-log-archive.plist" \
+  "$HOME/Library/LaunchAgents/com.rever.cliproxy-log-archive.plist"
+```
 
 **First cutover rollback.** Use the private `backup` from step 2. Restore the
 T3 paths, the saved watchdog plist, and the token helper. Keep the saved
@@ -256,14 +290,19 @@ Check the loaded watchdog and confirm the archive label is still disabled.
 The saved settings take effect for new T3 sessions. Use this checkout-path
 rollback for commits from before unit 2b.
 To roll back a later bundle ship, use a previously shipped bundle-aware
-commit. Set `commit` in the shell to that full SHA, complete the archive
-disable and unload above, then run
-`python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply`. Ship
-refuses pre-bundle commits. Keep `commit` set to the rollback SHA.
+commit. Set `commit` in the shell to that full SHA. Ship refuses pre-bundle
+commits. Keep `commit` set to the rollback SHA for P0.
 
-For a later forward ship, complete the archive disable and unload above
-before running the ship command. After a later ship or bundle rollback,
-reinstall the token helper from the bundle when it changed and use the
+For a later forward ship or bundle rollback, rerun the archive disable
+block above before shipping the target SHA.
+
+```sh
+[ "${archive_disable_verified:-}" = yes ] &&
+  python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+```
+
+After a later ship or bundle rollback, reinstall the token helper from the
+bundle when it changed and use the
 watchdog-only block above for watchdog plist changes. LaunchAgents are
 installed as copies. Reinstall the monitor's plist with the block in
 [Install or resume on the Mac](#install-or-resume-on-the-mac) when
