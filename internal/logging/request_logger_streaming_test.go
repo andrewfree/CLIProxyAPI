@@ -22,12 +22,32 @@ func TestStreamLogQueueWaitsForRoom(t *testing.T) {
 		}()
 
 		var drops StreamLogDrops
-		drops.Enqueue(queue, []byte("second"))
+		drops.enqueueUntil(queue, []byte("second"), nil)
 		if chunks, byteCount := drops.Counts(); len(queue) != 1 || chunks != 0 || byteCount != 0 {
 			t.Fatalf("queue length = %d, dropped %d chunks and %d bytes, want one queued chunk and no drops", len(queue), chunks, byteCount)
 		}
 		if got := string(<-queue); got != "second" {
 			t.Fatalf("queued chunk = %q, want second", got)
+		}
+	})
+}
+
+func TestStreamLogQueueEnqueueDoesNotWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		queue := make(chan []byte, 1)
+		queue <- []byte("first")
+
+		var drops StreamLogDrops
+		start := time.Now()
+		drops.Enqueue(queue, []byte("missing"))
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("wait = %s, want no wait", elapsed)
+		}
+		if chunks, byteCount := drops.Counts(); chunks != 1 || byteCount != 7 {
+			t.Fatalf("dropped %d chunks and %d bytes, want 1 chunk and 7 bytes", chunks, byteCount)
+		}
+		if got := string(<-queue); got != "first" {
+			t.Fatalf("queued chunk = %q, want first", got)
 		}
 	})
 }
@@ -39,7 +59,7 @@ func TestStreamLogQueueCountsDropsAtDeadline(t *testing.T) {
 
 		var drops StreamLogDrops
 		start := time.Now()
-		drops.Enqueue(queue, []byte("missing"))
+		drops.enqueueUntil(queue, []byte("missing"), nil)
 		if elapsed := time.Since(start); elapsed != streamLogQueueWait {
 			t.Fatalf("wait = %s, want %s", elapsed, streamLogQueueWait)
 		}
@@ -58,13 +78,13 @@ func TestStreamLogQueueWaitsOncePerStall(t *testing.T) {
 		for stall := range 2 {
 			start := time.Now()
 			for range writes {
-				drops.Enqueue(queue, []byte("missed"))
+				drops.enqueueUntil(queue, []byte("missed"), nil)
 			}
 			if elapsed := time.Since(start); elapsed != streamLogQueueWait {
 				t.Errorf("stall %d: %d writes took %s, want %s", stall+1, writes, elapsed, streamLogQueueWait)
 			}
 			<-queue
-			drops.Enqueue(queue, []byte("recovered"))
+			drops.enqueueUntil(queue, []byte("recovered"), nil)
 		}
 		if chunks, byteCount := drops.Counts(); chunks != 2*writes || byteCount != 2*writes*6 {
 			t.Fatalf("dropped %d chunks and %d bytes, want %d chunks and %d bytes", chunks, byteCount, 2*writes, 2*writes*6)

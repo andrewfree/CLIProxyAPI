@@ -263,11 +263,75 @@ func TestStreamingLogFlushWithStuckQueue(t *testing.T) {
 		if errFlush := wrapper.FlushError(); errFlush != nil {
 			t.Fatal(errFlush)
 		}
-		if elapsed := time.Since(start); elapsed != 3*time.Millisecond {
-			t.Errorf("%d frames and flush took %s, want 3ms", frames, elapsed)
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("%d frames and flush took %s, want no wait", frames, elapsed)
 		}
 		if !recorder.Flushed || recorder.Body.String() != strings.Repeat(data+"\n\n", frames) {
 			t.Fatal("flush did not deliver all client frames unchanged")
+		}
+	})
+}
+
+func TestStreamingLogWritesNeverWaitForSlowConsumer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 0)
+		streamWriter, errLog := logger.LogStreamingRequest("/v1/responses", http.MethodPost, nil, nil, "slow-stream")
+		if errLog != nil {
+			t.Fatal(errLog)
+		}
+		wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{
+			URL: "/v1/responses", Method: http.MethodPost, RequestID: "slow-stream",
+		})
+		wrapper.isStreaming = true
+		wrapper.streamWriter = streamWriter
+		wrapper.chunkChannel = make(chan []byte, 1)
+		wrapper.streamDone = make(chan struct{})
+		wrapper.WriteHeader(http.StatusOK)
+		go func() {
+			defer close(wrapper.streamDone)
+			for chunk := range wrapper.chunkChannel {
+				time.Sleep(2900 * time.Microsecond)
+				streamWriter.WriteChunkAsync(chunk)
+			}
+		}()
+
+		const writes = 1000
+		const data = "data: frame\n\n"
+		start := time.Now()
+		for range writes {
+			if _, errWrite := wrapper.WriteString(data); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("%d client writes took %s, want no wait", writes, elapsed)
+		}
+		if got := recorder.Body.String(); got != strings.Repeat(data, writes) {
+			t.Fatal("slow log consumer changed the client response")
+		}
+		chunks, byteCount := wrapper.streamLogDrops.Counts()
+		if chunks == 0 || byteCount != chunks*uint64(len(data)) {
+			t.Fatalf("dropped %d chunks and %d bytes, want nonzero drops with %d bytes each", chunks, byteCount, len(data))
+		}
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatal(errFinalize)
+		}
+
+		logs, errGlob := filepath.Glob(filepath.Join(logsDir, "*.log"))
+		if errGlob != nil || len(logs) != 1 {
+			t.Fatalf("expected one log, got %v (err=%v)", logs, errGlob)
+		}
+		raw, errRead := os.ReadFile(logs[0])
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		_, response, found := strings.Cut(string(raw), "=== RESPONSE ===\n")
+		marker := logging.StreamLogDropMarker(chunks, byteCount)
+		if !found || !strings.Contains(response, marker) {
+			t.Fatalf("response log missing drop marker %q: %q", marker, raw)
 		}
 	})
 }
@@ -353,6 +417,27 @@ func TestStreamingLogLegacyWriterReceivesOnlyResponseChunks(t *testing.T) {
 	})
 }
 
+func TestStreamingLogIgnoresNilWriter(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	wrapper := NewResponseWriterWrapper(c.Writer, &testRequestLogger{enabled: true, nilStreamWriter: true}, &RequestInfo{})
+	wrapper.Header().Set("Content-Type", "text/event-stream")
+	wrapper.WriteHeader(http.StatusOK)
+	const data = "data: client bytes\n\n"
+	if _, errWrite := wrapper.WriteString(data); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+		t.Fatal(errFinalize)
+	}
+	if wrapper.streamWriter != nil || wrapper.chunkChannel != nil || wrapper.streamDone != nil {
+		t.Fatal("nil SDK writer initialized streaming log state")
+	}
+	if got := recorder.Body.String(); got != data {
+		t.Fatalf("client body = %q, want %q", got, data)
+	}
+}
+
 type legacyStreamingLogWriter struct {
 	testStreamingLogWriter
 	chunks   chan string
@@ -368,8 +453,9 @@ func (w *legacyStreamingLogWriter) WriteChunkAsync(chunk []byte) {
 }
 
 type testRequestLogger struct {
-	enabled      bool
-	streamWriter logging.StreamingLogWriter
+	enabled         bool
+	streamWriter    logging.StreamingLogWriter
+	nilStreamWriter bool
 }
 
 func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
@@ -377,6 +463,9 @@ func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []by
 }
 
 func (l *testRequestLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error) {
+	if l.nilStreamWriter {
+		return nil, nil
+	}
 	if l.streamWriter != nil {
 		return l.streamWriter, nil
 	}

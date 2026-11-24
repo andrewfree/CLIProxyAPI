@@ -20,14 +20,18 @@ type StreamLogDrops struct {
 	chunks atomic.Uint64
 	bytes  atomic.Uint64
 
-	mu       sync.Mutex // serializes enqueues and guards the timer and dropping state
+	mu       sync.Mutex // serializes sink enqueues and guards the timer and dropping state
 	timer    *time.Timer
 	dropping bool
 }
 
-// Enqueue sends an owned chunk to the spooler or counts it if the queue stays full.
+// Enqueue sends an owned chunk to the spooler without waiting or counts it if the queue is full.
 func (d *StreamLogDrops) Enqueue(queue chan<- []byte, chunk []byte) {
-	d.enqueueUntil(queue, chunk, nil)
+	select {
+	case queue <- chunk:
+	default:
+		d.Add(1, uint64(len(chunk)))
+	}
 }
 
 func (d *StreamLogDrops) enqueueUntil(queue chan<- []byte, chunk []byte, stopWaiting <-chan struct{}) {
@@ -56,7 +60,14 @@ func (d *StreamLogDrops) enqueueUntil(queue chan<- []byte, chunk []byte, stopWai
 	} else {
 		d.timer.Reset(streamLogQueueWait)
 	}
-	defer d.timer.Stop()
+	defer func() {
+		if !d.timer.Stop() {
+			select {
+			case <-d.timer.C:
+			default:
+			}
+		}
+	}()
 	select {
 	case queue <- chunk:
 		return

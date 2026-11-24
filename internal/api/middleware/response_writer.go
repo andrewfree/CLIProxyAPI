@@ -234,7 +234,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 					w.currentCapturedRequestBody(),
 					w.requestInfo.RequestID,
 				)
-				if err == nil {
+				if err == nil && streamWriter != nil {
 					chunkChan := make(chan []byte, logging.StreamLogQueueDepth)
 					doneChan := make(chan struct{})
 					drainChan := make(chan struct{})
