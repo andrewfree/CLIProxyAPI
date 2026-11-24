@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Archive Will's closed request logs during the copy-only pilot."""
+"""Archive Will's closed request logs and expire copies in continuous mode."""
 
 import base64
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 import ctypes
@@ -50,6 +50,9 @@ HEARTBEAT_INTERVAL = 5
 STALE_AFTER = 75
 UNCONFIRMED_AGE = 60
 PILOT_DURATION = 24 * 60 * 60
+RETENTION_AGE_NS = PILOT_DURATION * 10**9
+RETENTION_INTERVAL = 5 * 60
+RETENTION_STEP_INTERVAL = 0.25
 ADMISSION_WINDOW = PILOT_DURATION - 5 * 60
 PUBLICATION_WINDOW = PILOT_DURATION - 60
 WATCHDOG_INTERVAL = 30
@@ -62,6 +65,8 @@ REQUEST_NAME = re.compile(
     rb"-(?:[^/\\]{1,8}|[0-9]{1,20})\.log\Z"
 )
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+EXPIRED_PREFIX = ".expired-"
+ARCHIVE_MEMBERS = ("confirmation.json", "body.zst", "manifest.json")
 CLOSE_WRITE = 0x00000008
 MOVED_TO = 0x00000080
 CREATE = 0x00000100
@@ -359,6 +364,23 @@ class CaptureResult:
     finished_at: float
 
 
+@dataclass
+class PruneCursor:
+    pending: deque = field(default_factory=lambda: deque([()]))
+    current: tuple | None = None
+    entries: list = field(default_factory=list)
+    complete: bool = False
+
+
+@dataclass(frozen=True)
+class PruneResult:
+    complete: bool = False
+    pruned: int = 0
+    compressed_bytes: int = 0
+    failures: int = 0
+    paused: str | None = None
+
+
 class Archive:
     def __init__(self, mount, codec, components, floor=MIN_FREE, resume=RESUME_FREE):
         self.mount = mount
@@ -407,6 +429,111 @@ class Archive:
                     with directory(entry.name, parent, device=os.fstat(parent).st_dev) as child:
                         total += self.count_staging(child, depth + 1)
         return total
+
+    def prune(self, cursor, now_ns):
+        try:
+            with self.mount.open() as (mount_fd, _free):
+                with self.destination(mount_fd, self.components) as root:
+                    return self.prune_step(root, cursor, now_ns)
+        except Paused as error:
+            return PruneResult(cursor.complete, paused=str(error))
+        except OSError:
+            return PruneResult(cursor.complete, paused="archive_unavailable")
+
+    def prune_step(self, root, cursor, now_ns):
+        if cursor.complete:
+            return PruneResult(True)
+        if cursor.current is None:
+            if not cursor.pending:
+                cursor.complete = True
+                return PruneResult(True)
+            current = cursor.pending.popleft()
+            cursor.current = current
+            try:
+                with directory_tree(root, current) as parent:
+                    with os.scandir(parent) as entries:
+                        names = [entry.name for entry in entries
+                                 if entry.is_dir(follow_symlinks=False)]
+                if len(current) < 4:
+                    pattern = r"[0-9]{4}" if not current else r"[0-9]{2}"
+                    cutoff = tuple(hour_parts(now_ns - RETENTION_AGE_NS))
+                    cursor.pending.extend(
+                        current + (name,) for name in sorted(names)
+                        if re.fullmatch(pattern, name)
+                        and current + (name,) <= cutoff[:len(current) + 1]
+                    )
+                    cursor.current = None
+                else:
+                    cursor.entries = [
+                        name for name in names
+                        if HEX_SHA256.fullmatch(name.removeprefix(EXPIRED_PREFIX))
+                    ]
+                    if not cursor.entries:
+                        cursor.current = None
+            except Paused:
+                raise
+            except OSError:
+                cursor.current = None
+                return PruneResult(failures=1)
+            return PruneResult()
+
+        current = cursor.current
+        name = cursor.entries.pop()
+        if not cursor.entries:
+            cursor.current = None
+        try:
+            with directory_tree(root, current) as parent:
+                with directory(name, parent, device=os.fstat(parent).st_dev) as entry_fd:
+                    return self.prune_entry(parent, entry_fd, current, name, now_ns)
+        except FileNotFoundError:
+            return PruneResult()
+        except Paused:
+            raise
+        except (OSError, IntegrityError, OverflowError, ValueError):
+            return PruneResult(failures=1)
+
+    def prune_entry(self, parent, entry_fd, current, name, now_ns):
+        with os.scandir(entry_fd) as scan:
+            entries = list(scan)
+            if any(not stat.S_ISREG(entry.stat(follow_symlinks=False).st_mode)
+                   for entry in entries):
+                return PruneResult()
+        names = {entry.name for entry in entries}
+        archive_id = name.removeprefix(EXPIRED_PREFIX)
+        retiring = name != archive_id
+        if not names:
+            if retiring:
+                os.rmdir(name, dir_fd=parent)
+                os.fsync(parent)
+                return PruneResult(pruned=1)
+            return PruneResult()
+        if not names.issubset(ARCHIVE_MEMBERS) or "manifest.json" not in names:
+            return PruneResult()
+
+        manifest = read_json(entry_fd, "manifest.json")
+        self.validate_manifest(manifest)
+        if (manifest["archive_id"] != archive_id
+                or tuple(hour_parts(manifest["mtime_unix_ns"])) != current):
+            raise IntegrityError
+        if manifest["mtime_unix_ns"] > now_ns - RETENTION_AGE_NS:
+            return PruneResult()
+        if not retiring:
+            if "body.zst" not in names:
+                raise IntegrityError
+            self.verify(entry_fd, manifest)
+            retired = EXPIRED_PREFIX + archive_id
+            publish(parent, name, retired)
+            os.fsync(parent)
+            name = retired
+        for known in ARCHIVE_MEMBERS[:-1]:
+            if known in names:
+                os.unlink(known, dir_fd=entry_fd)
+        os.fsync(entry_fd)
+        os.unlink("manifest.json", dir_fd=entry_fd)
+        os.fsync(entry_fd)
+        os.rmdir(name, dir_fd=parent)
+        os.fsync(parent)
+        return PruneResult(pruned=1, compressed_bytes=manifest["compressed_bytes"])
 
     @staticmethod
     def append_history(meta_fd, row):
@@ -493,20 +620,32 @@ class Archive:
             # The partial directory stays private and can be counted next run.
             pass
 
-    def verify(self, archive_fd, manifest):
+    @staticmethod
+    def validate_manifest(manifest):
         try:
             original = manifest["original_bytes"], manifest["original_sha256"]
             stored = manifest["compressed_bytes"], manifest["compressed_sha256"]
+            identity = manifest["source_identity"]
+            basename = base64.b64decode(manifest["source_basename_b64"], validate=True)
             if (manifest["version"] != 1 or manifest["codec"] != "zstd"
                     or manifest["compression_level"] != 3
                     or manifest.get("completion", manifest.get("completion_evidence"))
                     not in ("close_write", "unconfirmed")
                     or any(type(size) is not int or size < 0 or not HEX_SHA256.fullmatch(digest)
                            for size, digest in (original, stored))
+                    or any(type(identity[key]) is not int for key in ("device", "inode", "ctime_unix_ns"))
+                    or type(manifest["mtime_unix_ns"]) is not int
+                    or base64.b64encode(basename).decode("ascii") != manifest["source_basename_b64"]
+                    or not request_name(basename)
                     or manifest["archive_id"] != archive_key(manifest)):
                 raise IntegrityError
-        except (KeyError, ValueError, TypeError):
+            hour_parts(manifest["mtime_unix_ns"])
+        except (KeyError, ValueError, TypeError, UnicodeError, OverflowError, OSError):
             raise IntegrityError from None
+        return original, stored
+
+    def verify(self, archive_fd, manifest):
+        original, stored = self.validate_manifest(manifest)
         with read_file(archive_fd, "body.zst") as compressed:
             if transfer(compressed, limit=stored[0]) != stored:
                 raise IntegrityError
@@ -586,10 +725,11 @@ class DiskWorker:
 
 class Pilot:
     def __init__(self, archive, max_fds=MAX_FDS, max_bytes=MAX_BYTES, *,
-                 admission_cutoff=None, publication_deadline=None):
+                 admission_cutoff=None, publication_deadline=None, continuous=False):
         self.archive = archive
         self.max_fds = max_fds
         self.max_bytes = max_bytes
+        self.continuous = continuous
         self.started_at = time.time()
         start = time.monotonic()
         self.started_at_monotonic = start
@@ -597,8 +737,12 @@ class Pilot:
                                  if admission_cutoff is None else admission_cutoff)
         self.publication_deadline = (start + PUBLICATION_WINDOW
                                      if publication_deadline is None else publication_deadline)
-        self.admission_cutoff_unix = self.started_at + (self.admission_cutoff - start)
-        self.publication_deadline_unix = self.started_at + (self.publication_deadline - start)
+        if continuous:
+            self.admission_cutoff = self.publication_deadline = math.inf
+        self.admission_cutoff_unix = (None if continuous else
+                                      self.started_at + (self.admission_cutoff - start))
+        self.publication_deadline_unix = (None if continuous else
+                                          self.started_at + (self.publication_deadline - start))
         self.source_fd = None
         self.watch = None
         self.source_unavailable = False
@@ -616,12 +760,15 @@ class Pilot:
         self.watch_gaps = self.queue_overflows = self.ambiguous_closes = 0
         self.abandoned_staging = None
         self.unknown_miss_bytes = self.stored_bytes = 0
+        self.retention_cursor = PruneCursor()
+        self.retention_due = 0
         self.counts = {
             label: {"files": 0, "bytes": 0}
             for label in ("completed", "archived", "unconfirmed", "archived_unconfirmed",
                           "confirmed_later",
                           "recovered_after_unlink", "missed", "integrity_failures",
-                          "archive_failures", "abandoned_pending")
+                          "archive_failures", "abandoned_pending", "expired_sources",
+                          "pruned", "prune_failures")
         }
 
     def count(self, label, size=0):
@@ -749,7 +896,15 @@ class Pilot:
         if time.monotonic() >= self.admission_cutoff:
             self.release(record)
             return
+        size = record.info.st_size
         known = self.records.get(record.key)
+        if self.continuous and record.info.st_mtime_ns <= time.time_ns() - RETENTION_AGE_NS:
+            self.release(record)
+            if known is None and len(self.records) < MAX_RECORDS:
+                record.pending = False
+                self.records[record.key] = record
+                self.count("expired_sources", size)
+            return
         if known is not None:
             if known.evidence == "unconfirmed" and record.evidence == "close_write":
                 record.previous_unconfirmed = known
@@ -759,7 +914,6 @@ class Pilot:
             else:
                 self.release(record)
                 return
-        size = record.info.st_size
         if record.evidence == "close_write":
             self.count("completed", size)
         else:
@@ -898,7 +1052,10 @@ class Pilot:
         )
 
     def allowed(self, record):
-        return not record.cancelled.is_set() and time.monotonic() < self.publication_deadline
+        return (not record.cancelled.is_set()
+                and time.monotonic() < self.publication_deadline
+                and (not self.continuous
+                     or record.info.st_mtime_ns > time.time_ns() - RETENTION_AGE_NS))
 
     def capture(self, record, fd):
         try:
@@ -994,15 +1151,30 @@ class Pilot:
             **{key: value.copy() for key, value in self.counts.items()},
         }
 
+    def prune_result(self, result, now):
+        if result.paused is not None:
+            self.paused = result.paused
+        if result.pruned:
+            self.count("pruned", result.compressed_bytes)
+        if result.failures:
+            self.counts["prune_failures"]["files"] += result.failures
+        if result.paused is not None:
+            self.retention_due = now + HEARTBEAT_INTERVAL
+        elif result.complete:
+            self.retention_cursor = PruneCursor()
+            self.retention_due = now + RETENTION_INTERVAL
+        else:
+            self.retention_due = now + RETENTION_STEP_INTERVAL
+
     def unfinished_work(self, job, record):
-        # A pending capture already accounts for its worker job. A probe or
-        # a detached capture is separate work.
+        # A pending capture already accounts for its worker job. A probe,
+        # retention step, or detached capture is separate work.
         return self.pending_files + (job is not None and (record is None or not record.pending))
 
     def run(self, source, status_fd, stop):
         scan_due = heartbeat_due = probe_due = history_due = 0
         worker = DiskWorker()
-        job = record = None
+        job = record = job_kind = None
         history_requested = False
         shutdown_deadline = self.publication_deadline
         try:
@@ -1010,15 +1182,17 @@ class Pilot:
                 now = time.monotonic()
                 settled = job is not None and job.done() and job.completed_at < shutdown_deadline
                 if settled:
-                    if record is not None:
+                    if job_kind == "capture":
                         self.capture_result(record, job, now)
+                    elif job_kind == "prune":
+                        self.prune_result(job.result(), now)
                     else:
                         self.paused, abandoned, wrote_history = job.result()
                         if abandoned is not None:
                             self.abandoned_staging = abandoned
                         if history_requested and wrote_history:
                             history_due = now + HISTORY_INTERVAL
-                    job = record = None
+                    job = record = job_kind = None
                     now = time.monotonic()
 
                 if now < shutdown_deadline and stop() and self.phase != "interrupted":
@@ -1063,10 +1237,14 @@ class Pilot:
                         was_paused = self.paused not in (None, "checking")
                         job = worker.submit(self.archive.probe, was_paused,
                                             self.abandoned_staging is None, row)
+                        job_kind = "probe"
                         probe_due = now + HEARTBEAT_INTERVAL
-                    elif self.paused is None:
-                        if record := self.next_record(now):
-                            job = worker.submit(self.capture, record, os.dup(record.fd))
+                    elif self.continuous and now >= self.retention_due:
+                        job = worker.submit(self.archive.prune, self.retention_cursor, time.time_ns())
+                        job_kind = "prune"
+                    elif self.paused is None and (record := self.next_record(now)):
+                        job = worker.submit(self.capture, record, os.dup(record.fd))
+                        job_kind = "capture"
                 if now >= heartbeat_due:
                     replace_json(status_fd, STATUS_NAME, self.status(now))
                     heartbeat_due = now + HEARTBEAT_INTERVAL
@@ -1090,9 +1268,9 @@ class Pilot:
 
 
 ALERTS = {
-    "inactive": "pilot service exited before the admission cutoff",
-    "failed": "pilot service ended with an unsuccessful result or exit status",
-    "not_started": "pilot service has not started",
+    "inactive": "mover service exited before its expected completion",
+    "failed": "mover service ended with an unsuccessful result or exit status",
+    "not_started": "mover service has not started",
     "heartbeat": "heartbeat is missing or stale",
     "mount": "expected disk12 mount is unavailable",
     "manager": "systemd mover status is unavailable",
@@ -1128,7 +1306,7 @@ def manager_monotonic_seconds(value):
     return microseconds / 1_000_000 if microseconds >= 0 else None
 
 
-def watchdog_alerts(properties, heartbeat, now):
+def watchdog_alerts(properties, heartbeat, now, continuous=False):
     active = properties.get("ActiveState")
     if not active:
         return {"manager"}
@@ -1158,13 +1336,14 @@ def watchdog_alerts(properties, heartbeat, now):
     stopped = manager_monotonic_seconds(properties.get("ExecMainExitTimestampMonotonic"))
     if stopped is None or stopped < started:
         return alerts | {"manager"}
-    if stopped - started < ADMISSION_WINDOW:
+    if continuous or stopped - started < ADMISSION_WINDOW:
         alerts.add("inactive")
     return alerts
 
 
-def watchdog_poll(mount, properties, heartbeat, now, previous, alert=journal_alert):
-    alerts = watchdog_alerts(properties, heartbeat, now)
+def watchdog_poll(mount, properties, heartbeat, now, previous, alert=journal_alert,
+                  continuous=False):
+    alerts = watchdog_alerts(properties, heartbeat, now, continuous)
     try:
         with mount.open():
             pass
@@ -1177,7 +1356,7 @@ def watchdog_poll(mount, properties, heartbeat, now, previous, alert=journal_ale
     return alerts
 
 
-def watchdog_loop(mount, pilot_unit, stopping):
+def watchdog_loop(mount, pilot_unit, stopping, continuous=False):
     previous = set()
     while not stopping.is_set():
         properties = manager_properties(pilot_unit)
@@ -1186,7 +1365,11 @@ def watchdog_loop(mount, pilot_unit, stopping):
                 heartbeat = read_json(fd, STATUS_NAME).get("heartbeat_monotonic")
         except (OSError, IntegrityError):
             heartbeat = None
-        previous = watchdog_poll(mount, properties, heartbeat, time.monotonic(), previous)
+        if continuous:
+            previous = watchdog_poll(mount, properties, heartbeat, time.monotonic(), previous,
+                                     continuous=True)
+        else:
+            previous = watchdog_poll(mount, properties, heartbeat, time.monotonic(), previous)
         stopping.wait(WATCHDOG_INTERVAL)
 
 
@@ -1205,10 +1388,13 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     mount = Disk12(os.environ.get("WILL_LOG_MOVER_DISK_UUID", ""))
-    if sys.argv[1:] == ["--watchdog"]:
-        watchdog_loop(mount, f"cliproxy-will-log-mover@{archive_root}.service", stopping)
+    args = sys.argv[1:]
+    continuous = "--continuous" in args
+    if args in (["--watchdog"], ["--watchdog", "--continuous"]):
+        prefix = "cliproxy-will-log-mover-continuous" if continuous else "cliproxy-will-log-mover"
+        watchdog_loop(mount, f"{prefix}@{archive_root}.service", stopping, continuous)
         return 0
-    if sys.argv[1:] or zstd is None:
+    if args not in ([], ["--continuous"]) or zstd is None:
         print("<3>Will CLIProxy log mover: requires in-process compression.zstd", file=sys.stderr)
         return 2
 
@@ -1218,7 +1404,8 @@ def main():
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             archive = Archive(mount, ZstdCodec(), (archive_root, "will", "requests"))
-            return Pilot(archive).run(INSTANCE_PATH / "logs", fd, stopping.is_set)
+            return Pilot(archive, continuous=continuous).run(
+                INSTANCE_PATH / "logs", fd, stopping.is_set)
         finally:
             os.close(lock)
 

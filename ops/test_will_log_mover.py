@@ -136,6 +136,33 @@ class LogMoverTests(unittest.TestCase):
         old = time.time() - mover.UNCONFIRMED_AGE - 5
         os.utime(path, (old, old))
 
+    def publish_at_age(self, age_ns, name=NORMAL):
+        now_ns = time.time_ns()
+        mtime_ns = now_ns - age_ns
+        path = self.source_path(name)
+        path.write_bytes(SYNTHETIC)
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+        fd = os.open(path, mover.READ_FLAGS)
+        try:
+            record = mover.Record(name, os.fstat(fd), "close_write", time.monotonic())
+            result = self.archive.capture(record, fd, lambda: True)
+        finally:
+            os.close(fd)
+        archived = self.destination.joinpath(*mover.hour_parts(mtime_ns), result.archive_id)
+        self.assertTrue(archived.is_dir())
+        return archived, now_ns
+
+    def prune_all(self, now_ns, cursor=None):
+        cursor = mover.PruneCursor() if cursor is None else cursor
+        results = []
+        for _ in range(1000):
+            result = self.archive.prune(cursor, now_ns)
+            self.assertIsNone(result.paused)
+            results.append(result)
+            if result.complete:
+                return results
+        self.fail("synthetic retention pass did not finish")
+
     def test_close_captures_and_verifies_content_once(self):
         with self.source_path().open("wb") as writer:
             writer.write(SYNTHETIC)
@@ -617,6 +644,176 @@ class LogMoverTests(unittest.TestCase):
             self.assertFalse(ERROR in data or SYNTHETIC[:30] in data)
         self.assertEqual(len(history.read_bytes().splitlines()), 2)
 
+    def test_prune_uses_source_mtime_and_exact_age_boundary(self):
+        boundary, _ = self.publish_at_age(mover.RETENTION_AGE_NS, ERROR)
+        fresh, now_ns = self.publish_at_age(mover.RETENTION_AGE_NS - 1)
+
+        results = self.prune_all(now_ns)
+
+        self.assertFalse(boundary.exists())
+        self.assertTrue((fresh / "body.zst").is_file())
+        self.assertTrue(self.source_path().is_file())
+        self.assertTrue(self.source_path(ERROR).is_file())
+        self.assertEqual(sum(result.pruned for result in results), 1)
+        self.assertGreater(sum(result.compressed_bytes for result in results), 0)
+
+    def test_prune_handles_empty_hours_and_one_entry_per_worker_step(self):
+        first, _ = self.publish_at_age(mover.RETENTION_AGE_NS, NORMAL)
+        second, now_ns = self.publish_at_age(mover.RETENTION_AGE_NS, ERROR)
+        empty = second.parent.parent / ("00" if second.parent.name != "00" else "01")
+        empty.mkdir()
+        cursor = mover.PruneCursor()
+        pruned = []
+        for _ in range(1000):
+            result = self.archive.prune(cursor, now_ns)
+            self.assertIsNone(result.paused)
+            self.assertLessEqual(result.pruned, 1)
+            if result.pruned:
+                pruned.append(result)
+                break
+            self.assertFalse(result.complete)
+        self.assertEqual(len(pruned), 1)
+        self.assertEqual(first.exists() + second.exists(), 1)
+        self.prune_all(now_ns, cursor)
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertTrue(empty.is_dir())
+
+    def test_prune_continues_below_capture_space_floor(self):
+        archived, now_ns = self.publish_at_age(mover.RETENTION_AGE_NS)
+        self.mount.free = self.archive.floor - 1
+
+        self.prune_all(now_ns)
+
+        self.assertFalse(archived.exists())
+        record = self.offer(ERROR)
+        self.capture(record)
+        self.assertEqual(self.pilot.paused, "low_space")
+        self.assertEqual(self.directories(), [])
+        self.assertTrue(self.source_path(ERROR).is_file())
+
+    def test_prune_preserves_foreign_files_symlinks_staging_and_benchmarks(self):
+        foreign_entry, _ = self.publish_at_age(mover.RETENTION_AGE_NS, NORMAL)
+        (foreign_entry / "foreign.txt").write_bytes(b"do not delete")
+        prunable, _ = self.publish_at_age(mover.RETENTION_AGE_NS, ERROR)
+        linked, now_ns = self.publish_at_age(mover.RETENTION_AGE_NS, NORMAL)
+        external = self.root / "external"
+        external.write_bytes(b"external data")
+        (linked / "body.zst").unlink()
+        (linked / "body.zst").symlink_to(external)
+        hour = prunable.parent
+        stage = hour / ".pending-old"
+        stage.mkdir()
+        (stage / "body.zst").write_bytes(b"partial stage")
+        foreign_directory = hour / "foreign"
+        foreign_directory.mkdir()
+        unmarked_empty = hour / ("a" * 64)
+        unmarked_empty.mkdir()
+        benchmark = self.destination / "benchmark-archive"
+        benchmark.mkdir()
+        (benchmark / "manifest.json").write_bytes(b"benchmark")
+        link = hour / ("f" * 64)
+        link.symlink_to(prunable, target_is_directory=True)
+
+        self.prune_all(now_ns)
+
+        self.assertFalse(prunable.exists())
+        self.assertTrue(os.path.lexists(link))
+        self.assertEqual((foreign_entry / "foreign.txt").read_bytes(), b"do not delete")
+        self.assertTrue((foreign_entry / "manifest.json").is_file())
+        self.assertTrue((linked / "manifest.json").is_file())
+        self.assertEqual(external.read_bytes(), b"external data")
+        self.assertEqual((stage / "body.zst").read_bytes(), b"partial stage")
+        self.assertTrue(foreign_directory.is_dir())
+        self.assertTrue(unmarked_empty.is_dir())
+        self.assertEqual((benchmark / "manifest.json").read_bytes(), b"benchmark")
+
+    def test_prune_restarts_after_interrupted_deletion(self):
+        for interrupted in ("body_unlink", "directory_unlink"):
+            with self.subTest(interrupted=interrupted):
+                name = NORMAL if interrupted == "body_unlink" else ERROR
+                archived, now_ns = self.publish_at_age(mover.RETENTION_AGE_NS, name)
+                real_unlink, real_rmdir = os.unlink, os.rmdir
+
+                def unlink(name, *args, **kwargs):
+                    real_unlink(name, *args, **kwargs)
+                    if name == "body.zst":
+                        raise OSError(errno.EIO, "synthetic interruption")
+
+                def rmdir(name, *args, **kwargs):
+                    raise OSError(errno.EIO, "synthetic interruption")
+
+                replacement = unlink if interrupted == "body_unlink" else rmdir
+                with patch.object(mover.os, "unlink" if interrupted == "body_unlink" else "rmdir",
+                                  side_effect=replacement):
+                    results = self.prune_all(now_ns)
+                self.assertEqual(sum(result.failures for result in results), 1)
+                retiring = archived.with_name(mover.EXPIRED_PREFIX + archived.name)
+                self.assertTrue(retiring.is_dir())
+                self.prune_all(now_ns)
+                self.assertFalse(archived.exists())
+                self.assertFalse(retiring.exists())
+                self.assertTrue(self.source_path(name).is_file())
+
+    def test_pruned_source_is_not_recaptured(self):
+        archived, now_ns = self.publish_at_age(mover.RETENTION_AGE_NS)
+        self.prune_all(now_ns)
+        self.assertFalse(archived.exists())
+
+        self.pilot = self.start_pilot(continuous=True)
+        self.scan()
+        self.scan()
+
+        self.assertIsNone(self.pilot.next_record(time.monotonic()))
+        self.assertEqual(self.pilot.counts["expired_sources"],
+                         {"files": 1, "bytes": len(SYNTHETIC)})
+        self.assertEqual(self.pilot.counts["archived"]["files"], 0)
+        self.assertTrue(self.source_path().is_file())
+
+    def test_pilot_keeps_copying_aged_sources_without_expiry(self):
+        source = self.source_path()
+        source.write_bytes(SYNTHETIC)
+        old = time.time_ns() - mover.RETENTION_AGE_NS - 10**9
+        os.utime(source, ns=(old, old))
+        duration = self.pilot.admission_cutoff - self.pilot.started_at_monotonic
+
+        self.scan()
+        self.capture(self.pilot.next_record(time.monotonic()))
+
+        self.assertEqual(len(self.directories()), 1)
+        self.assertAlmostEqual(duration, mover.ADMISSION_WINDOW)
+        self.assertEqual(self.pilot.counts["archived"]["files"], 1)
+        self.assertEqual(self.pilot.counts["pruned"]["files"], 0)
+
+    def test_prune_status_counts_and_continuous_contract(self):
+        archived, now_ns = self.publish_at_age(mover.RETENTION_AGE_NS)
+        compressed_bytes = json.loads((archived / "manifest.json").read_bytes())["compressed_bytes"]
+        results = self.prune_all(now_ns, self.pilot.retention_cursor)
+        for result in results:
+            self.pilot.prune_result(result, 100)
+        status = self.pilot.status(time.monotonic())
+        self.assertEqual(status["pruned"], {"files": 1, "bytes": compressed_bytes})
+        self.assertEqual(self.pilot.retention_due, 100 + mover.RETENTION_INTERVAL)
+
+        next_archive, next_now = self.publish_at_age(mover.RETENTION_AGE_NS, ERROR)
+        for result in self.prune_all(next_now, self.pilot.retention_cursor):
+            self.pilot.prune_result(result, 100 + mover.RETENTION_INTERVAL)
+        self.assertFalse(next_archive.exists())
+        self.assertEqual(self.pilot.counts["pruned"]["files"], 2)
+
+        continuous = self.start_pilot(continuous=True)
+        self.assertEqual(continuous.admission_cutoff, float("inf"))
+        self.assertEqual(continuous.publication_deadline, float("inf"))
+        status = continuous.status(time.monotonic())
+        self.assertIsNone(status["admission_cutoff_unix"])
+        self.assertIsNone(status["publication_deadline_unix"])
+        properties = {
+            "ActiveState": "inactive", "Result": "success", "ExecMainStatus": "0",
+            "ActiveEnterTimestampMonotonic": "1000000",
+            "ExecMainExitTimestampMonotonic": "2000000",
+        }
+        self.assertIn("inactive", mover.watchdog_alerts(properties, None, 3, continuous=True))
+
     def test_watchdog_uses_manager_exit_timestamps_and_result(self):
         started = 1_234_567
         cutoff = started + mover.ADMISSION_WINDOW
@@ -692,6 +889,15 @@ class LogMoverTests(unittest.TestCase):
         self.capture(self.offer())
         self.assertEqual(len(self.directories()), 1)
         self.assertEqual(self.pilot.counts["archived"]["bytes"], len(SYNTHETIC))
+
+    @unittest.skipUnless(mover.zstd is not None, "in-process zstd requires Python 3.14")
+    def test_production_codec_verifies_before_pruning(self):
+        self.archive.codec = mover.ZstdCodec()
+        archived, now_ns = self.publish_at_age(mover.RETENTION_AGE_NS)
+        results = self.prune_all(now_ns)
+        self.assertFalse(archived.exists())
+        self.assertEqual(sum(result.pruned for result in results), 1)
+        self.assertTrue(self.source_path().is_file())
 
 
 @unittest.skipUnless(shutil.which("systemd-analyze") and Path("/usr/bin/python3.14").exists(),

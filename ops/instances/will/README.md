@@ -46,20 +46,38 @@ needed. Confirm the container start time is unchanged and a new successful
 requests are skipped by the request logger. This check exercises logging
 without a model generation and does not qualify a provider or client update.
 
-## Copy-only request-log pilot
+## Copy-only request-log mover and retention
 
 Before activation, obtain Andrew's explicit acceptance of **unencrypted pilot
 archives on disk12** and the `promote fleet <id>` approval for the reviewed
-installation. Keep `logs-max-total-size-mb: 1024` throughout. The mover writes
-verified zstd level 3 copies and has read-only access to the source. A close
-confirms that the writer released the same observed inode. It can also result
-from an interrupted writer. Startup files, ambiguous closes and files found
-after a watch gap can be copied after 60 seconds without an mtime change.
-Those copies are marked `unconfirmed` in their manifests and reported
-separately. A later close adds a `confirmation.json` only when a fresh read
-matches the archived size, mtime and SHA-256. Changed bytes receive a new
+installation. Keep the approved temporary live source cap during qualification.
+[PR #40](https://github.com/andrewfree/CLIProxyAPI/pull/40) records that cap.
+The mover writes verified zstd level 3 copies and has read-only access
+to the source. A close confirms that the writer released the same observed
+inode. It can also result from an interrupted writer. Startup files, ambiguous
+closes and files found after a watch gap can be copied after 60 seconds without
+an mtime change. Those copies are marked `unconfirmed` in their manifests and
+reported separately. A later close adds a `confirmation.json` only when a fresh
+read matches the archived size, mtime and SHA-256. Changed bytes receive a new
 archive and the earlier copy keeps its original evidence. Move-in events do
 not establish completion.
+
+In continuous mode, a published entry expires 24 hours after its source mtime.
+The serial disk worker checks hour directories at or before the cutoff. It
+alternates bounded expiry work with capture and repeats the scan five minutes
+after each pass. The worker verifies the manifest and compressed body, then
+renames the directory to `.expired-<archive-id>` before removing its known
+files. The rename lets the next run resume an interrupted deletion. The
+continuous mover skips expired source files still present in the live log
+directory. The bounded pilot only captures and verifies copies.
+
+Pruning continues while capture is paused below the 200 GiB free-space floor;
+the 200 GiB stop and 250 GiB resume hysteresis still govern capture and its
+space reserve. Aggregate status and minute history record `pruned.files`,
+`pruned.bytes` (compressed bytes), `prune_failures.files`, and
+`expired_sources`. Starting a version with retention enabled can immediately
+delete already-expired archives. The installation or restart therefore needs
+an exact reviewed live plan; source changes alone do not authorize it.
 
 The Samba `[will]` share exports `/srv/share` and maps its authorized identity
 to `andrew`, which can read private files. Obtain separate approval for the
@@ -82,6 +100,8 @@ by root.
 ssh will.local 'umask 077 && mkdir -p /home/andrew/.cache/cliproxy-will-log-mover-upload'
 scp ops/will_log_mover.py ops/instances/will/cliproxy-will-log-mover@.service \
   ops/instances/will/cliproxy-will-log-mover-watchdog@.service \
+  ops/instances/will/cliproxy-will-log-mover-continuous@.service \
+  ops/instances/will/cliproxy-will-log-mover-watchdog-continuous@.service \
   will.local:/home/andrew/.cache/cliproxy-will-log-mover-upload/
 ssh will.local
 ```
@@ -100,6 +120,8 @@ archive_root=cliproxy-request-archive
 archive_dir="$mountpoint/$archive_root/will/requests"
 pilot_service="cliproxy-will-log-mover@${archive_root}.service"
 pilot_watchdog="cliproxy-will-log-mover-watchdog@${archive_root}.service"
+continuous_service="cliproxy-will-log-mover-continuous@${archive_root}.service"
+continuous_watchdog="cliproxy-will-log-mover-watchdog-continuous@${archive_root}.service"
 status_file=/run/cliproxy-will-log-mover/status.json
 sudo testparm -s --section-name=will --parameter-name='veto files' | grep -F "/$archive_root/"
 sudo testparm -s --section-name=will --parameter-name='delete veto files' | grep -ix no
@@ -126,8 +148,11 @@ sudo install -o root -g root -m 0755 "$upload/will_log_mover.py" \
 printf 'WILL_LOG_MOVER_DISK_UUID=%s\n' "$disk_uuid" > "$upload/disk.env"
 sudo install -o root -g root -m 0600 "$upload/disk.env" /etc/cliproxy-will-log-mover.env
 sudo install -o root -g root -m 0644 "$upload/cliproxy-will-log-mover@.service" \
-  "$upload/cliproxy-will-log-mover-watchdog@.service" /etc/systemd/system/
-sudo systemd-analyze verify "$pilot_service" "$pilot_watchdog"
+  "$upload/cliproxy-will-log-mover-watchdog@.service" \
+  "$upload/cliproxy-will-log-mover-continuous@.service" \
+  "$upload/cliproxy-will-log-mover-watchdog-continuous@.service" /etc/systemd/system/
+sudo systemd-analyze verify "$pilot_service" "$pilot_watchdog" \
+  "$continuous_service" "$continuous_watchdog"
 sudo systemctl daemon-reload
 ```
 
@@ -203,6 +228,25 @@ designated pilot operator checks the watchdog journal and aggregate status
 after startup and every 15 minutes through the recorded end, including pause,
 miss, watch gap, and integrity counts in the status.
 
+### Continuous retention after the pilot
+
+The bounded pilot units and deadlines remain the default. After pilot
+acceptance, continuous operation requires a separate reviewed live plan and
+Andrew's approval. The explicitly named continuous units use `--continuous`,
+have no `RuntimeMaxSec`, retry failed movers after 15 seconds, and retain the
+same source read-only mount, private archive paths, lock, Samba gate, 200 GiB
+capture stop floor, 250 GiB resume floor, and 24-hour archive retention. Do not
+run the pilot and continuous mover together; stop both pilot services first.
+
+```sh
+sudo systemctl stop "$pilot_watchdog" "$pilot_service"
+sudo systemctl enable --now "$continuous_service" "$continuous_watchdog"
+systemctl is-active "$continuous_service" "$continuous_watchdog"
+```
+
+Review the fresh status heartbeat, `paused_reason`, watchdog journal,
+prune counts, and failures after startup and every 15 minutes.
+
 ### Acceptance and rollback
 
 - Check the 24-hour pilot window with a representative busy period. The
@@ -217,8 +261,9 @@ miss, watch gap, and integrity counts in the status.
   with missed, unconfirmed, later-confirmed, recovered-after-unlink, abandoned
   pending and watch gap counts. Any restart fails acceptance.
 - Require zero integrity failures, misses, late captures, watch gaps and
-  queue overflows. Verify a timed restore by comparing bytes and SHA-256 to the
-  manifest, and report the aggregate result.
+  queue overflows. For continuous operation, review `pruned` and
+  `prune_failures`. Verify a timed restore by comparing bytes and
+  SHA-256 to the manifest, and report the aggregate result.
 - Read the once-a-minute counter history under `$mountpoint/$archive_root/meta/`.
   Record peak pending files, bytes and age, the p50, p90 and maximum
   observed close-to-publish latency, minute ingress, verified drain rate,
@@ -236,11 +281,16 @@ systemctl show -p ActiveState -p Result -p ExecMainStatus "$pilot_service" "$pil
 sudo systemctl stop "$pilot_watchdog"
 ```
 
-For rollback, stop both services before reading diagnostics.
+For rollback, stop every mover and watchdog before reading diagnostics or
+reinstalling the previous reviewed script. Rollback stops future pruning but
+cannot restore archive copies already deleted; the source logs were never
+removed by the mover. Preserve the surviving archive and Samba veto.
 
 ```sh
+sudo systemctl disable --now "$continuous_watchdog" "$continuous_service"
 sudo systemctl stop "$pilot_watchdog" "$pilot_service"
-systemctl show -p ActiveState -p Result -p ExecMainStatus "$pilot_service" "$pilot_watchdog" || true
+systemctl show -p ActiveState -p Result -p ExecMainStatus \
+  "$continuous_service" "$continuous_watchdog" "$pilot_service" "$pilot_watchdog" || true
 if [ -r "$status_file" ]; then
   /usr/bin/python3.14 -I -m json.tool "$status_file" || true
 fi
