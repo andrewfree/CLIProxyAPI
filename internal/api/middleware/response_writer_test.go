@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +159,83 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	}
 	if !streamWriter.closed {
 		t.Fatal("expected stream writer to be closed")
+	}
+}
+
+func TestStreamingLogMarksMiddlewareQueueDrops(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name      string
+		saturated bool
+	}{
+		{name: "normal"},
+		{name: "saturated", saturated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			logsDir := t.TempDir()
+			logger := logging.NewFileRequestLogger(true, logsDir, "", 0)
+			wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{
+				URL: "/v1/responses", Method: http.MethodPost, RequestID: "stream",
+			})
+			wrapper.Header().Set("Content-Type", "text/event-stream")
+			if tc.saturated {
+				// Start the file writer but pause the middleware consumer with a full queue.
+				streamWriter, errLog := logger.LogStreamingRequest("/v1/responses", http.MethodPost, nil, nil, "stream")
+				if errLog != nil {
+					t.Fatal(errLog)
+				}
+				wrapper.streamWriter = streamWriter
+				wrapper.chunkChannel = make(chan []byte, 1)
+				wrapper.chunkChannel <- []byte("data: retained")
+				wrapper.streamDone = make(chan struct{})
+			}
+			wrapper.WriteHeader(http.StatusOK)
+
+			const first = "data: one\n\n"
+			const second = "data: 猫\n\n"
+			nByte, errByte := wrapper.Write([]byte(first))
+			nString, errString := wrapper.WriteString(second)
+			if tc.saturated {
+				go wrapper.processStreamingChunks(wrapper.streamDone, wrapper.chunkChannel, wrapper.streamWriter)
+			}
+			if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+				t.Fatal(errFinalize)
+			}
+
+			if nByte != len(first) || nString != len(second) || errByte != nil || errString != nil {
+				t.Fatalf("client writes: (%d, %v), (%d, %v)", nByte, errByte, nString, errString)
+			}
+			if got := recorder.Body.String(); got != first+second {
+				t.Fatalf("client body = %q, want %q", got, first+second)
+			}
+			logs, errGlob := filepath.Glob(filepath.Join(logsDir, "*.log"))
+			if errGlob != nil || len(logs) != 1 {
+				t.Fatalf("expected one log, got %v (err=%v)", logs, errGlob)
+			}
+			raw, errRead := os.ReadFile(logs[0])
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			_, response, found := strings.Cut(string(raw), "=== RESPONSE ===\n")
+			if !found {
+				t.Fatalf("response section missing: %q", raw)
+			}
+			if tc.saturated {
+				want := fmt.Sprintf("data: retained\n[RESPONSE STREAM CHUNKS DROPPED FROM LOG: 2 chunks, %d bytes]\n", len(first)+len(second))
+				if !strings.HasSuffix(response, want) {
+					t.Fatalf("response log = %q, want suffix %q", response, want)
+				}
+			} else {
+				chunks, byteCount := wrapper.streamLogDrops.Counts()
+				if !strings.HasSuffix(response, first+second) ||
+					strings.Contains(response, "RESPONSE STREAM CHUNKS DROPPED FROM LOG") ||
+					chunks != 0 || byteCount != 0 {
+					t.Fatalf("normal response log = %q, middleware dropped %d chunks and %d bytes", response, chunks, byteCount)
+				}
+			}
+		})
 	}
 }
 

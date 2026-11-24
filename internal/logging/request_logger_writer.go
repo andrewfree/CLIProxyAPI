@@ -243,7 +243,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		requestBodyPath:  requestBodyPath,
 		responseBodyPath: responseBodyPath,
 		responseBodyFile: responseBodyFile,
-		chunkChan:        make(chan []byte, 100), // Buffered channel for async writes
+		chunkChan:        make(chan []byte, StreamLogQueueDepth),
 		closeChan:        make(chan struct{}),
 		errorChan:        make(chan error, 1),
 	}

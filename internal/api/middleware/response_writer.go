@@ -37,13 +37,14 @@ type RequestInfo struct {
 }
 
 // ResponseWriterWrapper wraps the standard gin.ResponseWriter to intercept and log response data.
-// It is designed to handle both standard and streaming responses, ensuring that logging operations do not block the client response.
+// It handles both standard and streaming responses and bounds the queue wait for stream logging.
 type ResponseWriterWrapper struct {
 	gin.ResponseWriter
 	body                *bytes.Buffer               // body is a buffer to store the response body for non-streaming responses.
 	isStreaming         bool                        // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
 	streamWriter        logging.StreamingLogWriter  // streamWriter is a writer for handling streaming log entries.
 	chunkChannel        chan []byte                 // chunkChannel is a channel for asynchronously passing response chunks to the logger.
+	streamLogDrops      logging.StreamLogDrops      // streamLogDrops counts chunks that could not reach the log writer.
 	streamDone          chan struct{}               // streamDone signals when the streaming goroutine completes.
 	logger              logging.RequestLogger       // logger is the instance of the request logger service.
 	requestInfo         *RequestInfo                // requestInfo holds the details of the original request.
@@ -94,30 +95,17 @@ func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger
 }
 
 // Write wraps the underlying ResponseWriter's Write method to capture response data.
-// For non-streaming responses, it writes to an internal buffer. For streaming responses,
-// it sends data chunks to a non-blocking channel for asynchronous logging.
-// CRITICAL: This method prioritizes writing to the client to ensure zero latency,
-// handling logging operations subsequently.
+// Streaming chunks are queued for logging after the write to the client.
 func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	w.closeConnectionIfRequestBodyUnconsumed(w.effectiveStatusCode())
 	// Ensure headers are captured before first write
 	// This is critical because Write() may trigger WriteHeader() internally
 	w.ensureHeadersCaptured()
 
-	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.Write(data)
 
-	// THEN: Handle logging based on response type
 	if w.isStreaming && w.chunkChannel != nil {
-		// Capture TTFB on first chunk (synchronous, before async channel send)
-		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
-		}
-		// For streaming responses: Send to async logging channel (non-blocking)
-		select {
-		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
-		default: // Channel full, skip logging to avoid blocking
-		}
+		w.queueStreamingChunk(bytes.Clone(data))
 		return n, err
 	}
 
@@ -192,19 +180,10 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	w.closeConnectionIfRequestBodyUnconsumed(w.effectiveStatusCode())
 	w.ensureHeadersCaptured()
 
-	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.WriteString(data)
 
-	// THEN: Capture for logging
 	if w.isStreaming && w.chunkChannel != nil {
-		// Capture TTFB on first chunk (synchronous, before async channel send)
-		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
-		}
-		select {
-		case w.chunkChannel <- []byte(data):
-		default:
-		}
+		w.queueStreamingChunk([]byte(data))
 		return n, err
 	}
 
@@ -212,6 +191,13 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 		w.body.WriteString(data)
 	}
 	return n, err
+}
+
+func (w *ResponseWriterWrapper) queueStreamingChunk(chunk []byte) {
+	if w.firstChunkTimestamp.IsZero() {
+		w.firstChunkTimestamp = time.Now()
+	}
+	w.streamLogDrops.Enqueue(w.chunkChannel, chunk)
 }
 
 // WriteHeader wraps the underlying ResponseWriter's WriteHeader method.
@@ -248,7 +234,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 					w.requestInfo.RequestID,
 				)
 				if err == nil {
-					chunkChan := make(chan []byte, 100) // Buffered channel for async writes
+					chunkChan := make(chan []byte, logging.StreamLogQueueDepth)
 					doneChan := make(chan struct{})
 					w.streamWriter = streamWriter
 					w.chunkChannel = chunkChan
@@ -424,6 +410,14 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			w.streamDone = nil
 		}
 
+		if chunks, byteCount := w.streamLogDrops.Counts(); chunks > 0 {
+			if writer, ok := w.streamWriter.(interface{ RecordDroppedChunks(uint64, uint64) }); ok {
+				writer.RecordDroppedChunks(chunks, byteCount)
+			} else {
+				// SDK writers can still record the marker through the existing interface.
+				w.streamWriter.WriteChunkAsync([]byte(logging.StreamLogDropMarker(chunks, byteCount)))
+			}
+		}
 		w.streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
 
 		// Write API Request and Response to the streaming log before closing
