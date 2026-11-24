@@ -262,15 +262,45 @@ func TestDeferredAPIResponseCapturedAndAlignedAcrossAttempts(t *testing.T) {
 	}
 }
 
+// A long Claude answer streams about 1 MiB of thinking deltas before its text and tool_use blocks. The fleet raised
+// the per-attempt cap so the whole stream stays in the log for debugging and audits.
+func TestDeferredAPIResponseKeepsLongThinkingStreamWhole(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	cfg := &config.Config{}
+
+	RecordAPIRequest(ctx, cfg, UpstreamRequestLog{Method: http.MethodPost})
+	RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
+	delta := []byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"` + strings.Repeat("t", 1000) + `"}}`)
+	sent := 0
+	for sent < 1<<20 {
+		AppendAPIResponseChunk(ctx, cfg, []byte("event: content_block_delta"))
+		AppendAPIResponseChunk(ctx, cfg, delta)
+		sent += len(delta)
+	}
+	AppendAPIResponseChunk(ctx, cfg, []byte("event: message_stop"))
+	AppendAPIResponseChunk(ctx, cfg, []byte(`data: {"type":"message_stop"}`))
+
+	capture := deferredResponseCaptureFrom(ginCtx)
+	n, _, truncated := capture.AttemptBodyStats(0)
+	if truncated {
+		t.Fatalf("a %d-byte thinking stream was truncated at %d bytes", sent, n)
+	}
+	if n < sent {
+		t.Fatalf("captured %d bytes, want at least the %d bytes of thinking deltas", n, sent)
+	}
+}
+
 func TestDeferredAPIResponseBodyTruncatedAndBoundedAcrossAttempts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 	cfg := &config.Config{}
 
-	// Pass a 2 MiB slice to verify truncation copies into a bounded buffer rather
-	// than retaining the multi-megabyte backing array.
-	largePayload := bytes.Repeat([]byte("a"), 2<<20)
+	// Pass a slice twice the per-attempt cap to verify truncation copies into a bounded buffer rather
+	// than retaining the larger backing array.
+	largePayload := bytes.Repeat([]byte("a"), 2*maxDeferredAPIResponseBodyBytes)
 	RecordAPIRequest(ctx, cfg, UpstreamRequestLog{Method: http.MethodPost})
 	RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
 	AppendAPIResponseChunk(ctx, cfg, largePayload)

@@ -1208,7 +1208,7 @@ func TestRequestLoggingMiddlewareErrorLogKeepsUpstreamResponseWhenRequestLogDisa
 		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
 		cfg := &config.Config{}
 		baseHandler := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, nil)
-		largeAttemptTwoBody := "data: {\"type\":\"response.created\",\"id\":\"resp_2\"}\n\n" + strings.Repeat("x", 70*1024)
+		largeAttemptTwoBody := "data: {\"type\":\"response.created\",\"id\":\"resp_2\"}\n\n" + strings.Repeat("x", logging.MaxDeferredAPIResponseBodyBytes+6*1024)
 
 		router := gin.New()
 		router.Use(RequestLoggingMiddleware(logger))
