@@ -395,7 +395,11 @@ def format_proxy_view(view: dict[str, Any], now: datetime.datetime) -> str:
     lines = []
     if not view["cooldowns"]:
         lines.append("  proxy: no cooldown")
+    # A whole-account cooldown is copied onto each model with the same reason; print it once.
+    account_reasons = {c["reason"] for c in view["cooldowns"] if c["scope"] != "model"}
     for c in view["cooldowns"]:
+        if c["scope"] == "model" and c["reason"] in account_reasons:
+            continue
         target = c["model_key"] if c["scope"] == "model" and c["model_key"] else "whole account"
         left = c["remaining_seconds"]
         left = f"{math.ceil(left / 60)}m left" if isinstance(left, (int, float)) else f"until {c['retry_at']}"

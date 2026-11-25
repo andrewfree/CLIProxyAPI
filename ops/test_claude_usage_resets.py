@@ -130,6 +130,10 @@ class ProxyViewTest(unittest.TestCase):
         text = resets.format_proxy_view(view, self.NOW)
         self.assertIn("proxy cooldown: whole account credential_quota, 41m left", text)
         self.assertIn("proxy cooldown: claude-fable-5-2 quota, 1m left", text)
+        copied = resets.proxy_view(credential({}, [
+            {"scope": "credential", "reason": "credential_quota", "remaining_seconds": 240},
+            {"scope": "model", "model_key": "claude-haiku-5-5", "reason": "credential_quota", "remaining_seconds": 240}]))
+        self.assertEqual(resets.format_proxy_view(copied, self.NOW).count("proxy cooldown:"), 1)
         self.assertIn("last failure: claude-fable-5-2 HTTP 529 overloaded_error 7m ago", text)
         self.assertIn("proxy: no cooldown", resets.format_proxy_view(resets.proxy_view(credential({})), self.NOW))
         self.assertIn("not reported by this proxy",
