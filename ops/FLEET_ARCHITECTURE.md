@@ -611,7 +611,9 @@ archive drive, verifies them by SHA-256 and only then prunes. Until November 18 
 TheCloud. That NAS share filled up, so nothing was archived or pruned and the Mac data volume fell
 to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free; the T9 drive was
 skipped because it had just thrown a disk error ([README.md](README.md#log-retention)). Will uses
-a temporary 61,440 MiB cap while the disk12 archive is prepared. Fleet parity treats the log cap
+a temporary 61,440 MiB cap while the disk12 log mover
+([PR #35](https://github.com/andrewfree/CLIProxyAPI/pull/35)) is prepared, and has no archive copy
+until that lands. Fleet parity treats the log cap
 as a host-specific setting.
 
 ### 2.9 Keys and secrets

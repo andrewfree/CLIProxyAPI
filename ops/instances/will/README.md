@@ -36,7 +36,8 @@ a real `/v1/responses` request, and the affected Codex/T3 thread.
 
 The owner policy requires normal request logging and file logging. The
 61,440 MiB total log-directory cap gives Will more time to retain logs while
-the disk12 archive is being prepared. Usage aggregation stays disabled.
+the disk12 log mover ([PR #35](https://github.com/andrewfree/CLIProxyAPI/pull/35)) is prepared.
+This is still bounded local retention, not an archival copy. Usage aggregation stays disabled.
 Logs survive container replacement through the existing bind mount. The size
 cleaner removes older files when the directory reaches the cap.
 
