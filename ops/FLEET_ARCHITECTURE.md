@@ -607,7 +607,8 @@ refresh ([README.md](README.md#oauth-health-and-reauthentication)).
 
 **Why logs archive to Storage.** The Mac sets `logs-max-total-size-mb: 0`, because CLIProxy's
 cleaner deletes without verifying an archive first. A separate job copies closed logs to an
-archive drive, verifies them by SHA-256 and only then prunes. Until November 18 the archive was on
+archive drive and verifies them by SHA-256. It used to prune verified copies; it now runs
+`--archive-only` and keeps them. Until November 18 the archive was on
 TheCloud. That NAS share filled up, so nothing was archived or pruned and the Mac data volume fell
 to about 6 GiB free. Andrew chose Innie, a local drive, on November 18, and moved the archive to
 Storage, a 4 TB external drive, on November 25 ([README.md](README.md#log-retention)). The job

@@ -221,6 +221,10 @@ class FleetBundleTest(unittest.TestCase):
                          "ops/" + bundle.MONITOR + ".plist"]
         for name in fixture_names[3:]:
             self.write(name, "fixture " + name, mode=0o755)
+        # P0 reads the archive destination from the shipped plist, as a real bundle ships it.
+        archive_plist_name = "ops/com.rever.cliproxy-log-archive.plist"
+        self.write(archive_plist_name, (ops / "com.rever.cliproxy-log-archive.plist").read_text())
+        fixture_names.append(archive_plist_name)
         self.write(fixture_names[0], "\n".join(fixture_names) + "\n")
         commit = self.commit()
         self.ship(commit)
@@ -248,6 +252,11 @@ class FleetBundleTest(unittest.TestCase):
         archive_plist = agents / (archive_label + ".plist")
         stale = plistlib.loads(archive_plist.read_bytes())
         self.assertEqual(stale["ProgramArguments"].pop(), "--archive-only")
+        archive_plist.write_bytes(plistlib.dumps(stale))
+        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/" + archive_label])
+        # An installed plist still pointing at a retired archive drive is drift too.
+        stale["ProgramArguments"].append("--archive-only")
+        stale["EnvironmentVariables"]["CLIPROXY_LOG_ARCHIVE_ROOT"] = "/Volumes/Innie/backups/llm-logs/cliproxy/m5/live"
         archive_plist.write_bytes(plistlib.dumps(stale))
         self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/" + archive_label])
         launchers[0] = str(self.root / "cliproxy/ops/claude_account_launcher.mjs")

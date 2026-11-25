@@ -346,6 +346,14 @@ def verify_bundle(host, manifest, launchers):
                         or job["EnvironmentVariables"]["CLIPROXY_ROOT"] != host["instance_root"]
                         or job["WorkingDirectory"] != host["instance_root"]):
                     issues.append("P0/" + label)
+                elif script == "archive_logs.py":
+                    # The destination lives only in the plist environment, so an old
+                    # installed plist would keep archiving to a retired drive.
+                    with (root / (label + ".plist")).open("rb") as stream:
+                        shipped = plistlib.load(stream)["EnvironmentVariables"]
+                    if any(job["EnvironmentVariables"].get(key) != shipped.get(key)
+                           for key in ("CLIPROXY_LOG_ARCHIVE_ROOT", "CLIPROXY_LOG_ARCHIVE_MOUNT")):
+                        issues.append("P0/" + label)
             except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
                 issues.append("P0/" + label)
 
