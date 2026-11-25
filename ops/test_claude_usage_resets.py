@@ -225,6 +225,41 @@ class StatusCommandTest(unittest.TestCase):
         self.assertIn("HTTP 403", accounts[0]["error"])
         self.assertEqual(accounts[1]["scoped"]["Fable"]["percent"], 18)
 
+    def test_a_rate_limited_account_retries_once_then_the_report_goes_on(self):
+        other = "second@example.com"
+
+        class TwoAccounts(FakeProxy):
+            def claude_accounts(self):
+                return [{"provider": "claude", "email": EMAIL}, {"provider": "claude", "email": other}]
+
+            def claude_credentials(self):
+                return {EMAIL: credential({}), other: credential({})}
+
+        proxy = TwoAccounts([(429, {}), (429, {}), (200, usage_body(fable=18))])
+        with mock.patch.object(resets.time, "sleep") as slept, contextlib.redirect_stderr(io.StringIO()):
+            code, text = self.run_status(proxy, json_output=False)
+        self.assertEqual(code, 1)
+        self.assertEqual([c.args[0] for c in slept.call_args_list], [resets.STATUS_USAGE_WAIT_SECONDS])
+        self.assertIn("usage unavailable: usage endpoint returned HTTP 429", text)
+        self.assertIn("Fable: 18% of its cap", text)
+
+    def test_a_lost_proxy_connection_still_ends_the_report(self):
+        class DropsMidway(FakeProxy):
+            def claude_accounts(self):
+                return [{"provider": "claude", "email": EMAIL}, {"provider": "claude", "email": "second@example.com"}]
+
+            def claude_credentials(self):
+                return {}
+
+            def upstream(self, email, method, url, body=None):
+                self.calls.append((method, url, email))
+                raise resets.ProxyConnectionError("connection reset")
+
+        proxy = DropsMidway([])
+        with self.assertRaises(resets.ProxyConnectionError):
+            self.run_status(proxy, json_output=False)
+        self.assertEqual([c[2] for c in proxy.calls], [EMAIL])  # the second account is never read
+
     def test_status_shows_the_proxys_latest_failure(self):
         code, text = self.run_status(self.StatusProxy({EMAIL: credential(FABLE_529)}), json_output=False)
         self.assertEqual(code, 0)

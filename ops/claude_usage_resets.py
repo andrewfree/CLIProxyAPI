@@ -59,6 +59,9 @@ OAUTH_HEADERS = {
 GRANT_ID_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# status reads every account, so it retries each usage read once; claim and watch keep the longer backoff.
+STATUS_USAGE_TRIES = 2
+STATUS_USAGE_WAIT_SECONDS = 30
 # The usage API's weekly resets_at jitters by about a second between reads.
 RESET_TOLERANCE_SECONDS = 120.0
 # Weekly windows are seven days apart; a tolerance below one day cannot match the wrong one.
@@ -523,7 +526,10 @@ def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
         try:
             status, profile = proxy.upstream(email, "GET", PROFILE_URL)
             tier = (profile.get("organization") or {}).get("rate_limit_tier") if status == 200 else None
-            summary = fetch_usage(proxy, email)
+            summary = fetch_usage(proxy, email, tries=STATUS_USAGE_TRIES, wait=STATUS_USAGE_WAIT_SECONDS,
+                                  sleep=time.sleep)
+        except ProxyConnectionError:
+            raise  # a lost proxy connection ends the report, so --host auto can fall back
         except ResetError as err:
             # One account's failed usage read must not hide the others, nor this
             # account's proxy view, which often explains the failure.
