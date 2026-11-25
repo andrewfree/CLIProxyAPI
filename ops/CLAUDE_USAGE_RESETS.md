@@ -129,6 +129,34 @@ read, so a stale or wrong trigger cannot spend the grant. Pin the watch and
 the claim to the same host. `--notify` shows the notification on the machine
 that runs the command, even when Will answered the watch.
 
+For a full reset at a weekly-total threshold, pass the weekly guards instead.
+Copy the pin from the `weekly_resets_at` value that `status --json` reported
+when Andrew approved the reset:
+
+```sh
+python3 ops/claude_usage_resets.py claim --host will --account <email> --grant full-reset-2611 \
+  --min-weekly-percent 100 --weekly-resets-at 2026-11-25T02:00:00Z --yes
+```
+
+### Timestamps in a scheduled watch
+
+A watch that runs as a scheduled agent task must leave freshness and window
+checks to `claim`. Do not compare timestamps by hand in the task prompt.
+
+- `claim` always reads usage again before it sends anything. A separate check
+  that the last `status` read is fresh adds nothing.
+- `captured_at`, `started_at`, and `finished_at` carry microseconds and a UTC
+  offset. Earlier versions of this tool wrote whole seconds. On 2026-11-18 a watch
+  compared a whole-second `captured_at` with its own fractional start time,
+  decided a same-second read was stale, and stopped before a claim it was
+  approved to make.
+- The usage API recomputes `resets_at` on each read, so it drifts by about a
+  second around the real boundary. On 2026-11-18 reads reported
+  `02:00:00.932191` and `02:00:01.002` for a `02:00:00` window.
+  `--weekly-resets-at` compares as instants and allows `--reset-tolerance`
+  seconds of drift (default 120, must be below one day). Weekly windows are
+  seven days apart, so the tolerance cannot accept the wrong week.
+
 ## Redeem a grant
 
 ```sh
@@ -155,19 +183,22 @@ host would use a new request ID and could spend a second grant. Once the claim
 result is known, a failed usage reread is recorded as `after_error` and the
 result is kept.
 
-For a conditional redemption, add `--min-fable-percent 99` to the claim.
+For a conditional redemption, add `--min-fable-percent 99` or
+`--min-weekly-percent 100` to the claim, and `--weekly-resets-at` to pin the
+weekly window.
 The claim checks the account profile and reads usage again before spending
-the grant. It refuses if the Fable limit is missing, is not a finite number (an
-integer too large for a float counts as not finite), or is below the
-threshold, even if an earlier watch already triggered. This check
+the grant. It refuses if a guarded limit (Fable or the weekly total) is missing,
+is not a finite number (an integer too large for a float counts as not finite),
+or is below its threshold, even if an earlier watch already triggered. This check
 also applies to dry runs.
 
 `claim` refuses to run without `--yes` or `--dry-run`. Before sending, it does the following:
 
 1. It reads `/api/oauth/profile` and checks that the account email matches. The organization UUID comes from this profile.
-2. It reads usage with backoff on 429 and 5xx. With `--min-fable-percent N`,
-   it refuses unless this fresh read reports a Fable limit of at least N
-   percent. It also refuses if the account is ineligible, in cooldown, or the
+2. It reads usage with backoff on 429 and 5xx. With `--min-fable-percent N`
+   or `--min-weekly-percent N`, it refuses unless this fresh read reports that
+   limit at N percent or more. With `--weekly-resets-at`, it refuses unless
+   the fresh weekly reset time is within the tolerance of the pin. It also refuses if the account is ineligible, in cooldown, or the
    grant is missing, used, or unusable.
 3. It sends the request Claude Code 2.1.322 sends:
    `POST /api/organizations/{org}/reset_rate_limits` with

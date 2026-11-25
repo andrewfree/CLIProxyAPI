@@ -26,6 +26,10 @@ and covers the Go server. Keep fork-only operational rules here.
   for that account and grant ID. A conditional approval counts, for example
   "when it hits 99%, reset Fable". Never substitute a different grant when the
   approved one is refused. Report the refusal instead.
+- A scheduled watch passes its thresholds and weekly-window pin to `claim`
+  (`--min-fable-percent`, `--min-weekly-percent`, `--weekly-resets-at`). Do
+  not compare `captured_at` or `resets_at` by hand in a task prompt; see
+  "Timestamps in a scheduled watch" in `ops/CLAUDE_USAGE_RESETS.md`.
 - Poll usage no faster than every 300 seconds. Shorter intervals hit HTTP 429.
   The fleet monitor also reads each Claude account about every 15 minutes,
   so pause it before a `watch` and resume it afterwards

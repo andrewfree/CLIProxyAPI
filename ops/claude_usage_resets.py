@@ -59,6 +59,10 @@ OAUTH_HEADERS = {
 GRANT_ID_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# The usage API's weekly resets_at jitters by about a second between reads.
+RESET_TOLERANCE_SECONDS = 120.0
+# Weekly windows are seven days apart; a tolerance below one day cannot match the wrong one.
+MAX_RESET_TOLERANCE_SECONDS = 86400.0
 
 
 class ResetError(RuntimeError):
@@ -82,7 +86,22 @@ OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRed
 
 
 def now_iso() -> str:
-    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    # Keep microseconds: watches compare these stamps with their own fractional
+    # clocks, and a whole-second stamp reads as earlier than a same-second start.
+    return datetime.datetime.now().astimezone().isoformat(timespec="microseconds")
+
+
+def parse_iso(value: Any) -> datetime.datetime:
+    """Parse an ISO 8601 timestamp with an offset or Z; raise ResetError otherwise."""
+    if not isinstance(value, str):
+        raise ResetError(f"timestamp {value!r} is not a string")
+    try:
+        parsed = datetime.datetime.fromisoformat(normalize_fraction(value.replace("Z", "+00:00")))
+    except ValueError as err:
+        raise ResetError(f"timestamp {value!r} is not ISO 8601") from err
+    if parsed.tzinfo is None:
+        raise ResetError(f"timestamp {value!r} has no UTC offset")
+    return parsed
 
 
 def load_management_key(root: pathlib.Path) -> str:
@@ -221,6 +240,40 @@ def check_claimable(summary: dict[str, Any], grant_id: str) -> dict[str, Any]:
     return grant
 
 
+def require_min_percent(summary: dict[str, Any], limit: str, minimum: int, email: str) -> None:
+    """Refuse unless the fresh read reports a finite `limit` usage of at least `minimum` percent."""
+    name = "Weekly" if limit.lower() in ("all", "weekly") else limit
+    percent = limit_percent(summary, limit)
+    if percent is None:
+        raise ResetError(f"{name} limit is missing from the usage response for {email}; "
+                         f"cannot check the required {minimum}%")
+    try:
+        finite = not isinstance(percent, bool) and isinstance(percent, (int, float)) and math.isfinite(percent)
+    except OverflowError:
+        finite = False  # an integer too large for a float
+    if not finite:
+        raise ResetError(f"{name} usage percent is not a finite number ({type(percent).__name__})")
+    if percent < minimum:
+        raise ResetError(f"{name} usage {percent}% is below required {minimum}%")
+
+
+def require_weekly_window(summary: dict[str, Any], pinned: str, tolerance: float) -> None:
+    """Refuse unless the fresh weekly reset time is within `tolerance` seconds of the pin.
+
+    The usage API recomputes resets_at on each read, so it drifts by about a
+    second around the true boundary (2026-11-18: 02:00:00.932 and 02:00:01.002
+    for a 02:00:00 pin). A different weekly window is days away, so a tolerance
+    of minutes absorbs the jitter and still rejects the wrong week.
+    """
+    reported = summary.get("weekly_resets_at")
+    if reported is None:
+        raise ResetError("usage response has no weekly reset time; cannot check the pinned window")
+    drift = abs((parse_iso(reported) - parse_iso(pinned)).total_seconds())
+    if drift > tolerance:
+        raise ResetError(f"weekly window resets {reported}, {drift:.3f}s from pinned {pinned} "
+                         f"(tolerance {tolerance:g}s)")
+
+
 def request_id_for(state_dir: pathlib.Path, email: str, grant_id: str) -> str:
     """Return the persisted request_id for this account and grant, creating it once."""
     path = state_dir / "request-ids.json"
@@ -237,10 +290,22 @@ def request_id_for(state_dir: pathlib.Path, email: str, grant_id: str) -> str:
 
 def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, receipt_path: pathlib.Path,
           dry_run: bool, sleep: Callable[[float], None] = time.sleep,
-          min_fable_percent: int | None = None, host: str | None = None,
+          min_fable_percent: int | None = None, min_weekly_percent: int | None = None,
+          weekly_resets_at: str | None = None,
+          reset_tolerance: float | None = None, host: str | None = None,
           status_hint: str = "status --host local") -> dict[str, Any]:
     if min_fable_percent is not None and not 0 <= min_fable_percent <= 100:
         raise ResetError("minimum Fable percent must be between 0 and 100")
+    if min_weekly_percent is not None and not 0 <= min_weekly_percent <= 100:
+        raise ResetError("minimum weekly percent must be between 0 and 100")
+    if reset_tolerance is not None and not 0 <= reset_tolerance < MAX_RESET_TOLERANCE_SECONDS:
+        raise ResetError(f"reset tolerance must be at least 0 and below {MAX_RESET_TOLERANCE_SECONDS:g} seconds")
+    if reset_tolerance is not None and weekly_resets_at is None:
+        raise ResetError("a reset tolerance needs --weekly-resets-at; without a pin it would check nothing")
+    if reset_tolerance is None:
+        reset_tolerance = RESET_TOLERANCE_SECONDS
+    if weekly_resets_at is not None:
+        parse_iso(weekly_resets_at)  # reject a malformed pin before any network call
     receipt: dict[str, Any] = {"started_at": now_iso(), "account": email, "grant_id": grant_id, "dry_run": dry_run}
     if host is not None:
         receipt["host"] = host
@@ -250,19 +315,14 @@ def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, rece
     org = profile["organization"]["uuid"]
     receipt["before"] = before = fetch_usage(proxy, email, sleep=sleep)
     if min_fable_percent is not None:
-        percent = limit_percent(before, "Fable")
-        if percent is None:
-            raise ResetError(f"Fable limit is missing from the usage response for {email}; "
-                             f"cannot check the required {min_fable_percent}%")
-        try:
-            finite = not isinstance(percent, bool) and isinstance(percent, (int, float)) and math.isfinite(percent)
-        except OverflowError:
-            finite = False  # an integer too large for a float
-        if not finite:
-            raise ResetError(f"Fable usage percent is not a finite number ({type(percent).__name__})")
-        if percent < min_fable_percent:
-            raise ResetError(f"Fable usage {percent}% is below required {min_fable_percent}%")
+        require_min_percent(before, "Fable", min_fable_percent, email)
         receipt["min_fable_percent"] = min_fable_percent
+    if min_weekly_percent is not None:
+        require_min_percent(before, "weekly", min_weekly_percent, email)
+        receipt["min_weekly_percent"] = min_weekly_percent
+    if weekly_resets_at is not None:
+        require_weekly_window(before, weekly_resets_at, reset_tolerance)
+        receipt["weekly_resets_at_pin"] = {"pinned": weekly_resets_at, "tolerance_seconds": reset_tolerance}
     check_claimable(before, grant_id)
     request_id = request_id_for(state_dir, email, grant_id)
     receipt["request"] = {"url": CLAIM_URL.format(org="<org>"),
@@ -371,11 +431,16 @@ def proxy_view(credential: dict[str, Any] | None, error: str | None = None) -> d
 FRACTION_RE = re.compile(r"(T\d{2}:\d{2}:\d{2})(?:\.(\d+))?")
 
 
+def normalize_fraction(text: str) -> str:
+    """Pad or cut fractional seconds to six digits, the only lengths Python 3.9 parses besides three."""
+    return FRACTION_RE.sub(lambda m: m.group(1) + ("." + (m.group(2) + "000000")[:6] if m.group(2) else ""),
+                           text, count=1)
+
+
 def parse_go_time(value: Any) -> datetime.datetime | None:
     if not isinstance(value, str):
         return None
-    text = FRACTION_RE.sub(lambda m: m.group(1) + ("." + (m.group(2) + "000000")[:6] if m.group(2) else ""),
-                           value.replace("Z", "+00:00"), count=1)
+    text = normalize_fraction(value.replace("Z", "+00:00"))
     try:
         parsed = datetime.datetime.fromisoformat(text)
     except ValueError:
@@ -514,8 +579,9 @@ def cmd_claim(proxy: Proxy, args: argparse.Namespace) -> int:
     stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     receipt_path = args.receipt or STATE_DIR / f"claim-{args.grant}-{stamp}{'-dryrun' if args.dry_run else ''}.json"
     receipt = claim(proxy, args.account, args.grant, STATE_DIR, receipt_path, args.dry_run,
-                    min_fable_percent=args.min_fable_percent, host=getattr(args, "label", None),
-                    status_hint=status_hint(args))
+                    min_fable_percent=args.min_fable_percent, min_weekly_percent=args.min_weekly_percent,
+                    weekly_resets_at=args.weekly_resets_at, reset_tolerance=args.reset_tolerance,
+                    host=getattr(args, "label", None), status_hint=status_hint(args))
     print(json.dumps(receipt, indent=2))
     print(f"receipt: {receipt_path}", file=sys.stderr)
     return 0 if receipt["result"] in ("reset", "dry_run") else 1
@@ -702,6 +768,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--receipt", type=pathlib.Path, help="receipt path; with --host will, a path on Will")
     p.add_argument("--min-fable-percent", type=int, metavar="0..100",
                    help="refuse a claim unless a fresh read reports a finite Fable usage of at least this percent")
+    p.add_argument("--min-weekly-percent", type=int, metavar="0..100",
+                   help="refuse a claim unless a fresh read reports a finite weekly total of at least this percent")
+    p.add_argument("--weekly-resets-at", metavar="ISO8601",
+                   help="refuse a claim unless the fresh weekly reset time is within --reset-tolerance of this pin")
+    p.add_argument("--reset-tolerance", type=float, metavar="SECONDS",
+                   help=f"allowed drift for --weekly-resets-at (default {RESET_TOLERANCE_SECONDS:g})")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--yes", action="store_true", help="really redeem the grant")
     mode.add_argument("--dry-run", action="store_true", help="run every check but do not send the claim")
