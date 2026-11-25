@@ -218,7 +218,7 @@ class FleetBundleTest(unittest.TestCase):
         ops = Path(__file__).resolve().parent
         fixture_names = ["ops/fleet/bundle.txt", bundle.BUNDLE_MARKER, bundle.LAUNCHER,
                          "ops/cliproxy-codex-token", *("ops/" + name for name in bundle.JOBS.values()),
-                         "ops/" + bundle.MONITOR + ".plist"]
+                         *("ops/" + label + ".plist" for label in (bundle.MONITOR, bundle.HEARTBEAT))]
         for name in fixture_names[3:]:
             self.write(name, "fixture " + name, mode=0o755)
         self.write(fixture_names[0], "\n".join(fixture_names) + "\n")
@@ -239,11 +239,19 @@ class FleetBundleTest(unittest.TestCase):
         shutil.copy2(self.destination / helper.name, helper)
         manifest, _ = bundle.export_bundle(self.repo, commit)
         launchers = [str(self.destination / "claude_account_launcher.mjs")] * 5
-        # The monitor LaunchAgent is optional until activated.
+        # The monitor and heartbeat LaunchAgents are optional until activated.
         self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], [])
         monitor = agents / (bundle.MONITOR + ".plist")
         shutil.copyfile(self.destination / monitor.name, monitor)
+        heartbeat = agents / (bundle.HEARTBEAT + ".plist")
+        shutil.copyfile(self.destination / heartbeat.name, heartbeat)
         self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], [])
+        heartbeat.write_text("stale")
+        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/" + bundle.HEARTBEAT])
+        heartbeat.unlink()
+        heartbeat.symlink_to(agents / "missing-heartbeat.plist")
+        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/" + bundle.HEARTBEAT])
+        heartbeat.unlink()
         archive_label = "com.rever.cliproxy-log-archive"
         archive_plist = agents / (archive_label + ".plist")
         stale = plistlib.loads(archive_plist.read_bytes())

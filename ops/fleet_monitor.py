@@ -422,7 +422,62 @@ def summary_records(state, records, now):
     return displayed
 
 
-def daily_message(day, records, hosts, parity, seen_outages):
+def newest_log_rows(stream):
+    stream.seek(0, os.SEEK_END)
+    offset = stream.tell()
+    oldest_offset = max(0, offset - 8 * 1024 * 1024)
+    first = b""
+    while offset > oldest_offset:
+        size = min(offset - oldest_offset, 64 * 1024)
+        offset -= size
+        stream.seek(offset)
+        first, *lines = (stream.read(size) + first).split(b"\n")
+        yield from reversed(lines)
+    if oldest_offset:
+        raise OSError("Startup log tail exceeds the scan limit")
+    yield first
+
+
+def previous_day_failovers(runtime, day):
+    previous_day = day - timedelta(days=1)
+    # Appends may land out of timestamp order across processes. Read an hour
+    # before midnight to cover delayed writes around the day boundary.
+    start = datetime.combine(previous_day, local_time()).astimezone()
+    end = datetime.combine(day, local_time()).astimezone()
+    oldest = start - timedelta(hours=1)
+    counts = {}
+    sources = (
+        ("Claude", "failover.jsonl", {"event": "primary_down", "reason": "startup_probe"}),
+        ("Codex", "codex-failover.jsonl",
+         {"subcommand": "app-server", "selected": "fallback", "reason": "fallback_healthy"}),
+    )
+    for provider, filename, fields in sources:
+        counts[provider] = 0
+        try:
+            with (runtime / filename).open("rb") as stream:
+                for line in newest_log_rows(stream):
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, RecursionError):
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    at = probes.timestamp(row.get("ts"))
+                    if at is None:
+                        continue
+                    if at < oldest:
+                        break
+                    if (start <= at < end
+                            and all(row.get(key) == value for key, value in fields.items())):
+                        counts[provider] += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            counts[provider] = None
+    return counts
+
+
+def daily_message(day, records, hosts, parity, seen_outages, failovers):
     lines = [f"CLIProxy daily summary {day}"]
     for row in sorted(records, key=account_name):
         relevant = [window for window in row["windows"] if window["period"] in ("weekly", "monthly", "unknown")]
@@ -446,6 +501,9 @@ def daily_message(day, records, hosts, parity, seen_outages):
     else:
         lines.append(f"Parity: {parity.get('status', 'unknown')}.")
     lines.append("Outages since last summary: " + (", ".join(seen_outages) if seen_outages else "none observed") + ".")
+    totals = ", ".join(f"{name} {count if count is not None else 'unavailable'}"
+                       for name, count in failovers.items())
+    lines.append(f"Startup routing decisions to the Mac yesterday: {totals}.")
     return "\n".join(lines)
 
 
@@ -552,7 +610,8 @@ def tick(root, hosts, runtime, command, no_notify):
         day = local.date().isoformat()
         summary_due = local.time() >= DAILY_AT and day > state.get("summary_day", "")
         if summary_due:
-            messages.append(daily_message(day, daily_records, health, latest, seen_outages))
+            failovers = previous_day_failovers(runtime, local.date())
+            messages.append(daily_message(day, daily_records, health, latest, seen_outages, failovers))
             candidate["summary_day"] = day
         if not messages:
             state = candidate

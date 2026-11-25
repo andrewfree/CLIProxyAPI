@@ -1,7 +1,7 @@
 """Offline tests for the fleet monitor and its LaunchAgent."""
 
 from copy import deepcopy
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ast
 import json
@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time as system_time
 import unittest
 from unittest.mock import patch
 
@@ -372,6 +373,14 @@ class MonitorTests(unittest.TestCase):
                   {"status": "equal"}, {"status": "drift"}, {"status": "drift"}]) as parity,
               patch.object(monitor, "notify_message", return_value=monitor.TEXT_SENT) as notify):
             root = Path(directory)
+            yesterday = probe.iso(NOW - timedelta(days=1))
+            monitor.append_history(root / "failover.jsonl", [
+                {"ts": yesterday, "event": "primary_down", "reason": "startup_probe"},
+            ])
+            monitor.append_history(root / "codex-failover.jsonl", [
+                {"ts": yesterday, "subcommand": "app-server", "selected": "fallback",
+                 "reason": "fallback_healthy"},
+            ])
 
             for tick, (offset, reading, will_state, will_egress) in enumerate((
                     (0, 89, "ok", "ok"), (300, 92, "unreachable", "unknown"),
@@ -397,6 +406,7 @@ class MonitorTests(unittest.TestCase):
             messages = [call.args[0] for call in notify.call_args_list]
             self.assertEqual(len(messages), 6)
             self.assertEqual(sum("daily summary" in message for message in messages), 1)
+            self.assertIn("Startup routing decisions to the Mac yesterday: Claude 1, Codex 1.", messages[0])
             self.assertIn("92% used", messages[1])
             self.assertIn("Will proxy unreachable", messages[2])
             self.assertIn("weekly capped", messages[3])
@@ -598,16 +608,78 @@ class MonitorTests(unittest.TestCase):
         monitor.refresh_pending_health_alerts(state, {"m5": host_report(), "will": will})
         self.assertEqual(pending["messages"], [monitor.WILL_SSH_DOWN, egress + monitor.EGRESS_FALLBACK])
 
+    def test_previous_day_failovers_counts_local_calendar_day_across_dst(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            claude = {"event": "primary_down", "reason": "startup_probe"}
+            codex = {"subcommand": "app-server", "selected": "fallback", "reason": "fallback_healthy"}
+            monitor.append_history(runtime / "failover.jsonl", [
+                dict(claude, ts="2026-11-01T06:59:59.999Z"),
+                dict(claude, ts="2026-11-01T07:00:00.000Z"),
+                dict(claude, ts="2026-11-02T07:59:59.999Z"),
+                dict(claude, ts="2026-11-02T08:00:00.000Z"),
+                dict(claude, ts="2026-11-01T17:00:00.000Z", reason="connect_timeout"),
+                dict(claude, ts="2026-11-01T17:00:00.000Z", event="primary_up"),
+            ])
+            monitor.append_history(runtime / "codex-failover.jsonl", [
+                dict(codex, ts="2026-11-01T08:00:00.000Z"),
+                dict(codex, ts="2026-11-01T09:00:00.000Z"),
+                dict(codex, ts="2026-11-01T10:00:00.000Z", subcommand="exec"),
+                dict(codex, ts="2026-11-01T10:00:00.000Z", selected="primary"),
+                dict(codex, ts="2026-11-01T10:00:00.000Z", reason="both_unhealthy"),
+                dict(codex, ts="invalid"),
+            ])
+            with (runtime / "codex-failover.jsonl").open("ab") as stream:
+                stream.write(b'[]\n' + b'[' * 2000 + b']' * 2000 + b'\n\xff\n{"ts":')
+            try:
+                with patch.dict(os.environ, {"TZ": "America/Los_Angeles"}):
+                    system_time.tzset()
+                    self.assertEqual(monitor.previous_day_failovers(runtime, date(2026, 11, 2)),
+                                     {"Claude": 2, "Codex": 2})
+            finally:
+                system_time.tzset()
+
+    def test_previous_day_failovers_stops_before_old_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            log = runtime / "failover.jsonl"
+            with log.open("wb") as stream:
+                stream.seek(16 * 1024 * 1024)
+                stream.write(b"\n")
+            startup = {"event": "primary_down", "reason": "startup_probe"}
+            monitor.append_history(log, [
+                dict(startup, ts="2026-11-15T12:00:00Z"),
+                dict(startup, ts="2026-11-17T12:00:00Z"),
+                dict(startup, ts="2026-11-18T12:00:00Z"),
+            ])
+            try:
+                with patch.dict(os.environ, {"TZ": "UTC"}):
+                    system_time.tzset()
+                    self.assertEqual(monitor.previous_day_failovers(runtime, date(2026, 11, 18)),
+                                     {"Claude": 1, "Codex": 0})
+            finally:
+                system_time.tzset()
+
+    def test_previous_day_failovers_distinguishes_missing_and_unreadable_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "codex-failover.jsonl").mkdir()
+            self.assertEqual(monitor.previous_day_failovers(runtime, date(2026, 11, 18)),
+                             {"Claude": 0, "Codex": None})
+
     def test_daily_summary_reports_pause_time_instead_of_a_previous_parity_result(self):
         paused_at = probe.iso(NOW)
         mac = monitor.host_health(monitor.paused_report({"paused_at": paused_at}))
         parity = {"status": "equal"}
-        summary = monitor.daily_message("fixture day", [], {"m5": mac}, parity, [])
+        failovers = {"Claude": 0, "Codex": None}
+        summary = monitor.daily_message("fixture day", [], {"m5": mac}, parity, [], failovers)
         self.assertIn(f"Mac: paused since {monitor.display_time(paused_at)}; parity not checked", summary)
         self.assertNotIn("Parity: equal.", summary)
-        summary = monitor.daily_message("fixture day", [], {"m5": monitor.host_health(host_report())}, parity, [])
+        healthy = monitor.host_health(host_report())
+        summary = monitor.daily_message("fixture day", [], {"m5": healthy}, parity, [], failovers)
         self.assertIn("Parity: equal.", summary)
         self.assertNotIn("Mac: paused", summary)
+        self.assertIn("Startup routing decisions to the Mac yesterday: Claude 0, Codex unavailable.", summary)
 
     def test_short_cooldowns_share_one_episode_until_an_hour_quiet(self):
         state = {}
@@ -713,7 +785,7 @@ class MonitorTests(unittest.TestCase):
         monitor.summary_records(state, [reading], NOW)
         deferred = sample(status="quota-deferred")
         records = monitor.summary_records(state, [deferred], NOW + timedelta(seconds=900))
-        summary = monitor.daily_message("fixture day", records, {}, {}, [])
+        summary = monitor.daily_message("fixture day", records, {}, {}, [], {"Claude": 0, "Codex": 0})
         self.assertIn("weekly 92%", summary)
         self.assertIn("as of ", summary)
         self.assertEqual(deferred["windows"], [])
@@ -807,8 +879,8 @@ class MonitorTests(unittest.TestCase):
 
     def test_monitor_modules_stay_compatible_with_apple_python_39(self):
         # /usr/bin/python3 is 3.9: no newer syntax, and no `X | Y` annotations evaluated at runtime.
-        for name in ("fleet_monitor", "fleet_monitor_probe", "fleet_quota_chart", "fleetctl",
-                     "fleet_mac", "fleet_routing", "claude_usage_resets"):
+        for name in ("fleet_monitor", "fleet_monitor_probe", "fleet_heartbeat", "fleet_quota_chart",
+                     "fleetctl", "fleet_mac", "fleet_routing", "claude_usage_resets"):
             source = (monitor.OPS / (name + ".py")).read_text(encoding="utf-8")
             tree = ast.parse(source, feature_version=(3, 9))
             if "from __future__ import annotations" in source:
