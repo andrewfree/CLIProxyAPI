@@ -93,6 +93,17 @@ this part:
   or found no entry for the account. The line says which. The usage numbers
   above it still come from Anthropic.
 
+If one account's profile or usage read fails, `status` prints `usage unavailable:`
+with the reason under that account, still prints its proxy lines, and goes on to
+the other accounts. The reason is Anthropic's status (such as
+`usage endpoint returned HTTP 429`) or the proxy's own failure to reach Anthropic
+for that account (`management HTTP 502`, or 400 for a missing token). `status`
+retries a server error once after 30 seconds and never retries a 429, because a
+429 means the account was read again too soon. When any account failed, it exits
+1 and prints a count on stderr. With `--json`, a failed account's entry has only
+`account`, `error` and `proxy`. A connection lost after the proxy answered still
+ends the whole report, and that never falls back to the Mac.
+
 Read these lines first when a delegated Claude lane fails with `529 Overloaded`.
 On November 24, 2026, every Fable request went to the Gmail account, the only
 one not capped, and Anthropic returned `overloaded_error` on that account. The

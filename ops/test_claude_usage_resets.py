@@ -225,23 +225,76 @@ class StatusCommandTest(unittest.TestCase):
         self.assertIn("HTTP 403", accounts[0]["error"])
         self.assertEqual(accounts[1]["scoped"]["Fable"]["percent"], 18)
 
-    def test_a_rate_limited_account_retries_once_then_the_report_goes_on(self):
-        other = "second@example.com"
+    class TwoAccounts(FakeProxy):
+        OTHER = "second@example.com"
 
-        class TwoAccounts(FakeProxy):
-            def claude_accounts(self):
-                return [{"provider": "claude", "email": EMAIL}, {"provider": "claude", "email": other}]
+        def claude_accounts(self):
+            return [{"provider": "claude", "email": EMAIL}, {"provider": "claude", "email": self.OTHER}]
 
-            def claude_credentials(self):
-                return {EMAIL: credential({}), other: credential({})}
+        def claude_credentials(self):
+            return {EMAIL: credential({"claude-fable-5-2": {"http_status": 529, "type": "overloaded_error",
+                                                             "at": "2026-11-25T07:31:11Z"}}),
+                    self.OTHER: credential({})}
 
-        proxy = TwoAccounts([(429, {}), (429, {}), (200, usage_body(fable=18))])
+    def test_a_rate_limited_account_is_not_retried_and_the_report_goes_on(self):
+        proxy = self.TwoAccounts([(429, {}), (200, usage_body(fable=18))])
         with mock.patch.object(resets.time, "sleep") as slept, contextlib.redirect_stderr(io.StringIO()):
             code, text = self.run_status(proxy, json_output=False)
         self.assertEqual(code, 1)
-        self.assertEqual([c.args[0] for c in slept.call_args_list], [resets.STATUS_USAGE_WAIT_SECONDS])
+        self.assertEqual(slept.call_count, 0)  # a 429 means the polling spacing was not met
         self.assertIn("usage unavailable: usage endpoint returned HTTP 429", text)
         self.assertIn("Fable: 18% of its cap", text)
+
+    def test_a_server_error_is_retried_once(self):
+        proxy = self.TwoAccounts([(503, {}), (200, usage_body(fable=40)), (200, usage_body(fable=18))])
+        with mock.patch.object(resets.time, "sleep") as slept, contextlib.redirect_stderr(io.StringIO()):
+            code, text = self.run_status(proxy, json_output=False)
+        self.assertEqual(code, 0)
+        self.assertEqual([c.args[0] for c in slept.call_args_list], [resets.STATUS_USAGE_WAIT_SECONDS])
+        self.assertIn("Fable: 40% of its cap", text)
+
+    def test_a_proxy_side_failure_for_one_account_does_not_hide_the_others(self):
+        class ProxyFails(self.TwoAccounts):
+            def upstream(self, email, method, url, body=None):
+                if email == EMAIL:
+                    raise urllib.error.HTTPError("http://proxy.invalid/v8/management/requests/api-call", 502,
+                                                 "Bad Gateway", {}, None)
+                return super().upstream(email, method, url, body)
+
+        proxy = ProxyFails([(200, usage_body(fable=18))])
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, raw = self.run_status(proxy, json_output=True)
+        self.assertEqual(code, 1)
+        failed, ok = json.loads(raw)["accounts"]
+        self.assertEqual(failed["error"], "management HTTP 502")
+        self.assertEqual(failed["proxy"]["failures"][0]["type"], "overloaded_error")
+        self.assertEqual(ok["scoped"]["Fable"]["percent"], 18)
+
+    def test_a_non_json_profile_body_does_not_crash_the_report(self):
+        class OddProfile(self.TwoAccounts):
+            def upstream(self, email, method, url, body=None):
+                if url == resets.PROFILE_URL:
+                    return 200, "not json"
+                return super().upstream(email, method, url, body)
+
+        proxy = OddProfile([(200, usage_body(fable=10)), (200, usage_body(fable=18))])
+        code, text = self.run_status(proxy, json_output=False)
+        self.assertEqual(code, 0)
+        self.assertIn("(unknown tier)", text)
+
+    def test_a_connection_lost_after_the_proxy_answered_exits_1_not_3(self):
+        class DropsAfterAnswering(self.TwoAccounts):
+            def upstream(self, email, method, url, body=None):
+                self.answered = True
+                raise resets.ProxyConnectionError("connection reset")
+
+        proxy = DropsAfterAnswering([])
+        with mock.patch.object(resets, "load_management_key", return_value="unused"), \
+                mock.patch.object(resets, "Proxy", return_value=proxy), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            code = resets.main(["status", "--host", "local"])
+        self.assertEqual(code, 1)  # PROXY_UNREACHABLE (3) would let --host auto fall back
+        self.assertIn("lost the connection", err.getvalue())
 
     def test_a_lost_proxy_connection_still_ends_the_report(self):
         class DropsMidway(FakeProxy):
