@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+from xml.parsers.expat import ExpatError
 import re
 import shutil
 import stat
@@ -349,12 +350,15 @@ def verify_bundle(host, manifest, launchers):
                 elif script == "archive_logs.py":
                     # The destination lives only in the plist environment, so an old
                     # installed plist would keep archiving to a retired drive.
+                    if "ops/" + label + ".plist" not in manifest["files"]:
+                        raise KeyError(label + ".plist is not in the bundle")
                     with (root / (label + ".plist")).open("rb") as stream:
                         shipped = plistlib.load(stream)["EnvironmentVariables"]
                     if any(job["EnvironmentVariables"].get(key) != shipped.get(key)
                            for key in ("CLIPROXY_LOG_ARCHIVE_ROOT", "CLIPROXY_LOG_ARCHIVE_MOUNT")):
                         issues.append("P0/" + label)
-            except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError,
+                    ExpatError, plistlib.InvalidFileException):
                 issues.append("P0/" + label)
 
         # The monitor plist is installed verbatim from the bundle once Andrew activates

@@ -256,9 +256,25 @@ class FleetBundleTest(unittest.TestCase):
         self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/" + archive_label])
         # An installed plist still pointing at a retired archive drive is drift too.
         stale["ProgramArguments"].append("--archive-only")
-        stale["EnvironmentVariables"]["CLIPROXY_LOG_ARCHIVE_ROOT"] = "/Volumes/Innie/backups/llm-logs/cliproxy/m5/live"
+        good_environment = dict(stale["EnvironmentVariables"])
+        for key, old in (("CLIPROXY_LOG_ARCHIVE_ROOT", "/Volumes/Innie/backups/llm-logs/cliproxy/m5/live"),
+                         ("CLIPROXY_LOG_ARCHIVE_MOUNT", "/Volumes/Innie")):
+            stale["EnvironmentVariables"] = dict(good_environment, **{key: old})
+            archive_plist.write_bytes(plistlib.dumps(stale))
+            self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/" + archive_label], key)
+        stale["EnvironmentVariables"] = good_environment
         archive_plist.write_bytes(plistlib.dumps(stale))
-        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/" + archive_label])
+        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], [])
+        # A damaged or missing shipped plist is drift, not a crash.
+        shipped_plist = self.destination / (archive_label + ".plist")
+        saved = shipped_plist.read_bytes()
+        shipped_plist.write_bytes(saved[:40])
+        self.assertEqual(set(bundle.verify_bundle(host, manifest, launchers)["issues"]),
+                         {"P0/" + archive_label, "P0/file:ops/" + archive_label + ".plist"})
+        shipped_plist.write_bytes(saved)
+        # The combined check below keeps the earlier missing --archive-only drift installed.
+        self.assertEqual(stale["ProgramArguments"].pop(), "--archive-only")
+        archive_plist.write_bytes(plistlib.dumps(stale))
         launchers[0] = str(self.root / "cliproxy/ops/claude_account_launcher.mjs")
         (self.destination / "archive_logs.py").write_text("edited")
         helper.write_text("different")

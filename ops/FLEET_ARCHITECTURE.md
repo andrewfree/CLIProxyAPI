@@ -608,12 +608,15 @@ refresh ([README.md](README.md#oauth-health-and-reauthentication)).
 **Why logs archive to Storage.** The Mac sets `logs-max-total-size-mb: 0`, because CLIProxy's
 cleaner deletes without verifying an archive first. A separate job copies closed logs to an
 archive drive and verifies them by SHA-256. It used to prune verified copies; it now runs
-`--archive-only` and keeps them. Until November 18 the archive was on
+`--archive-only` and keeps every Mac copy. Until November 18 the archive was on
 TheCloud. That NAS share filled up, so nothing was archived or pruned and the Mac data volume fell
 to about 6 GiB free. Andrew chose Innie, a local drive, on November 18, and moved the archive to
-Storage, a 4 TB external drive, on November 25 ([README.md](README.md#log-retention)). The job
-runs `--archive-only`, so it keeps every Mac copy. Will uses
-a 1,024 MB cap with no archive, which is why the log cap is a host-specific path and not drift.
+Storage on November 25 ([README.md](README.md#log-retention)). The T9 drive, which shares Storage's
+physical disk, was skipped on November 18 after a disk error. Will uses
+a temporary 61,440 MiB cap while the disk12 log mover
+([PR #35](https://github.com/andrewfree/CLIProxyAPI/pull/35)) is prepared, and has no archive copy
+until that lands. Fleet parity treats the log cap
+as a host-specific setting.
 
 ### 2.9 Keys and secrets
 

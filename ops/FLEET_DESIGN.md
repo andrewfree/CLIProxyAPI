@@ -51,7 +51,7 @@ Will stays the always-on primary. The Mac is a full peer that serves when Will i
 | Strategy, affinity, quota cap, save-cooldown, request-retry, quota-exceeded | Equal (O) | Shared | Shared file; pinned |
 | Credential concurrency and in-flight | Explicit on Will only (O) | Latent drift | Shared, explicit |
 | `server.discovery` | Will only (O) | Host-specific | Will only; the Mac must not advertise on foreign networks |
-| Log size cap | Will 1024 (policy `config-policy.json:23` V), Mac 0 plus archiver | Host-specific | Host path allowlist |
+| Log size cap | Will 1024 (policy `config-policy.json:23` V; 61,440 since November 23, PR #40), Mac 0 plus archiver | Host-specific | Host path allowlist |
 | `debug` | Mac true, Will false (O) | Drift | Dated exception until Andrew decides (Q13) |
 | Header defaults, plugin store source, telemetry off | Equal (O) | Shared | Shared file |
 | `zai-coding-plan` aliases | Mac lacks `glm-5p3-flash` (O; `ops/GLM_ROUTING.md:15-18` V) | Drift | Shared file |
