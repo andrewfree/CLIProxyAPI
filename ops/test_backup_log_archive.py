@@ -186,6 +186,91 @@ class BackupTest(unittest.TestCase):
         after = set(subprocess.run(["pgrep", "-P", str(os.getpid())], capture_output=True, text=True).stdout.split())
         self.assertEqual(after - before, set())
 
+    def test_a_failing_day_does_not_block_later_days_or_leave_partials(self):
+        self.add("2026-11-20", "bad.log", b"changed", record=hashlib.sha256(b"original").hexdigest())
+        self.add("2026-11-22", "good.log", b"good")
+        for _ in range(2):
+            with self.assertRaisesRegex(backup.BackupError, "1 day\\(s\\) failed: 2026-11-20"):
+                backup.back_up(self.config, TODAY)
+        self.assertEqual(self.parts("2026-11-22"), ["2026-11-22.part01"])
+        self.assertEqual([p.name for p in self.backup_root.glob("*.partial")], [])
+        self.assertEqual(list(self.backup_root.glob("2026-11-20.*")), [])
+
+    def test_publishing_never_replaces_an_existing_name(self):
+        self.backup_root.mkdir(parents=True)
+        final = self.backup_root / "taken"
+        final.write_text("committed")
+        partial = self.backup_root / "taken.partial"
+        partial.write_text("new")
+        with self.assertRaises(FileExistsError):
+            backup.publish(partial, final)
+        self.assertEqual(final.read_text(), "committed")
+
+    def test_runs_from_any_checkout_share_one_lock(self):
+        import fcntl
+        self.add("2026-11-22", "a.log", b"alpha")
+        self.backup_root.mkdir(parents=True)
+        holder = (self.backup_root / backup.LOCK_NAME).open("a")
+        self.addCleanup(holder.close)
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        argv = ["--archive-root", str(self.archive), "--backup-root", str(self.backup_root),
+                "--backup-mount", str(self.config.backup_mount), "--recipient", self.config.recipient]
+        with mock.patch.dict(os.environ, {"CLIPROXY_ROOT": self.tmp.name}):
+            self.assertEqual(backup.main(argv), 0)  # a scheduled run simply waits for tomorrow
+            self.assertEqual(backup.main(argv[:6] + ["--verify", "--identity", str(self.identity)]), 1)
+        self.assertEqual(self.parts("2026-11-22"), [])
+
+    def test_verify_reports_an_orphan_marker_and_still_checks_later_parts(self):
+        self.add("2026-11-20", "a.log", b"alpha")
+        self.add("2026-11-22", "b.log", b"beta")
+        backup.back_up(self.config, TODAY)
+        (self.backup_root / "2026-11-20.part01.tar.zst.age").unlink()
+        backup.back_up(self.config, TODAY)  # repacks the 20th as part02
+        self.assertEqual(backup.verify_all(self.config, self.identity), {"parts_verified": 2})
+        self.assertTrue((self.backup_root / "2026-11-22.part01.verified").exists())
+
+    def test_the_documented_verify_command_needs_no_recipient(self):
+        self.add("2026-11-22", "a.log", b"alpha")
+        backup.back_up(self.config, TODAY)
+        argv = ["--backup-root", str(self.backup_root), "--backup-mount", str(self.config.backup_mount),
+                "--verify", "--identity", str(self.identity)]
+        with mock.patch.dict(os.environ, {"CLIPROXY_ROOT": self.tmp.name}):
+            os.environ.pop("CLIPROXY_LOG_BACKUP_RECIPIENT", None)
+            self.assertEqual(backup.main(argv), 0)
+            self.assertEqual(backup.main(argv + ["--day", "2026-11-19"]), 1)
+
+    def test_check_finds_a_changed_ciphertext_without_a_key(self):
+        self.add("2026-11-22", "a.log", b"alpha")
+        backup.back_up(self.config, TODAY)
+        self.assertEqual(backup.check_all(self.config), {"parts_checked": 1})
+        cipher = self.backup_root / "2026-11-22.part01.tar.zst.age"
+        cipher.write_bytes(cipher.read_bytes()[:-1])
+        with self.assertRaisesRegex(backup.BackupError, "does not match its .sha256"):
+            backup.check_all(self.config)
+
+    def test_too_little_free_space_is_refused_before_writing(self):
+        self.add("2026-11-22", "a.log", b"alpha")
+        config = backup.Config(self.archive, self.backup_root, self.config.backup_mount,
+                               self.config.recipient, AGE, ZSTD, 3, reserve=1 << 62)
+        with self.assertRaisesRegex(backup.BackupError, "not enough free space"):
+            backup.back_up(config, TODAY)
+        self.assertEqual(list(self.backup_root.iterdir()), [])
+
+    def test_a_failing_encryptor_reports_its_own_message(self):
+        self.add("2026-11-22", "a.log", b"alpha")
+        fake = Path(self.tmp.name) / "fake-age"
+        fake.write_text("#!/bin/sh\necho 'age: disk full' >&2\nexit 1\n")
+        fake.chmod(0o755)
+        config = backup.Config(self.archive, self.backup_root, self.config.backup_mount,
+                               self.config.recipient, str(fake), ZSTD, 3)
+        with self.assertRaisesRegex(backup.BackupError, "age: disk full"):
+            backup.back_up(config, TODAY)
+        self.assertEqual(list(self.backup_root.glob("*")), [])
+
+    def test_day_needs_a_reading_mode(self):
+        with self.assertRaises(SystemExit):
+            backup.main(["--day", "2026-11-22"])
+
 
 class DefaultsTest(unittest.TestCase):
     def test_defaults_match_the_shipped_launch_agent(self):
