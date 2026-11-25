@@ -11,9 +11,9 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-// upstreamErrorTypePattern bounds what is kept from an upstream body: a short
-// machine-readable type such as overloaded_error, never free-form text.
-var upstreamErrorTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+// failureTokenPattern bounds the code and upstream type kept for a failure: a
+// short machine-readable token such as overloaded_error, never free-form text.
+var failureTokenPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // ModelFailure is the latest upstream failure one credential returned for one
 // model. Unlike ModelState.LastError, a later success does not clear it, so an
@@ -45,7 +45,11 @@ func (a *Auth) recordModelFailure(model string, err *Error, kind string, now tim
 	if a.modelFailures == nil {
 		a.modelFailures = make(map[string]ModelFailure)
 	}
-	a.modelFailures[model] = ModelFailure{HTTPStatus: status, Code: err.Code, Type: kind, At: now.UTC()}
+	code := strings.TrimSpace(err.Code)
+	if !failureTokenPattern.MatchString(code) {
+		code = "" // plugin errors can supply free-form codes
+	}
+	a.modelFailures[model] = ModelFailure{HTTPStatus: status, Code: code, Type: kind, At: now.UTC()}
 }
 
 // ModelFailuresSnapshot returns a copy of the latest failure per model.
@@ -78,7 +82,7 @@ func upstreamErrorType(body []byte) string {
 		text = text[idx:]
 	}
 	kind := strings.TrimSpace(ojson.Get(text, "error.type").String())
-	if !upstreamErrorTypePattern.MatchString(kind) {
+	if !failureTokenPattern.MatchString(kind) {
 		return ""
 	}
 	return kind

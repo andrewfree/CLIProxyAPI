@@ -80,7 +80,7 @@ func TestModelFailureKeepsOnlyStructuredFields(t *testing.T) {
 
 	secretBody := `{"type":"error","error":{"type":"invalid request: Bearer sk-secret","message":"token sk-secret"}}`
 	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "claude", Model: model,
-		Error: &Error{HTTPStatus: http.StatusBadRequest, Message: secretBody}})
+		Error: &Error{HTTPStatus: http.StatusBadRequest, Code: "plugin said Bearer sk-secret", Message: secretBody}})
 
 	updated, _ := manager.GetByID(auth.ID)
 	failure := updated.ModelFailuresSnapshot()[model]
@@ -89,6 +89,9 @@ func TestModelFailureKeepsOnlyStructuredFields(t *testing.T) {
 	}
 	if failure.Type != "" {
 		t.Fatalf("a free-form error type must not be kept, got %q", failure.Type)
+	}
+	if failure.Code != "" {
+		t.Fatalf("a free-form code must not be kept, got %q", failure.Code)
 	}
 }
 
@@ -112,7 +115,8 @@ func (fastFailureExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Requ
 		HTTPStatus: 529, Body: []byte(overloadedBody)}}
 }
 func (fastFailureExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	return nil, fmt.Errorf("not used")
+	return nil, &fastDirectError{response: &cliproxyexecutor.RequestTerminatedError{
+		HTTPStatus: 529, Body: []byte(overloadedBody)}}
 }
 func (fastFailureExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) { return auth, nil }
 func (fastFailureExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -136,6 +140,23 @@ func TestModelFailureReadsTypeFromFastDirectResponseBody(t *testing.T) {
 	failure := updated.ModelFailuresSnapshot()[model]
 	if failure.HTTPStatus != 529 || failure.Type != "overloaded_error" {
 		t.Fatalf("expected a 529 overloaded_error from the Fast body, got %+v", failure)
+	}
+}
+
+func TestModelFailureReadsTypeFromStreamedFastDirectResponseBody(t *testing.T) {
+	model := "claude-opus-5-5"
+	manager, auth := registerModelFailureAuth(t, model)
+	manager.RegisterExecutor(fastFailureExecutor{})
+
+	if _, errStream := manager.ExecuteStream(context.Background(), []string{"claude"},
+		cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errStream == nil {
+		t.Fatal("expected the streamed Fast failure to reach the caller")
+	}
+
+	updated, _ := manager.GetByID(auth.ID)
+	failure := updated.ModelFailuresSnapshot()[model]
+	if failure.HTTPStatus != 529 || failure.Type != "overloaded_error" {
+		t.Fatalf("expected a 529 overloaded_error from the streamed Fast body, got %+v", failure)
 	}
 }
 
