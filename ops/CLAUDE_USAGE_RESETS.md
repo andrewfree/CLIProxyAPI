@@ -134,7 +134,7 @@ Copy the pin from the `weekly_resets_at` value that `status --json` reported
 when Andrew approved the reset:
 
 ```sh
-python3 ops/claude_usage_resets.py claim --account <email> --grant full-reset-2611 \
+python3 ops/claude_usage_resets.py claim --host will --account <email> --grant full-reset-2611 \
   --min-weekly-percent 100 --weekly-resets-at 2026-11-25T02:00:00Z --yes
 ```
 
