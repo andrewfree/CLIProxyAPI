@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ops import archive_logs, cliproxy_watchdog as watchdog
+from ops import cliproxy_watchdog as watchdog
 
 
 class BundleLaunchAgentsTest(unittest.TestCase):
@@ -18,73 +18,41 @@ class BundleLaunchAgentsTest(unittest.TestCase):
         host = json.loads((ops / "fleet/hosts.json").read_text())["m5"]
         allowlist = (ops / "fleet/bundle.txt").read_text().splitlines()
         self.assertIn("ops/fleet_mac.py", allowlist)
-        for job, script, seconds, args in (
-            ("watchdog", "cliproxy_watchdog.py", 120, []),
-            ("log-archive", "archive_logs.py", 300, ["--archive-only"]),
-        ):
-            label = "com.rever.cliproxy-" + job
-            with self.subTest(label=label):
-                self.assertIn(f"ops/{label}.plist", allowlist)
-                self.assertIn(f"ops/{script}", allowlist)
-                with (ops / (label + ".plist")).open("rb") as stream:
-                    plist = plistlib.load(stream)
-                self.assertEqual(plist["Label"], label)
-                self.assertEqual(plist["ProgramArguments"],
-                                 ["/opt/homebrew/bin/python3", host["bundle_root"] + "/" + script, *args])
-                self.assertEqual(plist["WorkingDirectory"], host["instance_root"])
-                self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], host["instance_root"])
-                self.assertTrue(plist["RunAtLoad"])
-                self.assertEqual(plist["StartInterval"], seconds)
+        # The Innie log archive job was retired on 2026-11-23; the M5 log sweeper ingests logs into OpenObserve.
+        self.assertNotIn("ops/com.rever.cliproxy-log-archive.plist", allowlist)
+        self.assertNotIn("ops/archive_logs.py", allowlist)
+
+        label = "com.rever.cliproxy-watchdog"
+        script = "cliproxy_watchdog.py"
+        self.assertIn(f"ops/{label}.plist", allowlist)
+        self.assertIn(f"ops/{script}", allowlist)
+        with (ops / f"{label}.plist").open("rb") as stream:
+            plist = plistlib.load(stream)
+        self.assertEqual(plist["Label"], label)
+        self.assertEqual(plist["ProgramArguments"],
+                         ["/opt/homebrew/bin/python3", host["bundle_root"] + "/" + script])
+        self.assertEqual(plist["WorkingDirectory"], host["instance_root"])
+        self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], host["instance_root"])
+        self.assertTrue(plist["RunAtLoad"])
+        self.assertEqual(plist["StartInterval"], 120)
 
     @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
-    def test_installer_checks_both_scripts_before_touching_launch_agents(self):
+    def test_installer_checks_the_script_before_touching_launch_agents(self):
         ops = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             installer = root / "install_watchdog.sh"
             installer.write_text((ops / installer.name).read_text().replace("/bin/launchctl", "/usr/bin/false"))
-            existing = root / "watchdog.py"
-            existing.touch()
-            for job, script in [("watchdog", existing), ("log-archive", root / "missing.py")]:
-                label = f"com.rever.cliproxy-{job}"
-                plist = {"Label": label, "ProgramArguments": [sys.executable, str(script)]}
-                (root / (label + ".plist")).write_bytes(plistlib.dumps(plist))
+            label = "com.rever.cliproxy-watchdog"
+            plist = {"Label": label, "ProgramArguments": [sys.executable, str(root / "missing.py")]}
+            (root / f"{label}.plist").write_bytes(plistlib.dumps(plist))
             result = subprocess.run(
                 ["/bin/zsh", "-f", str(installer), str(root)], env={"HOME": str(root)},
                 capture_output=True, text=True, check=False,
             )
             self.assertEqual(result.returncode, 1, result)
-            self.assertIn("Cannot install com.rever.cliproxy-log-archive", result.stderr)
+            self.assertIn("Cannot install com.rever.cliproxy-watchdog", result.stderr)
             self.assertFalse((root / "Library").exists())
-
-    @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
-    def test_installer_requires_archive_only_before_installing_either_job(self):
-        ops = Path(__file__).resolve().parent
-        for args, allowed in (
-            ([], False), (["--prune"], False), (["--archive-only\n"], False),
-            (["--archive-only", "--prune"], False),
-            (["--prune", "--archive-only"], False), (["--verbose", "--archive-only"], True),
-        ):
-            with self.subTest(args=args), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                installer = root / "install_watchdog.sh"
-                installer.write_text((ops / installer.name).read_text().replace("/bin/launchctl", "/usr/bin/true"))
-                for job, arguments in (("watchdog", []), ("log-archive", args)):
-                    label = f"com.rever.cliproxy-{job}"
-                    script = root / f"{job}.py"
-                    script.touch()
-                    plist = {"Label": label, "ProgramArguments": [sys.executable, str(script), *arguments]}
-                    (root / f"{label}.plist").write_bytes(plistlib.dumps(plist))
-
-                result = subprocess.run(
-                    ["/bin/zsh", "-f", str(installer), str(root)], env={"HOME": str(root)},
-                    capture_output=True, text=True, check=False,
-                )
-
-                self.assertEqual(result.returncode, 0 if allowed else 1, result)
-                self.assertEqual((root / "Library/LaunchAgents").exists(), allowed)
-                if not allowed:
-                    self.assertIn("requires --archive-only and forbids --prune", result.stderr)
 
     @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
     def test_installer_uses_validated_bytes_after_bundle_switch(self):
@@ -101,17 +69,16 @@ class BundleLaunchAgentsTest(unittest.TestCase):
             switch.write_text('#!/bin/zsh\n/bin/ln -sfn "$HOME/older" "$HOME/current"\n'
                               'exec /usr/bin/install "$@"\n')
             switch.chmod(0o700)
+            label = "com.rever.cliproxy-watchdog"
+            plist_name = f"{label}.plist"
+            script = root / "watchdog.py"
+            script.touch()
             for generation in ("newer", "older"):
                 bundle = root / generation
                 bundle.mkdir()
-                for job in ("watchdog", "log-archive"):
-                    label = f"com.rever.cliproxy-{job}"
-                    script = root / f"{job}.py"
-                    script.touch()
-                    arguments = ["--archive-only"] if job == "log-archive" and generation == "newer" else []
-                    plist = {"Label": label, "ProgramArguments": [sys.executable, str(script), *arguments],
-                             "RunAtLoad": True, "Generation": generation}
-                    (bundle / f"{label}.plist").write_bytes(plistlib.dumps(plist))
+                plist = {"Label": label, "ProgramArguments": [sys.executable, str(script)],
+                         "RunAtLoad": True, "Generation": generation}
+                (bundle / plist_name).write_bytes(plistlib.dumps(plist))
             current = root / "current"
             current.symlink_to(root / "newer")
 
@@ -122,8 +89,8 @@ class BundleLaunchAgentsTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result)
             self.assertEqual(current.resolve(), (root / "older").resolve())
-            for original in (root / "newer").iterdir():
-                self.assertEqual((root / "Library/LaunchAgents" / original.name).read_bytes(), original.read_bytes())
+            installed = root / "Library/LaunchAgents" / plist_name
+            self.assertEqual(installed.read_bytes(), (root / "newer" / plist_name).read_bytes())
             self.assertEqual(list(tmp.iterdir()), [])
 
     @unittest.skipUnless(sys.platform == "darwin", "needs macOS mktemp and zsh")
@@ -167,7 +134,7 @@ class BundleJobsTest(unittest.TestCase):
         self.now = 10000
         self.job = watchdog.Watchdog(self.config, logger=self.logger, clock=lambda: self.now)
 
-    def test_watchdog_root_override_and_archive_instance_locations(self):
+    def test_watchdog_root_override(self):
         env = {"CLIPROXY_ROOT": str(self.root), "DOCKER_CONTEXT": "default",
                "CLIPROXY_DOCKER": "fake-docker", "CLIPROXY_CURL": "fake-curl"}
         with patch.dict(os.environ, env, clear=True):
@@ -175,14 +142,6 @@ class BundleJobsTest(unittest.TestCase):
             self.assertEqual(config.root, self.root)
             self.assertEqual(config.state_path, self.runtime / "state.json")
             self.assertTrue(config.guard_compose)
-            with (patch.object(sys, "argv", ["archive_logs.py", "--check-only"]),
-                  patch.object(archive_logs, "build_logger") as logger,
-                  patch.object(archive_logs, "LogArchiver") as archiver):
-                archiver.return_value.run.return_value.failures = 0
-                self.assertEqual(archive_logs.main(), 0)
-                self.assertEqual(logger.call_args.args[0], self.runtime / "archive.log")
-                self.assertTrue((self.runtime / "archive.lock").exists())
-                self.assertEqual(archiver.call_args.args[0].source_dir, self.root / "logs")
 
     def test_pause_suppresses_all_repair_routes_once_per_cycle_and_expires(self):
         pause = self.runtime / "watchdog.pause"
@@ -287,7 +246,6 @@ class BundleJobsTest(unittest.TestCase):
         (live / ".fleet-current").symlink_to(release.relative_to(live))
         jobs = {
             "cliproxy_watchdog.py": ["--check-only", "--skip-auth"],
-            "archive_logs.py": ["--check-only", "--mount-point", str(self.root / "not-mounted")],
             "auth_health.py": ["--json"],
         }
         for name in (*jobs, "fleet_mac.py", "instance_root.py"):

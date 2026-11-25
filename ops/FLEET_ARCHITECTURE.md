@@ -8,7 +8,7 @@ It is an explanation, not a procedure:
 - [FLEET.md](FLEET.md) is the runbook: commands, release records, rollback paths.
 - [FLEET_DESIGN.md](FLEET_DESIGN.md) is the reviewed proposal. Parts of it are built and parts are
   not; its status line says which.
-- [README.md](README.md) documents the launcher, the watchdog and the log archiver.
+- [README.md](README.md) documents the launcher, the watchdog and Mac log retention.
 
 Where this document and FLEET.md disagree, FLEET.md and the live verifiers win. Sentences marked
 "(session record)" come from the November 17 and 18 working sessions and are not stated elsewhere
@@ -568,12 +568,12 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | Location | What it is | Consequence |
 | --- | --- | --- |
 | `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. Since the November 18 cutover the installed jobs and new T3 sessions use the bundle, not its checkout paths. | A pull, checkout, or uncommitted edit no longer changes a job or new session. Compose inputs here are still live. |
-| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`, and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and monitor LaunchAgents, the five T3 Claude launcher paths, and the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`. The archive job retired on November 23 and its files left the allowlist. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
 | `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
 | `config.yaml`, `.env`, `auths/` | Per-host secrets. | Keep them on the instance that owns them. |
-| `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 18. | See below. |
+| `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive from November 18 to 23; retired, emptied after verified ingest. | See below. |
 
 The checkout used to provide both the ops code and its working data. A checkout
 edit could reach launchd within 120 or 300 seconds, or T3 on the next session.
@@ -605,13 +605,13 @@ token file would invalidate each other, so each host logs in separately to the s
 ([FLEET.md](FLEET.md#running-fleet)). For the same reason, do not restart CLIProxy during a token
 refresh ([README.md](README.md#oauth-health-and-reauthentication)).
 
-**Why logs archive to Innie.** The Mac sets `logs-max-total-size-mb: 0`, because CLIProxy's
-cleaner deletes without verifying an archive first. A separate job copies closed logs to an
-archive drive, verifies them by SHA-256 and only then prunes. Until November 18 the archive was on
-TheCloud. That NAS share filled up, so nothing was archived or pruned and the Mac data volume fell
-to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free; the T9 drive was
-skipped because it had just thrown a disk error ([README.md](README.md#log-retention)). Will uses
-a 1,024 MB cap with no archive, which is why the log cap is a host-specific path and not drift.
+**Where Mac logs go.** The Mac sets `logs-max-total-size-mb: 0`, because CLIProxy's
+cleaner deletes without verifying a copy first. Until November 23 a separate job copied closed logs
+to an archive drive (TheCloud, then Innie from November 18) and verified them by SHA-256. On
+November 23 Andrew decided that Innie and Storage hold no logs: the M5 log sweeper now ingests
+closed logs into Will's OpenObserve, verifies them there and only then deletes them, and the archive
+job was retired ([README.md](README.md#log-retention)). Will uses a 1,024 MB cap with no archive,
+which is why the log cap is a host-specific path and not drift.
 
 ### 2.9 Keys and secrets
 
@@ -724,7 +724,7 @@ and skips the stop only when Docker is `down`. See
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
 | A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
 | Codex CLI slept for days on a long `Retry-After` | The header is omitted above one minute | Fleet release (server) | [FLEET.md](FLEET.md#running-fleet) |
-| The log archive filled and the Mac nearly ran out of disk | Archive moved to Innie | `ops/com.rever.cliproxy-log-archive.plist` | [README.md](README.md#log-retention) |
+| The log archive filled and the Mac nearly ran out of disk | Archive moved to Innie; retired on November 23 for ingest into OpenObserve | M5 log sweeper (outside this repository) | [README.md](README.md#log-retention) |
 | Review agents printed keys into transcripts | Client keys, the Z.ai key and the NVIDIA key rotated; reviewers get masked dumps only | Host config; working practice | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 
 ## 4. What is still manual or accepted

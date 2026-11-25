@@ -80,7 +80,7 @@ The first cutover ran on November 18, 2026 (see the
 stay as the record and as the procedure for a first cutover. Run from a clean worktree at
 the reviewed, merged unit 2b commit. Wait for Andrew's `promote fleet <id>`
 phrase before publishing, installing, or repointing profiles. Coordinate a
-window for the two LaunchAgents and new Claude CLIProxy sessions. Existing
+window for the watchdog LaunchAgent and new Claude CLIProxy sessions. Existing
 sessions keep the launcher they started with. The primary checkout remains
 the instance root for Compose, the host's logs, and private runtime state.
 
@@ -99,9 +99,11 @@ the instance root for Compose, the host's logs, and private runtime state.
    node ops/repoint_claude_launchers.mjs --base-dir "$HOME/.t3" --report
    ```
 
-2. After approval, save the installed plists and token helper for rollback,
-   publish the bundle, and check that the current container matches the
-   Compose inputs before recording them. If the receipt command refuses,
+2. After approval, complete the
+   [archive disable and unload](#mac-archive-retirement-for-forward-ships-and-rollbacks).
+   Save the installed watchdog plist and token helper for rollback, publish
+   the bundle, and check that the current container matches the Compose
+   inputs before recording them. If the receipt command refuses,
    investigate the mismatch before continuing. This cutover needs no
    container recreate. The destination needs Node.js on its PATH so ship
    can start the staged launcher alias with a fake Claude binary before
@@ -109,13 +111,18 @@ the instance root for Compose, the host's logs, and private runtime state.
 
    ```sh
    backup=$(mktemp -d "$instance/ops/runtime/mac-bundle-cutover.XXXXXXXX")
-   for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
-     cp -p "$HOME/Library/LaunchAgents/$label.plist" "$backup/$label.plist"
-   done
+   cp -p "$HOME/Library/LaunchAgents/com.rever.cliproxy-watchdog.plist" "$backup/"
    cp -p "$HOME/.local/bin/cliproxy-codex-token" "$backup/cliproxy-codex-token"
-   python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
-   (cd "$instance" && CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 \
-     "$bundle/cliproxy_watchdog.py" --record-compose-activation --verbose)
+   [ "${archive_disable_verified:-}" = yes ] &&
+     python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply &&
+     (cd "$instance" && CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 \
+       "$bundle/cliproxy_watchdog.py" --record-compose-activation --verbose)
+   ship_status=$?
+   archive_disable_verified=
+   [ "$ship_status" -eq 0 ] || {
+     print -u2 'STOP: archive disable not verified or ship failed'
+     false
+   }
    ```
 
    Keep the printed ship receipt and the value of `backup`. The activation
@@ -127,13 +134,11 @@ the instance root for Compose, the host's logs, and private runtime state.
    the existing named container. Running the bundled watchdog from any
    directory other than the instance root blocks the repair outright.
 
-3. Reinstall both LaunchAgents and update the five T3 profiles. The T3
+3. Reinstall the watchdog LaunchAgent and update the five T3 profiles. The T3
    helper uses `server.updateSettings` to change `config.binaryPath` and
    checks the saved profile settings. It writes private redacted before and
    after snapshots and prints the five path strings. The shipped token helper
    replaces the locally edited copy so P0 can verify its checksum.
-   For later archive job reinstalls, follow
-   [Install or resume the log archive job](README.md#install-or-resume-the-log-archive-job).
 
    ```sh
    /bin/zsh ops/install_watchdog.sh "$bundle"
@@ -142,13 +147,15 @@ the instance root for Compose, the host's logs, and private runtime state.
      --apply --backup-dir "$backup/t3-apply"
    ```
 
-4. Confirm both loaded jobs show the bundled scripts in their arguments.
+4. Confirm the loaded watchdog shows the bundled script in its arguments.
+   Check that `launchctl print-disabled` lists the archive label as disabled.
    Check that the installed token helper exits successfully and returns
    nonempty output, measuring its length without displaying the token.
-   The cutover receipt records the helper replacement. Verify P0, then
-   check the watchdog log for a normal cycle and the archiver
-   log for its usual status. Start one new `claude_cliproxy_mac` session
-   and one new named Claude session and verify that each can answer
+   The cutover receipt records the helper replacement. After P0 reports `ok`
+   for a forward ship, complete the
+   [archive plist cleanup](#mac-archive-retirement-for-forward-ships-and-rollbacks).
+   Check the watchdog log for a normal cycle. Start one new
+   `claude_cliproxy_mac` session and one new named Claude session and verify that each can answer
    `count_tokens` through its intended route. In a scratch worktree, a
    local edit to a shipped script should leave the deployed hash unchanged.
    Keep treating a checkout launcher edit as live until sessions using the old
@@ -156,11 +163,11 @@ the instance root for Compose, the host's logs, and private runtime state.
    only that block and leaves `commit` and `backup` set for the rollback.
 
    ```sh
-   for label in com.rever.cliproxy-watchdog com.rever.cliproxy-log-archive; do
-     launchctl print "gui/$(id -u)/$label"
-   done
+   launchctl print "gui/$(id -u)/com.rever.cliproxy-watchdog"
    (
      set -o pipefail
+     launchctl print-disabled "gui/$(id -u)" |
+       grep -Fq '"com.rever.cliproxy-log-archive" => disabled' || exit 1
      if ! token_length=$("$HOME/.local/bin/cliproxy-codex-token" | wc -c) ||
        [ "$token_length" -le 0 ]; then
        printf '%s\n' 'Installed Codex token helper failed to return a token. Stop and roll back.' >&2
@@ -187,19 +194,73 @@ CLIPROXY_ROOT="$PWD" /opt/homebrew/bin/python3 \
 rm -f ops/runtime/watchdog.pause
 ```
 
-**Mac rollback safety.** Before any bundle rollback, disable the log archive
-job and unload it if loaded. Stop if either operation fails. Keep the job
-disabled and unloaded when the rollback bundle's archive plist lacks
-`--archive-only` or contains `--prune`. A pre-archive-only bundle can prune
-Mac logs as soon as its old job loads.
+### Mac archive retirement for forward ships and rollbacks
+
+Before every forward ship or rollback on the Mac, persistently disable the
+retired Innie archive job, then unload it if it is loaded. Run the block in
+the same zsh session as the ship command. It sets `archive_disable_verified`
+only after both checks pass. If it prints `STOP`, fix the reported problem
+and rerun the block before continuing. If the old job loads, it can copy logs
+back onto Innie, and a bundle from before archive-only mode can also prune
+Mac logs. `launchctl error 113` identifies a missing service on the Mac.
 
 ```sh
 domain="gui/$(id -u)"
-archive_label=com.rever.cliproxy-log-archive
-launchctl disable "$domain/$archive_label"
-if launchctl print "$domain/$archive_label" >/dev/null 2>&1; then
-  launchctl bootout "$domain/$archive_label"
-fi
+archive_target="$domain/com.rever.cliproxy-log-archive"
+archive_disable_verified=
+(
+  set -o pipefail
+  launchctl disable "$archive_target" || exit 1
+  if probe=$(launchctl print "$archive_target" 2>&1); then
+    launchctl bootout "$archive_target" || exit 1
+  elif [ "$?" -ne 113 ]; then
+    print -ru2 -- "$probe"
+    exit 1
+  fi
+
+  if probe=$(launchctl print "$archive_target" 2>&1); then
+    print -u2 'Archive job is still loaded'
+    exit 1
+  elif [ "$?" -ne 113 ]; then
+    print -ru2 -- "$probe"
+    exit 1
+  fi
+  launchctl print-disabled "$domain" |
+    grep -Fq '"com.rever.cliproxy-log-archive" => disabled'
+) && archive_disable_verified=yes || { print -u2 'STOP: archive disable failed'; false; }
+```
+
+After a forward ship, run the step 4 P0 check from a clean checkout at the
+shipped SHA. P0 uses that checkout's `fleetctl.py` and its `fleet_bundle.py`.
+Once P0 reports `ok` and the archive job is still disabled, remove the
+installed plist. Keep the persistent disable.
+
+```sh
+(
+  set -o pipefail
+  launchctl print-disabled "gui/$(id -u)" |
+    grep -Fq '"com.rever.cliproxy-log-archive" => disabled' &&
+    rm -f "$HOME/Library/LaunchAgents/com.rever.cliproxy-log-archive.plist"
+)
+```
+
+**Mac rollback safety.** A bundle from before the archive job retired on
+2026-11-23 still ships `com.rever.cliproxy-log-archive`. Never run a
+pre-2026-11-23 bundle's `install_watchdog.sh`: it installs and enables the
+archive job. Keep the archive job disabled and unloaded through rollback.
+See [Log retention](README.md#log-retention) for the current ingest path.
+
+After rolling back to an older bundle-aware SHA, run the step 4 P0 check from
+a clean checkout at that rollback SHA. Its `fleet_bundle.py` still lists the
+archive job in `JOBS`, so `P0/com.rever.cliproxy-log-archive` is expected if
+you removed the installed plist. Accept that finding, or copy only the plist
+from the rolled-back bundle. Leave the job unloaded and skip `launchctl
+enable` and `launchctl bootstrap`. The persistent disable blocks loading.
+
+```sh
+/usr/bin/install -m 0644 \
+  "$HOME/cliproxy-live/ops/com.rever.cliproxy-log-archive.plist" \
+  "$HOME/Library/LaunchAgents/com.rever.cliproxy-log-archive.plist"
 ```
 
 **First cutover rollback.** Use the private `backup` from step 2. Restore the
@@ -231,27 +292,38 @@ launchctl enable "$domain/$watchdog_label"
 launchctl bootstrap "$domain" "$installed"
 ```
 
-Check the loaded jobs again. The saved settings take effect for new T3
-sessions. Use this checkout-path rollback for commits from before unit 2b.
+Check the loaded watchdog and confirm the archive label is still disabled.
+The saved settings take effect for new T3 sessions. Use this checkout-path
+rollback for commits from before unit 2b.
 To roll back a later bundle ship, use a previously shipped bundle-aware
-commit. Set `commit` in the shell to that full SHA, complete the archive
-disable and unload above, then run
-`python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply`. Ship
-refuses pre-bundle commits. Keep `commit` set to the rollback SHA.
+commit. Set `commit` in the shell to that full SHA. Ship refuses pre-bundle
+commits. Keep `commit` set to the rollback SHA for P0.
+
+For a later forward ship or bundle rollback, rerun the archive disable
+block above before shipping the target SHA.
+
+```sh
+[ "${archive_disable_verified:-}" = yes ] &&
+  python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+ship_status=$?
+archive_disable_verified=
+[ "$ship_status" -eq 0 ] || {
+  print -u2 'STOP: archive disable not verified or ship failed'
+  false
+}
+```
 
 After a later ship or bundle rollback, reinstall the token helper from the
-bundle when it changed and use the watchdog-only block above for watchdog
-plist changes. When the archive plist has `--archive-only` and omits
-`--prune`, use [Install the archive plist from the active bundle](README.md#install-the-archive-plist-from-the-active-bundle)
-to resume it. That block verifies the already shipped release against `commit`
-and installs from it. LaunchAgents are installed as copies. Reinstall the
-monitor's plist with the block in
+bundle when it changed and use the
+watchdog-only block above for watchdog plist changes. LaunchAgents are
+installed as copies. Reinstall the monitor's plist with the block in
 [Install or resume on the Mac](#install-or-resume-on-the-mac) when
 `ops/com.rever.cliproxy-fleet-monitor.plist` changed. P0 reports
 `P0/com.rever.cliproxy-fleet-monitor` while an installed copy differs from the
-shipped one. Rerun the step 4 checks against the
-shipped SHA. A ship publishes the tracked allowlist and
-`bundle-manifest.json` together. Previous copies of managed files go under
+shipped one. Rerun the step 4 checks against the shipped SHA. The archive
+plist cleanup applies to forward ships after P0 reports `ok`. A ship
+publishes the tracked allowlist and `bundle-manifest.json` together.
+Previous copies of managed files go under
 `~/cliproxy-live/prev/<timestamp>/`. An identical retry reports unchanged.
 
 The CLI can stage and publish on Will through its configured SSH destination.
@@ -602,7 +674,7 @@ These changes are live but are not part of a release. Of the changes below, only
 - **Claude date timezone.** Both hosts set `claude-header-defaults.timezone: America/Los_Angeles` (Mac `upstream.claude.header-defaults.timezone`). The containers run in Asia/Shanghai, so the cloaked date was a day ahead from 08:00 to 24:00 Pacific. Config only; `fleetctl parity` compares it on both hosts.
 - **Client key rotation.** Two new CLIProxy client keys were added at the top of both hosts' key lists, and every client moved to them: the five Mac T3 Claude profiles, Will's T3 profile and `client.key`, the Codex token helper, and M1's Codex and OpenCode key files. The two old keys were removed on 2026-11-19 at the end of the 24-hour overlap (see [November 19](#operations-on-november-19-2026)). Review agents had printed them in their own transcripts. The as-run rotation scripts are in [evidence/key-rotation-20261118](evidence/key-rotation-20261118/README.md).
 - **Provider keys.** A new Z.ai Coding Plan key ("CLIProxy fleet 2026-11-18") replaced the old one on both hosts and in CodexBar, and the old key was deleted in the Z.ai dashboard. OpenCode's `zai-coding-plan` credential (used by T3's `opencode` provider) also held the old key and was missed; GLM calls through it failed with "身份验证失败" (authentication failed) until it was replaced that evening with `opencode auth import` and `opencode auth switch`, the stale credential removed with `opencode auth logout`. A later Z.ai rotation must update it too. The NVIDIA key (then Mac only) was rotated the same day: "CLIProxy M5 2026-11-18" replaced "nvidia work" in the Mac config and `~/.config/nvidia/api.env`, a test request returned 200, and the old key was deleted. The new key expires on 2027-11-18 (NVIDIA's 12-month default).
-- **Log archive.** The Mac archive moved from TheCloud, which was full, to Innie; see [the archive section](README.md).
+- **Log archive.** The Mac archive moved from TheCloud, which was full, to Innie; see [the archive section](README.md). On 2026-11-23 the archive job was retired: Mac request logs are ingested into Will's OpenObserve by the M5 log sweeper and deleted after verification ([Log retention](README.md#log-retention)).
 - **Fleet design prechecks 0(b) and 0(c)** for the [design proposal](FLEET_DESIGN.md):
   - A refused connection or an unresolvable name fails in milliseconds. A silently dropped SYN on the Claude dial path waits about 133 to 135 seconds per dial (Mac 132.7 s, Will 135.1 s), because that dial has no connect bound. Both kernels accept the container sysctl `net.ipv4.tcp_syn_retries`: at 2 a dial fails in about 7 seconds, at 3 in about 20. With three credentials and `request-retry: 3` the worst case at 2 is still about 86 seconds, above the design's 30-second target. Both Compose files now set `sysctls: net.ipv4.tcp_syn_retries: 2`. A container picks it up only when it is recreated. Both were recreated later on November 18 (see the parity cleanup below), so the setting is live on both hosts. Will's verifier (`ops/instances/will/verify_live.py`) reports `compose_sysctls_drift` if Will's Compose copy lacks the setting and `container_sysctls_drift` if the running container does. The Mac verifier has no sysctl check; read `/proc/sys/net/ipv4/tcp_syn_retries` inside the container.
   - Traffic never stayed quiet for two consecutive windows: across 80 windows of 15 seconds per host, a 1 KiB per window floor on the two-window gate would have blocked all 79 deploy checks on each host. The design's pre-deploy activity gate needs a different approach before it is used.
