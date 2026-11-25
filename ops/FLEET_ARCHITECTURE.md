@@ -573,7 +573,7 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
 | `config.yaml`, `.env`, `auths/` | Per-host secrets. | Keep them on the instance that owns them. |
-| `/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 18. | See below. |
+| `/Volumes/Storage/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 25 (Innie from November 18). | See below. |
 
 The checkout used to provide both the ops code and its working data. A checkout
 edit could reach launchd within 120 or 300 seconds, or T3 on the next session.
@@ -605,12 +605,14 @@ token file would invalidate each other, so each host logs in separately to the s
 ([FLEET.md](FLEET.md#running-fleet)). For the same reason, do not restart CLIProxy during a token
 refresh ([README.md](README.md#oauth-health-and-reauthentication)).
 
-**Why logs archive to Innie.** The Mac sets `logs-max-total-size-mb: 0`, because CLIProxy's
+**Why logs archive to Storage.** The Mac sets `logs-max-total-size-mb: 0`, because CLIProxy's
 cleaner deletes without verifying an archive first. A separate job copies closed logs to an
-archive drive, verifies them by SHA-256 and only then prunes. Until November 18 the archive was on
+archive drive and verifies them by SHA-256. It used to prune verified copies; it now runs
+`--archive-only` and keeps every Mac copy. Until November 18 the archive was on
 TheCloud. That NAS share filled up, so nothing was archived or pruned and the Mac data volume fell
-to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free; the T9 drive was
-skipped because it had just thrown a disk error ([README.md](README.md#log-retention)). Will uses
+to about 6 GiB free. Andrew chose Innie, a local drive, on November 18, and moved the archive to
+Storage on November 25 ([README.md](README.md#log-retention)). The T9 drive, which shares Storage's
+physical disk, was skipped on November 18 after a disk error. Will uses
 a temporary 61,440 MiB cap while the disk12 log mover
 ([PR #35](https://github.com/andrewfree/CLIProxyAPI/pull/35)) is prepared, and has no archive copy
 until that lands. Fleet parity treats the log cap
@@ -727,7 +729,7 @@ and skips the stop only when Docker is `down`. See
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
 | A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
 | Codex CLI slept for days on a long `Retry-After` | The header is omitted above one minute | Fleet release (server) | [FLEET.md](FLEET.md#running-fleet) |
-| The log archive filled and the Mac nearly ran out of disk | Archive moved to Innie | `ops/com.rever.cliproxy-log-archive.plist` | [README.md](README.md#log-retention) |
+| The log archive filled and the Mac nearly ran out of disk | Archive moved to Innie, then Storage | `ops/com.rever.cliproxy-log-archive.plist` | [README.md](README.md#log-retention) |
 | Review agents printed keys into transcripts | Client keys, the Z.ai key and the NVIDIA key rotated; reviewers get masked dumps only | Host config; working practice | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 
 ## 4. What is still manual or accepted

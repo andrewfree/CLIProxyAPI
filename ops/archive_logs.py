@@ -28,10 +28,10 @@ else:
     from instance_root import instance_root, MissingInstanceRoot
 
 
-DEFAULT_ARCHIVE_ROOT = Path(
-    "/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live"
-)
-DEFAULT_MOUNT_POINT = Path("/Users/rever/Volumes/TheCloud")
+# Keep these equal to ops/com.rever.cliproxy-log-archive.plist, so a manual run
+# (for example --check-only from ops/README.md) inspects the live destination.
+DEFAULT_ARCHIVE_ROOT = Path("/Volumes/Storage/backups/llm-logs/cliproxy/m5/live")
+DEFAULT_MOUNT_POINT = Path("/Volumes/Storage")
 
 FileFingerprint = tuple[int, int, int, int, int]
 CachedFileFingerprint = tuple[int, int, int, int]

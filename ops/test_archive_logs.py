@@ -480,6 +480,14 @@ class LogArchiverTest(unittest.TestCase):
         self.assertEqual(result.pruned, 0)
         self.assertTrue(source.exists())
 
+class DefaultDestinationTest(unittest.TestCase):
+    def test_defaults_match_the_shipped_launch_agent(self):
+        import plistlib
+        plist_path = Path(__file__).resolve().parent / "com.rever.cliproxy-log-archive.plist"
+        environment = plistlib.loads(plist_path.read_bytes())["EnvironmentVariables"]
+        self.assertEqual(str(archive_logs.DEFAULT_ARCHIVE_ROOT), environment["CLIPROXY_LOG_ARCHIVE_ROOT"])
+        self.assertEqual(str(archive_logs.DEFAULT_MOUNT_POINT), environment["CLIPROXY_LOG_ARCHIVE_MOUNT"])
+
 
 if __name__ == "__main__":
     unittest.main()

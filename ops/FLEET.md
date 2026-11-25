@@ -191,7 +191,10 @@ rm -f ops/runtime/watchdog.pause
 job and unload it if loaded. Stop if either operation fails. Keep the job
 disabled and unloaded when the rollback bundle's archive plist lacks
 `--archive-only` or contains `--prune`. A pre-archive-only bundle can prune
-Mac logs as soon as its old job loads.
+Mac logs as soon as its old job loads. A rollback across a destination change
+also returns the job to the old drive, and P0 still reports ok because the
+installed plist matches the shipped one. Check the rollback bundle's
+`CLIPROXY_LOG_ARCHIVE_ROOT` before installing its plist.
 
 ```sh
 domain="gui/$(id -u)"

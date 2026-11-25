@@ -524,10 +524,10 @@ claim request copied from Claude Code, and the 2026-11-11 Fable reset record.
 The durable archive is:
 
 ```text
-/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/
+/Volumes/Storage/backups/llm-logs/cliproxy/m5/live/
 ```
 
-Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free. The T9 drive had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, update the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR, then follow the installation steps below.
+Andrew chose Storage on November 25, 2026. It is an APFS volume on a 4 TB external USB disk, which supports the hard links the archive needs. It shares that disk's space with the T9 volume: on November 25 the container had 348 GB unallocated before the Innie copy, about 126 GB after it. Innie grew 18 to 41 GB a day, so Storage fills within about a week unless the OpenObserve log sweeper (PR #38) removes local logs that it has verified. Check `diskutil info /Volumes/Storage` (Container Free Space); `df` overstates the free space on a shared container. From November 18 to 25 the archive was on Innie (`/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/`). Its copies are moved to Storage and verified with `shasum -a 256 --strict -c SHA256SUMS` before the Storage job is installed and before Innie is cleaned up. Until November 18 the archive was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Logs archived before that date stay on TheCloud. To switch destinations, update in one PR the two archive variables in `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py`, the defaults in `ops/archive_logs.py`, and `mount=` in the repair procedure below, then follow the installation steps below. Copy the old archive with its `SHA256SUMS` before installing the new plist, and never copy `SHA256SUMS` over again once the new job runs: that would drop the lines it appended.
 
 Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`.
 Each new copy is SHA-256 verified and recorded in the append-only `SHA256SUMS`
@@ -566,7 +566,7 @@ and investigate before changing the manifest.
   domain="gui/$(id -u)"
   export instance="$HOME/cliproxy"
   bundle="$HOME/cliproxy-live/ops"
-  mount=/Volumes/Innie
+  mount=/Volumes/Storage
   export archive="$mount/backups/llm-logs/cliproxy/m5/live"
   launchctl disable "$domain/$label"
   if launchctl print "$domain/$label" >/dev/null 2>&1; then
