@@ -2,12 +2,13 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 const overloadedBody = `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
@@ -39,7 +40,7 @@ func TestModelFailureRecordsOverloadAndSurvivesSuccess(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a recorded failure for %s, got %v", model, updated.ModelFailuresSnapshot())
 	}
-	if failure.HTTPStatus != 529 || failure.Message != overloadedBody {
+	if failure.HTTPStatus != 529 || failure.Type != "overloaded_error" {
 		t.Fatalf("unexpected failure record: %+v", failure)
 	}
 	if failure.At.Before(before) || failure.At.After(time.Now()) {
@@ -73,17 +74,84 @@ func TestModelFailureIgnoresFailuresWithoutUpstreamStatus(t *testing.T) {
 	}
 }
 
-func TestModelFailureTruncatesLongMessages(t *testing.T) {
+func TestModelFailureKeepsOnlyStructuredFields(t *testing.T) {
 	model := "claude-fable-5-2"
 	manager, auth := registerModelFailureAuth(t, model)
 
+	secretBody := `{"type":"error","error":{"type":"invalid request: Bearer sk-secret","message":"token sk-secret"}}`
 	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "claude", Model: model,
-		Error: &Error{HTTPStatus: http.StatusInternalServerError, Message: strings.Repeat("é", 400)}})
+		Error: &Error{HTTPStatus: http.StatusBadRequest, Message: secretBody}})
 
 	updated, _ := manager.GetByID(auth.ID)
-	message := updated.ModelFailuresSnapshot()[model].Message
-	if len([]rune(message)) != modelFailureMessageLimit {
-		t.Fatalf("expected %d runes, got %d", modelFailureMessageLimit, len([]rune(message)))
+	failure := updated.ModelFailuresSnapshot()[model]
+	if failure.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("expected the 400 to be recorded, got %+v", failure)
+	}
+	if failure.Type != "" {
+		t.Fatalf("a free-form error type must not be kept, got %q", failure.Type)
+	}
+}
+
+// fastDirectError mirrors the Claude Fast direct response error: a generic
+// message, Anthropic's body on the wrapped terminated response, request scoped.
+type fastDirectError struct {
+	response *cliproxyexecutor.RequestTerminatedError
+}
+
+func (e *fastDirectError) Error() string {
+	return fmt.Sprintf("claude Fast upstream request failed with status %d", e.response.HTTPStatus)
+}
+func (e *fastDirectError) Unwrap() error         { return e.response }
+func (e *fastDirectError) IsRequestScoped() bool { return true }
+
+type fastFailureExecutor struct{}
+
+func (fastFailureExecutor) Identifier() string { return "claude" }
+func (fastFailureExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &fastDirectError{response: &cliproxyexecutor.RequestTerminatedError{
+		HTTPStatus: 529, Body: []byte(overloadedBody)}}
+}
+func (fastFailureExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, fmt.Errorf("not used")
+}
+func (fastFailureExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) { return auth, nil }
+func (fastFailureExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, fmt.Errorf("not used")
+}
+func (fastFailureExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("not used")
+}
+
+func TestModelFailureReadsTypeFromFastDirectResponseBody(t *testing.T) {
+	model := "claude-opus-5-5"
+	manager, auth := registerModelFailureAuth(t, model)
+	manager.RegisterExecutor(fastFailureExecutor{})
+
+	if _, errExecute := manager.Execute(context.Background(), []string{"claude"},
+		cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute == nil {
+		t.Fatal("expected the Fast failure to reach the caller")
+	}
+
+	updated, _ := manager.GetByID(auth.ID)
+	failure := updated.ModelFailuresSnapshot()[model]
+	if failure.HTTPStatus != 529 || failure.Type != "overloaded_error" {
+		t.Fatalf("expected a 529 overloaded_error from the Fast body, got %+v", failure)
+	}
+}
+
+func TestUpstreamErrorTypeReadsWrappedBodies(t *testing.T) {
+	cases := map[string]string{
+		overloadedBody:                          "overloaded_error",
+		"upstream said: " + overloadedBody:      "overloaded_error",
+		`{"error":{"type":"rate_limit_error"}}`: "rate_limit_error",
+		"not json":                              "",
+		`{"error":{"type":"Has Spaces"}}`:       "",
+		`{"error":"flat string"}`:               "",
+	}
+	for body, want := range cases {
+		if got := upstreamErrorType([]byte(body)); got != want {
+			t.Errorf("upstreamErrorType(%q) = %q, want %q", body, got, want)
+		}
 	}
 }
 

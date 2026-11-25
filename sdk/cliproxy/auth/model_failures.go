@@ -1,26 +1,37 @@
 package auth
 
 import (
+	"errors"
 	"maps"
+	"regexp"
+	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/ojson"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-// modelFailureMessageLimit caps the stored upstream message, in runes.
-const modelFailureMessageLimit = 300
+// upstreamErrorTypePattern bounds what is kept from an upstream body: a short
+// machine-readable type such as overloaded_error, never free-form text.
+var upstreamErrorTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // ModelFailure is the latest upstream failure one credential returned for one
 // model. Unlike ModelState.LastError, a later success does not clear it, so an
-// operator can still see why requests failed after the model recovered.
+// operator can still see why requests failed after the model recovered. Only
+// structured fields are kept; the upstream message body is not stored.
 type ModelFailure struct {
-	Code       string    `json:"code,omitempty"`
-	HTTPStatus int       `json:"http_status"`
-	Message    string    `json:"message,omitempty"`
-	At         time.Time `json:"at"`
+	HTTPStatus int    `json:"http_status"`
+	Code       string `json:"code,omitempty"`
+	// Type is the upstream error.type, for example overloaded_error.
+	Type string    `json:"type,omitempty"`
+	At   time.Time `json:"at"`
 }
 
-// recordModelFailure stores err as the latest failure for model. Failures
-// without an upstream HTTP status, such as client cancellations, are skipped.
-func (a *Auth) recordModelFailure(model string, err *Error, now time.Time) {
+// recordModelFailure stores err as the latest failure for model. kind is the
+// upstream error.type when the caller already has it; otherwise it is read from
+// err.Message. Failures without an upstream HTTP status, such as client
+// cancellations, are skipped.
+func (a *Auth) recordModelFailure(model string, err *Error, kind string, now time.Time) {
 	if a == nil || model == "" || err == nil {
 		return
 	}
@@ -28,14 +39,13 @@ func (a *Auth) recordModelFailure(model string, err *Error, now time.Time) {
 	if status == 0 {
 		return
 	}
-	message := err.Message
-	if runes := []rune(message); len(runes) > modelFailureMessageLimit {
-		message = string(runes[:modelFailureMessageLimit])
+	if kind == "" {
+		kind = upstreamErrorType([]byte(err.Message))
 	}
 	if a.modelFailures == nil {
 		a.modelFailures = make(map[string]ModelFailure)
 	}
-	a.modelFailures[model] = ModelFailure{Code: err.Code, HTTPStatus: status, Message: message, At: now.UTC()}
+	a.modelFailures[model] = ModelFailure{HTTPStatus: status, Code: err.Code, Type: kind, At: now.UTC()}
 }
 
 // ModelFailuresSnapshot returns a copy of the latest failure per model.
@@ -44,4 +54,32 @@ func (a *Auth) ModelFailuresSnapshot() map[string]ModelFailure {
 		return nil
 	}
 	return maps.Clone(a.modelFailures)
+}
+
+// upstreamErrorTypeFromError reads error.type from a response body that an
+// error carries apart from its message, such as a Claude Fast direct response.
+func upstreamErrorTypeFromError(err error) string {
+	var terminated *cliproxyexecutor.RequestTerminatedError
+	if errors.As(err, &terminated) && terminated != nil {
+		return upstreamErrorType(terminated.Body)
+	}
+	return ""
+}
+
+// upstreamErrorType returns error.type from an upstream JSON error body, or
+// from the first JSON object in a message that wraps one.
+func upstreamErrorType(body []byte) string {
+	text := strings.TrimSpace(string(body))
+	if !ojson.Valid(text) {
+		idx := strings.Index(text, "{")
+		if idx < 0 || !ojson.Valid(text[idx:]) {
+			return ""
+		}
+		text = text[idx:]
+	}
+	kind := strings.TrimSpace(ojson.Get(text, "error.type").String())
+	if !upstreamErrorTypePattern.MatchString(kind) {
+		return ""
+	}
+	return kind
 }

@@ -83,6 +83,9 @@ type Result struct {
 	CredentialScope bool
 	// Error describes the failure when Success is false.
 	Error *Error
+	// upstreamErrorType is error.type from a response body the execution error
+	// carried apart from Error.Message, such as a Claude Fast direct response.
+	upstreamErrorType string
 	// Options carries execution request options (headers, metadata, etc.) for result tracking.
 	Options cliproxyexecutor.Options
 	// SkipQuotaObservation reports that this result must not replace the last
