@@ -87,12 +87,21 @@ def manifest_by_day(archive_root: Path) -> dict[str, list[tuple[str, str]]]:
 
 
 def committed_parts(backup_root: Path, day: str) -> list[Path]:
-    """The committed parts of a day, as paths without suffix, in part order."""
+    """The committed parts of a day, as paths without suffix, in part order.
+
+    A part counts only when its .sha256 marker, ciphertext and .members all
+    exist, so files of a part damaged by a crash are packed again.
+    """
     parts = []
     for path in backup_root.glob(f"{day}.part*.sha256"):
         match = PART_NAME.match(path.name)
-        if match:
-            parts.append((int(match.group(2)), backup_root / path.name[: -len(".sha256")]))
+        if not match:
+            continue
+        base = backup_root / path.name[: -len(".sha256")]
+        if Path(str(base) + ".tar.zst.age").is_file() and Path(str(base) + ".members").is_file():
+            parts.append((int(match.group(2)), base))
+        else:
+            log.warning("Ignoring %s: its ciphertext or .members file is missing", path.name)
     return [base for _, base in sorted(parts)]
 
 
@@ -105,8 +114,12 @@ def next_part_number(backup_root: Path, day: str) -> int:
 
 def read_members(base: Path) -> list[tuple[str, str]]:
     members = []
+    seen: set[str] = set()
     for line in Path(str(base) + ".members").read_text(encoding="utf-8").splitlines():
         digest, relative = line.split("  ", 1)
+        if relative in seen:
+            raise BackupError(f"{base.name}.members lists {relative} twice")
+        seen.add(relative)
         members.append((digest, relative))
     return members
 
@@ -132,6 +145,43 @@ def fsync_path(path: Path) -> None:
         os.close(fd)
 
 
+def publish(partial: Path, final: Path) -> None:
+    """Make a finished file durable under its final name."""
+    fsync_path(partial)
+    os.rename(partial, final)
+    fsync_path(final.parent)
+
+
+def file_state(status: os.stat_result) -> tuple[int, int, int, int, int]:
+    return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns
+
+
+def add_member(tar: tarfile.TarFile, path: Path, relative: str, digest: str) -> None:
+    """Add one archive file, refusing it if it changes while it is read."""
+    if path.is_symlink() or not path.is_file():
+        raise BackupError(f"{relative} is not a regular file")
+    with path.open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        info = tarfile.TarInfo(relative)
+        info.size, info.mtime, info.mode = before.st_size, int(before.st_mtime), 0o600
+        reader = HashingReader(stream)
+        tar.addfile(info, reader)
+        after = os.fstat(stream.fileno())
+    if file_state(after) != file_state(before) or file_state(os.lstat(path)) != file_state(before):
+        raise BackupError(f"{relative} changed while it was packed")
+    if reader.hash.hexdigest() != digest:
+        raise BackupError(f"{relative} does not match its manifest SHA-256")
+
+
+def close_pipe(stream: BinaryIO | None) -> None:
+    if stream is None:
+        return
+    try:
+        stream.close()
+    except (BrokenPipeError, OSError):
+        pass
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -141,49 +191,44 @@ def sha256_file(path: Path) -> str:
 
 
 def write_part(config: Config, day: str, members: list[tuple[str, str]]) -> Path:
-    """Pack, compress and encrypt members as the day's next part, then commit it."""
+    """Pack, compress and encrypt members as the day's next part, then commit it.
+
+    The ciphertext and .members are durable under their final names before the
+    .sha256 marker is published, so a crash never leaves a marker without them.
+    """
     base = config.backup_root / f"{day}.part{next_part_number(config.backup_root, day):02d}"
     cipher = Path(str(base) + ".tar.zst.age")
     partial = Path(str(cipher) + ".partial")
     age = subprocess.Popen([config.age, "-r", config.recipient, "-o", str(partial)], stdin=subprocess.PIPE)
-    zstd = subprocess.Popen([config.zstd, "-q", "-T0", f"-{config.level}", "-c"],
-                            stdin=subprocess.PIPE, stdout=age.stdin)
-    assert age.stdin is not None and zstd.stdin is not None
-    age.stdin.close()
+    zstd = None
     try:
+        zstd = subprocess.Popen([config.zstd, "-q", "-T0", f"-{config.level}", "-c"],
+                                stdin=subprocess.PIPE, stdout=age.stdin)
+        close_pipe(age.stdin)
         with tarfile.open(fileobj=zstd.stdin, mode="w|", format=tarfile.PAX_FORMAT) as tar:
             for digest, relative in members:
-                path = config.archive_root / relative
-                status = os.lstat(path)
-                if not path.is_file() or path.is_symlink():
-                    raise BackupError(f"{relative} is not a regular file")
-                info = tarfile.TarInfo(relative)
-                info.size, info.mtime, info.mode = status.st_size, int(status.st_mtime), 0o600
-                with path.open("rb") as stream:
-                    reader = HashingReader(stream)
-                    tar.addfile(info, reader)
-                if reader.hash.hexdigest() != digest:
-                    raise BackupError(f"{relative} does not match its manifest SHA-256")
+                add_member(tar, config.archive_root / relative, relative, digest)
+        close_pipe(zstd.stdin)
     except BaseException:
-        zstd.kill()
-        age.kill()
-        zstd.wait()
-        age.wait()
+        for process in (zstd, age):
+            if process is not None:
+                process.kill()
         raise
-    zstd.stdin.close()
-    if zstd.wait() != 0 or age.wait() != 0:
-        raise BackupError(f"zstd exited {zstd.returncode}, age exited {age.returncode}")
-    fsync_path(partial)
-    os.rename(partial, cipher)
-    members_file = Path(str(base) + ".members")
-    members_file.write_text("".join(f"{d}  {r}\n" for d, r in members), encoding="utf-8")
-    fsync_path(members_file)
-    commit = Path(str(base) + ".sha256")
-    commit_partial = Path(str(commit) + ".partial")
+    finally:
+        if zstd is not None:
+            close_pipe(zstd.stdin)
+        close_pipe(age.stdin)
+        zstd_rc = zstd.wait() if zstd is not None else None
+        age_rc = age.wait()
+    if zstd_rc != 0 or age_rc != 0:
+        raise BackupError(f"zstd exited {zstd_rc}, age exited {age_rc}")
+    publish(partial, cipher)
+    members_partial = Path(str(base) + ".members.partial")
+    members_partial.write_text("".join(f"{d}  {r}\n" for d, r in members), encoding="utf-8")
+    publish(members_partial, Path(str(base) + ".members"))
+    commit_partial = Path(str(base) + ".sha256.partial")
     commit_partial.write_text(f"{sha256_file(cipher)}  {cipher.name}\n", encoding="utf-8")
-    fsync_path(commit_partial)
-    os.rename(commit_partial, commit)
-    fsync_path(config.backup_root)
+    publish(commit_partial, Path(str(base) + ".sha256"))
     return base
 
 
@@ -205,13 +250,18 @@ def verify_part(config: Config, base: Path, identity: Path) -> dict:
                 stream = tar.extractfile(member)
                 if not member.isfile() or stream is None:
                     raise BackupError(f"{base.name} holds a non-file entry {member.name!r}")
+                if member.name in found:
+                    raise BackupError(f"{base.name} holds {member.name} twice")
                 digest = hashlib.sha256()
                 while chunk := stream.read(CHUNK):
                     digest.update(chunk)
                 found[member.name] = digest.hexdigest()
+    except tarfile.TarError as err:
+        raise BackupError(f"{base.name} could not be read after decryption: {err}") from None
     finally:
-        zstd.stdout.close()
-        zstd_rc, age_rc = zstd.wait(), age.wait()
+        close_pipe(zstd.stdout)
+        zstd_rc = zstd.wait()
+        age_rc = age.wait()
     if zstd_rc != 0 or age_rc != 0:
         raise BackupError(f"decrypting {cipher.name}: zstd exited {zstd_rc}, age exited {age_rc}")
     if found != expected:
@@ -256,6 +306,7 @@ def verify_all(config: Config, identity: Path, days: Iterable[str] | None = None
     check_destination(config)
     wanted = set(days) if days else None
     verified = 0
+    checked_days: set[str] = set()
     for commit in sorted(config.backup_root.glob("*.part*.sha256")):
         match = PART_NAME.match(commit.name)
         if match is None or (wanted is not None and match.group(1) not in wanted):
@@ -263,7 +314,10 @@ def verify_all(config: Config, identity: Path, days: Iterable[str] | None = None
         base = config.backup_root / commit.name[: -len(".sha256")]
         receipt = verify_part(config, base, identity)
         verified += 1
+        checked_days.add(match.group(1))
         log.info("Verified %s: %d files", base.name, receipt["members"])
+    if wanted is not None and wanted - checked_days:
+        raise BackupError(f"no committed part for {', '.join(sorted(wanted - checked_days))}")
     return {"parts_verified": verified}
 
 

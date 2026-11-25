@@ -124,6 +124,68 @@ class BackupTest(unittest.TestCase):
             backup.back_up(config, TODAY)
         self.assertEqual(list(self.backup_root.iterdir()), [])
 
+    def test_a_part_whose_ciphertext_vanished_is_packed_again(self):
+        self.add("2026-11-22", "a.log", b"alpha")
+        backup.back_up(self.config, TODAY)
+        (self.backup_root / "2026-11-22.part01.tar.zst.age").unlink()
+        self.assertEqual(backup.back_up(self.config, TODAY), {"parts_written": 1, "files_written": 1})
+        self.assertEqual(self.parts("2026-11-22"), ["2026-11-22.part02"])
+
+    def test_a_file_that_grows_while_packed_is_refused(self):
+        relative = self.add("2026-11-22", "a.log", b"alpha")
+        path = self.archive / relative
+        real_read = backup.HashingReader.read
+
+        def read_and_append(reader, size=-1):
+            data = real_read(reader, size)
+            with path.open("ab") as stream:
+                stream.write(b"-late")
+            return data
+
+        with mock.patch.object(backup.HashingReader, "read", read_and_append):
+            with self.assertRaisesRegex(backup.BackupError, "changed while it was packed"):
+                backup.back_up(self.config, TODAY)
+        self.assertEqual(self.parts("2026-11-22"), [])
+
+    def test_a_wrong_identity_fails_cleanly(self):
+        self.add("2026-11-22", "a.log", b"alpha")
+        backup.back_up(self.config, TODAY)
+        other = Path(self.tmp.name) / "other.agekey"
+        subprocess.run([KEYGEN, "-o", str(other)], check=True, capture_output=True)
+        with self.assertRaises(backup.BackupError):
+            backup.verify_all(self.config, other)
+
+    def test_verify_catches_a_duplicated_member(self):
+        relative = self.add("2026-11-22", "a.log", b"alpha")
+        backup.back_up(self.config, TODAY)
+        base = self.backup_root / "2026-11-22.part01"
+        cipher = Path(str(base) + ".tar.zst.age")
+        tar_path = Path(self.tmp.name) / "dup.tar"
+        import tarfile
+        with tarfile.open(tar_path, "w", format=tarfile.PAX_FORMAT) as tar:
+            for _ in range(2):
+                tar.add(self.archive / relative, arcname=relative)
+        packed = subprocess.run([ZSTD, "-q", "-c", str(tar_path)], check=True, capture_output=True).stdout
+        subprocess.run([AGE, "-r", self.config.recipient, "-o", str(cipher)], input=packed, check=True)
+        Path(str(base) + ".sha256").write_text(f"{backup.sha256_file(cipher)}  {cipher.name}\n")
+        with self.assertRaisesRegex(backup.BackupError, "twice"):
+            backup.verify_all(self.config, self.identity)
+
+    def test_verifying_a_day_without_parts_fails(self):
+        self.add("2026-11-22", "a.log", b"alpha")
+        backup.back_up(self.config, TODAY)
+        with self.assertRaisesRegex(backup.BackupError, "no committed part for 2026-11-21"):
+            backup.verify_all(self.config, self.identity, ["2026-11-21"])
+        self.assertEqual(backup.verify_all(self.config, self.identity, ["2026-11-22"]), {"parts_verified": 1})
+
+    def test_a_refused_file_leaves_no_running_children(self):
+        self.add("2026-11-22", "a.log", b"changed", record=hashlib.sha256(b"original").hexdigest())
+        before = set(subprocess.run(["pgrep", "-P", str(os.getpid())], capture_output=True, text=True).stdout.split())
+        with self.assertRaises(backup.BackupError):
+            backup.back_up(self.config, TODAY)
+        after = set(subprocess.run(["pgrep", "-P", str(os.getpid())], capture_output=True, text=True).stdout.split())
+        self.assertEqual(after - before, set())
+
 
 class DefaultsTest(unittest.TestCase):
     def test_defaults_match_the_shipped_launch_agent(self):
