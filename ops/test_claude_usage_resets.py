@@ -393,7 +393,8 @@ class ClaimTest(unittest.TestCase):
                  ({"reset_tolerance": -1}, "reset tolerance"),
                  ({"reset_tolerance": 86400}, "reset tolerance"),
                  ({"reset_tolerance": float("nan")}, "reset tolerance"),
-                 ({"min_weekly_percent": 101}, "between 0 and 100")]
+                 ({"min_weekly_percent": 101}, "between 0 and 100"),
+                 ({"reset_tolerance": 5}, "needs --weekly-resets-at")]
         for guards, message in cases:
             proxy = FakeProxy([])
             with self.subTest(guards=guards), self.assertRaisesRegex(resets.ResetError, message):

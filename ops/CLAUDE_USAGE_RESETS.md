@@ -146,7 +146,7 @@ checks to `claim`. Do not compare timestamps by hand in the task prompt.
 - `claim` always reads usage again before it sends anything. A separate check
   that the last `status` read is fresh adds nothing.
 - `captured_at`, `started_at`, and `finished_at` carry microseconds and a UTC
-  offset. Before 2026-11-19 they were whole seconds. On 2026-11-18 a watch
+  offset. Earlier versions of this tool wrote whole seconds. On 2026-11-18 a watch
   compared a whole-second `captured_at` with its own fractional start time,
   decided a same-second read was stale, and stopped before a claim it was
   approved to make.
@@ -187,9 +187,9 @@ For a conditional redemption, add `--min-fable-percent 99` or
 `--min-weekly-percent 100` to the claim, and `--weekly-resets-at` to pin the
 weekly window.
 The claim checks the account profile and reads usage again before spending
-the grant. It refuses if the Fable limit is missing, is not a finite number (an
-integer too large for a float counts as not finite), or is below the
-threshold, even if an earlier watch already triggered. This check
+the grant. It refuses if a guarded limit (Fable or the weekly total) is missing,
+is not a finite number (an integer too large for a float counts as not finite),
+or is below its threshold, even if an earlier watch already triggered. This check
 also applies to dry runs.
 
 `claim` refuses to run without `--yes` or `--dry-run`. Before sending, it does the following:

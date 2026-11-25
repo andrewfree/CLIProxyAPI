@@ -88,7 +88,7 @@ OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRed
 def now_iso() -> str:
     # Keep microseconds: watches compare these stamps with their own fractional
     # clocks, and a whole-second stamp reads as earlier than a same-second start.
-    return datetime.datetime.now().astimezone().isoformat()
+    return datetime.datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 def parse_iso(value: Any) -> datetime.datetime:
@@ -292,14 +292,18 @@ def claim(proxy: Proxy, email: str, grant_id: str, state_dir: pathlib.Path, rece
           dry_run: bool, sleep: Callable[[float], None] = time.sleep,
           min_fable_percent: int | None = None, min_weekly_percent: int | None = None,
           weekly_resets_at: str | None = None,
-          reset_tolerance: float = RESET_TOLERANCE_SECONDS, host: str | None = None,
+          reset_tolerance: float | None = None, host: str | None = None,
           status_hint: str = "status --host local") -> dict[str, Any]:
     if min_fable_percent is not None and not 0 <= min_fable_percent <= 100:
         raise ResetError("minimum Fable percent must be between 0 and 100")
     if min_weekly_percent is not None and not 0 <= min_weekly_percent <= 100:
         raise ResetError("minimum weekly percent must be between 0 and 100")
-    if not 0 <= reset_tolerance < MAX_RESET_TOLERANCE_SECONDS:
+    if reset_tolerance is not None and not 0 <= reset_tolerance < MAX_RESET_TOLERANCE_SECONDS:
         raise ResetError(f"reset tolerance must be at least 0 and below {MAX_RESET_TOLERANCE_SECONDS:g} seconds")
+    if reset_tolerance is not None and weekly_resets_at is None:
+        raise ResetError("a reset tolerance needs --weekly-resets-at; without a pin it would check nothing")
+    if reset_tolerance is None:
+        reset_tolerance = RESET_TOLERANCE_SECONDS
     if weekly_resets_at is not None:
         parse_iso(weekly_resets_at)  # reject a malformed pin before any network call
     receipt: dict[str, Any] = {"started_at": now_iso(), "account": email, "grant_id": grant_id, "dry_run": dry_run}
@@ -768,7 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="refuse a claim unless a fresh read reports a finite weekly total of at least this percent")
     p.add_argument("--weekly-resets-at", metavar="ISO8601",
                    help="refuse a claim unless the fresh weekly reset time is within --reset-tolerance of this pin")
-    p.add_argument("--reset-tolerance", type=float, default=RESET_TOLERANCE_SECONDS, metavar="SECONDS",
+    p.add_argument("--reset-tolerance", type=float, metavar="SECONDS",
                    help=f"allowed drift for --weekly-resets-at (default {RESET_TOLERANCE_SECONDS:g})")
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--yes", action="store_true", help="really redeem the grant")

@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import patch
 
 from ops import fleet_mac, fleet_monitor as monitor, fleet_monitor_probe as probe
+from ops import claude_usage_resets
 
 
 NOW = datetime(2026, 11, 18, 18, tzinfo=timezone.utc)
@@ -826,6 +827,20 @@ class MonitorTests(unittest.TestCase):
                     self.assertFalse(any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr) for n in ast.walk(note)),
                                      f"{name}.py line {note.lineno} uses a runtime X | Y annotation")
 
+
+
+class ClaudeUsageResetsOnAppleSystemPythonTest(unittest.TestCase):
+    """This file runs under /usr/bin/python3 (3.9), where fromisoformat takes only 3 or 6 fraction digits."""
+
+    def test_claim_pins_and_go_times_accept_any_fraction_length(self):
+        pin = claude_usage_resets.parse_iso("2026-11-18T02:00:01.0021Z")
+        self.assertEqual(pin, claude_usage_resets.parse_iso("2026-11-18T02:00:01.002100000Z"))
+        self.assertEqual(claude_usage_resets.parse_go_time("2026-11-25T04:52:27.123456789Z"),
+                         claude_usage_resets.parse_go_time("2026-11-25T04:52:27.123456Z"))
+
+    def test_now_iso_always_has_six_fraction_digits(self):
+        stamp = claude_usage_resets.now_iso()
+        self.assertRegex(stamp, r"T\d{2}:\d{2}:\d{2}\.\d{6}[+-]\d{2}:\d{2}$")
 
 if __name__ == "__main__":
     unittest.main()
