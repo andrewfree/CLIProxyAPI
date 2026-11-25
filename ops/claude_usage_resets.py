@@ -510,6 +510,7 @@ def read_credentials(proxy: Proxy) -> tuple[dict[str, dict[str, Any]], str | Non
 
 def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
     report = []
+    failed = 0
     credentials = None
     now = datetime.datetime.now(datetime.timezone.utc)
     for account in proxy.claude_accounts():
@@ -518,17 +519,29 @@ def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
             continue
         if credentials is None:
             credentials, credentials_error = read_credentials(proxy)
-        status, profile = proxy.upstream(email, "GET", PROFILE_URL)
-        tier = (profile.get("organization") or {}).get("rate_limit_tier") if status == 200 else None
-        summary = fetch_usage(proxy, email)
         view = proxy_view(credentials.get(email), credentials_error)
+        try:
+            status, profile = proxy.upstream(email, "GET", PROFILE_URL)
+            tier = (profile.get("organization") or {}).get("rate_limit_tier") if status == 200 else None
+            summary = fetch_usage(proxy, email)
+        except ResetError as err:
+            # One account's failed usage read must not hide the others, nor this
+            # account's proxy view, which often explains the failure.
+            failed += 1
+            report.append({"account": email, "error": str(err), "proxy": view})
+            if not args.json:
+                print(f"{email}\n  usage unavailable: {err}")
+                print(format_proxy_view(view, now))
+            continue
         report.append({"account": email, "tier": tier, **summary, "proxy": view})
         if not args.json:
             print(format_status(email, tier, summary))
             print(format_proxy_view(view, now))
     if args.json:
         print(json.dumps({"captured_at": now_iso(), "accounts": report}, indent=2))
-    return 0 if report else 1
+    if failed:
+        print(f"error: usage could not be read for {failed} of {len(report)} account(s)", file=sys.stderr)
+    return 0 if report and not failed else 1
 
 
 def notify(message: str) -> None:

@@ -194,6 +194,37 @@ class StatusCommandTest(unittest.TestCase):
             code = resets.cmd_status(proxy, args)
         return code, out.getvalue()
 
+    def test_one_failed_usage_read_does_not_hide_the_other_accounts(self):
+        other = "second@example.com"
+
+        class TwoAccounts(FakeProxy):
+            def claude_accounts(self):
+                return [{"provider": "claude", "email": EMAIL}, {"provider": "claude", "email": other}]
+
+            def claude_credentials(self):
+                return {EMAIL: credential({"claude-fable-5-2": {"http_status": 429, "type": "rate_limit_error",
+                                                                 "at": "2026-11-25T07:31:11Z"}}),
+                        other: credential({})}
+
+        # 403 is not retried, so the first account fails at once and the second still reads.
+        proxy = TwoAccounts([(403, {}), (200, usage_body(fable=18))])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code, text = self.run_status(proxy, json_output=False)
+        self.assertEqual(code, 1)
+        self.assertIn(f"{EMAIL}\n  usage unavailable: usage endpoint returned HTTP 403", text)
+        self.assertIn("last failure: claude-fable-5-2 HTTP 429 rate_limit_error", text)
+        self.assertIn(f"{other} (", text)
+        self.assertIn("Fable: 18% of its cap", text)
+        self.assertIn("usage could not be read for 1 of 2 account(s)", err.getvalue())
+
+        proxy = TwoAccounts([(403, {}), (200, usage_body(fable=18))])
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, raw = self.run_status(proxy, json_output=True)
+        accounts = json.loads(raw)["accounts"]
+        self.assertEqual(code, 1)
+        self.assertIn("HTTP 403", accounts[0]["error"])
+        self.assertEqual(accounts[1]["scoped"]["Fable"]["percent"], 18)
+
     def test_status_shows_the_proxys_latest_failure(self):
         code, text = self.run_status(self.StatusProxy({EMAIL: credential(FABLE_529)}), json_output=False)
         self.assertEqual(code, 0)
