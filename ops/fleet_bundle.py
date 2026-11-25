@@ -335,11 +335,14 @@ def verify_bundle(host, manifest, launchers):
     if host["name"] == "m5":
         home = root.parent.parent
         for label, script in JOBS.items():
+            arguments = ["/opt/homebrew/bin/python3", str(root / script)]
+            if script == "archive_logs.py":
+                arguments.append("--archive-only")
             try:
                 with (home / "Library/LaunchAgents" / (label + ".plist")).open("rb") as stream:
                     job = plistlib.load(stream)
                 if ("ops/" + script not in manifest["files"] or job["Label"] != label
-                        or job["ProgramArguments"] != ["/opt/homebrew/bin/python3", str(root / script)]
+                        or job["ProgramArguments"] != arguments
                         or job["EnvironmentVariables"]["CLIPROXY_ROOT"] != host["instance_root"]
                         or job["WorkingDirectory"] != host["instance_root"]):
                     issues.append("P0/" + label)

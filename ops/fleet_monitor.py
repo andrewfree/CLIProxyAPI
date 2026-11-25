@@ -17,13 +17,15 @@ import sys
 import tempfile
 
 if __package__:
-    from . import fleet_monitor_probe as probes, fleetctl
+    from . import fleet_mac, fleet_monitor_probe as probes, fleetctl
 else:
+    import fleet_mac
     import fleet_monitor_probe as probes
     import fleetctl
 
 OPS = Path(__file__).resolve().parent
 HOST_TIMEOUT = 70
+REMOTE_DEADLINE = 63  # Ends Will's worker even if SSH is interrupted.
 PARITY_TIMEOUT = 105
 TEXT_TIMEOUT = 12
 PARITY_INTERVAL = 3600
@@ -37,6 +39,15 @@ CLAUDE_SUMMARY_MAX_AGE = timedelta(minutes=35)
 COOLDOWN_QUIET = timedelta(hours=1)
 TEXT_PORT = 8787
 TEXT_SENT, TEXT_NOT_SENT, TEXT_UNCONFIRMED = 0, 20, 21
+MAC_DOWN = "Mac proxy down. Check the local fallback."
+MAC_RECOVERED = "Mac proxy reachable again."
+WILL_SSH_DOWN = "Will is not reachable over SSH from the Mac."
+RESUME_MAC = ("Run `python3 ops/fleetctl.py mac resume` on the Mac. "
+              "Open Codex sessions and named-account profiles stay on Will.")
+WILL_DOWN_MAC_PAUSED = "Will proxy unreachable and the Mac fallback is paused. " + RESUME_MAC
+EGRESS_FALLBACK = "Select codex_cliproxy_mac for Codex sessions. claude_cliproxy fails over on network faults."
+EGRESS_MAC_PAUSED = "The Mac fallback is paused. " + RESUME_MAC
+WILL_SSH_MAC_PAUSED = WILL_SSH_DOWN + " " + EGRESS_MAC_PAUSED
 SSH_ARGS = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
             "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
             "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes"]
@@ -118,8 +129,8 @@ def run_host(host, salt, visited, not_before):
     if destination is None:
         argv = [sys.executable, "-B", str(OPS / "fleet_monitor.py"), "--worker"]
     else:
-        # The remote deadline also ends the worker if SSH is interrupted.
-        argv = [*SSH_ARGS, "--", destination, "timeout", "-k", "1s", "63s", "python3", "-I", "-B", "-"]
+        argv = [*SSH_ARGS, "--", destination, "timeout", "-k", "1s", f"{REMOTE_DEADLINE}s",
+                "python3", "-I", "-B", "-"]
         payload = remote_program(payload)
     try:
         proc = subprocess.run(argv, input=payload, capture_output=True, text=True,
@@ -216,8 +227,11 @@ def host_health(host):
         status = "egress-down"
     else:
         status = "ok" if egress and all(value == "ok" for value in egress.values()) else "unknown"
-    return {"status": status, "reachability": reachability, "egress": egress,
-            "quota_errors": host["quota_errors"], "ssh_unreachable": host.get("ssh_unreachable", False)}
+    health = {"status": status, "reachability": reachability, "egress": egress,
+              "quota_errors": host["quota_errors"], "ssh_unreachable": host.get("ssh_unreachable", False)}
+    if reachability == "paused":
+        health["paused_at"] = host["paused_at"]
+    return health
 
 
 def quota_records(observed, previous, captured_at):
@@ -254,6 +268,19 @@ def quota_records(observed, previous, captured_at):
     return records, inventory
 
 
+def will_down_message(will, mac):
+    mac_paused = mac["reachability"] == "paused"
+    if will.get("ssh_unreachable"):
+        return WILL_SSH_MAC_PAUSED if mac_paused else WILL_SSH_DOWN
+    if mac_paused and unreachable(will) is True:
+        return WILL_DOWN_MAC_PAUSED
+    if unreachable(mac) is not False:
+        return "Will proxy unreachable."
+    # The wrapper picks a host only when a Codex session starts.
+    return ("Will proxy unreachable. New codex_cliproxy sessions start on the Mac; restart open "
+            "ones or use codex_cliproxy_mac. claude_cliproxy fails over per request.")
+
+
 def status_alerts(state, hosts, parity):
     alerts = []
     previous = state.setdefault("health_alerts", {})
@@ -261,16 +288,16 @@ def status_alerts(state, hosts, parity):
     egress = will["egress"].values()
     affected = ", ".join(name for name, value in sorted(will["egress"].items()) if value == "down")
     egress_down = (True if "down" in egress else False if egress and all(s == "ok" for s in egress) else None)
-    fallback = "Select the _mac profile for Codex-family. claude_cliproxy fails over on network faults."
-    will_opening = ("Will is not reachable over SSH from the Mac." if will.get("ssh_unreachable")
-                    else f"Will proxy unreachable. {fallback}")
+    # The Codex wrapper checks only /healthz at session start, so it cannot see egress loss.
+    mac_paused = mac["reachability"] == "paused"
+    fallback = EGRESS_MAC_PAUSED if mac_paused else EGRESS_FALLBACK
     issues = [
-        ("will-unreachable", unreachable(will), will_opening, "Will health checks recovered."),
+        ("will-unreachable", unreachable(will), will_down_message(will, mac), "Will health checks recovered."),
         ("will-egress", egress_down if will["reachability"] == "ok" else None,
          f"Will egress down for {affected}. {fallback}", "Will egress recovered."),
-        ("mac-unreachable", unreachable(mac),
-         "Mac proxy down. Check the local fallback.", "Mac proxy reachable again."),
     ]
+    if not mac_paused:
+        issues.append(("mac-unreachable", unreachable(mac), MAC_DOWN, MAC_RECOVERED))
     if parity is not None:
         issues.append(("parity-drift", {"drift": True, "equal": False}.get(parity.get("status")),
                        "Fleet parity drift appeared. Check the latest parity report.", "Fleet parity is equal again."))
@@ -287,6 +314,31 @@ def status_alerts(state, hosts, parity):
             current["streak"] = 1
         previous[key] = current
     return alerts
+
+
+def refresh_pending_health_alerts(state, hosts):
+    mac = hosts["m5"]
+    mac_paused = mac["reachability"] == "paused"
+    if mac_paused:
+        state.get("health_alerts", {}).pop("mac-unreachable", None)
+    pending = state.get("pending_alerts")
+    if not pending:
+        return
+    if mac_paused:
+        pending.get("health_alerts", {}).pop("mac-unreachable", None)
+    fallback = EGRESS_MAC_PAUSED if mac_paused else EGRESS_FALLBACK
+    messages = []
+    for message in pending["messages"]:
+        if mac_paused and message in (MAC_DOWN, MAC_RECOVERED):
+            continue
+        if (message.startswith("Will proxy unreachable and the Mac fallback is paused.")
+                or message == WILL_SSH_MAC_PAUSED
+                or (mac_paused and (message == WILL_SSH_DOWN or message.startswith("Will proxy unreachable.")))):
+            message = will_down_message(hosts["will"], mac)
+        if message.startswith("Will egress down for "):
+            message = message.partition(". ")[0] + ". " + fallback
+        messages.append(message)
+    pending["messages"] = messages
 
 
 def unreachable(host):
@@ -388,14 +440,24 @@ def daily_message(day, records, hosts, parity, seen_outages):
             lines.append(f"{'Will' if name == 'will' else 'Mac'} quota inventory incomplete.")
         if report["status"] == "unknown":
             lines.append(f"{'Will' if name == 'will' else 'Mac'} health incomplete.")
-    lines.extend([f"Parity: {parity.get('status', 'unknown')}.",
-                  "Outages since last summary: " + (", ".join(seen_outages) if seen_outages else "none observed") + "."])
+    mac = hosts.get("m5", {})
+    if mac.get("status") == "paused":
+        lines.append(f"Mac: paused since {display_time(mac['paused_at'])}; parity not checked")
+    else:
+        lines.append(f"Parity: {parity.get('status', 'unknown')}.")
+    lines.append("Outages since last summary: " + (", ".join(seen_outages) if seen_outages else "none observed") + ".")
     return "\n".join(lines)
 
 
-def collect_hosts(hosts, salt, not_before, host_guards=None):
+def paused_report(marker):
+    return {"reachability": "paused", "paused_at": marker["paused_at"],
+            "egress": {}, "accounts": [], "quota_errors": []}
+
+
+def collect_hosts(hosts, salt, not_before, host_guards=None, *, mac_marker=None):
     host_guards = host_guards or {}
-    mac = run_host(hosts["m5"], salt, set(), dict(not_before, _all=host_guards.get("m5", 0)))
+    mac = (paused_report(mac_marker) if mac_marker is not None else
+           run_host(hosts["m5"], salt, set(), dict(not_before, _all=host_guards.get("m5", 0))))
     visited = {row["account_id"] for row in mac["accounts"] if row["attempted_at"] is not None}
     will_due = dict(not_before, _all=host_guards.get("will", 0))
     if mac.get("uncertain"):
@@ -405,7 +467,7 @@ def collect_hosts(hosts, salt, not_before, host_guards=None):
     return {"m5": mac, "will": will}
 
 
-def collect_with_claude(hosts, state, state_file):
+def collect_with_claude(hosts, state, state_file, *, mac_marker=None):
     now = now_utc().timestamp()
     account_due = {tag: attempt + CLAUDE_MIN_INTERVAL
                    for tag, attempt in state.get("claude_attempts", {}).items()}
@@ -414,10 +476,11 @@ def collect_with_claude(hosts, state, state_file):
     # Both workers have deadlines. Reserve through those deadlines in case the
     # monitor exits before it learns which accounts they attempted.
     reserve = now + 2 * HOST_TIMEOUT + 10 + CLAUDE_MIN_INTERVAL
-    reserved = {name: max(host_guards.get(name, 0), reserve) for name in hosts}
+    reserved = {name: max(host_guards.get(name, 0), reserve) for name in hosts
+                if name != "m5" or mac_marker is None}
     state["claude_host_guards"] = reserved
     write_json(state_file, state)
-    observed = collect_hosts(hosts, state["salt"], account_due, host_guards)
+    observed = collect_hosts(hosts, state["salt"], account_due, host_guards, mac_marker=mac_marker)
 
     for name, report in observed.items():
         host_guards[name] = reserved[name] if report.get("uncertain") else host_guards.get(name, 0)
@@ -442,7 +505,8 @@ def tick(root, hosts, runtime, command, no_notify):
     latest_path = runtime / "latest.json"
     latest = read_json(latest_path, {})
     checked = probes.timestamp(latest.get("checked_at"))
-    parity_due = checked is None or (now - checked).total_seconds() >= PARITY_INTERVAL
+    mac_marker = fleet_mac.read_marker(root)
+    parity_due = mac_marker is None and (checked is None or (now - checked).total_seconds() >= PARITY_INTERVAL)
 
     hosts["m5"]["instance_root"] = str(root)
     state.pop("claude_tick", None)
@@ -452,15 +516,22 @@ def tick(root, hosts, runtime, command, no_notify):
         parity = pool.submit(run_parity) if parity_due else None
         if claude_due:
             state["claude_polled_at"] = now.timestamp()
-            observed = collect_with_claude(hosts, state, state_file)
+            observed = collect_with_claude(hosts, state, state_file, mac_marker=mac_marker)
         else:
-            observed = collect_hosts(hosts, state["salt"], {"_skip_claude": True})
+            observed = collect_hosts(hosts, state["salt"], {"_skip_claude": True}, mac_marker=mac_marker)
+
+    if mac_marker is None:
+        mac_marker = fleet_mac.read_marker(root)
+    if mac_marker is not None:
+        observed["m5"] = paused_report(mac_marker)
+        parity_due = False
 
     records, state["inventory"] = quota_records(observed, state.get("inventory", {}), captured_at)
     daily_records = summary_records(state, records, now)
     append_history(runtime / f"quota-history-{now:%Y-%m}.jsonl", records)
 
     health = {name: host_health(report) for name, report in observed.items()}
+    refresh_pending_health_alerts(state, health)
     if parity_due:
         latest = dict(parity.result(), checked_at=captured_at, health=health)
         write_json(latest_path, latest)
@@ -528,7 +599,7 @@ def main(argv=None):
     args = parser.parse_args(args_in)
     try:
         command = shlex.split(os.environ.get("CLIPROXY_FLEET_NOTIFY_COMMAND", ""))
-        runtime = args.root / "ops/runtime/fleet"
+        runtime = fleet_mac.runtime_dir(args.root)
         runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
         with os.fdopen(os.open(runtime / "monitor.lock", os.O_CREAT | os.O_WRONLY, 0o600), "w") as lock:
             try:

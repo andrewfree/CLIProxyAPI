@@ -12,6 +12,7 @@ ops/fleet/exceptions.json
 ops/fleet/hosts.json
 ops/fleet/paths.json
 ops/fleet_bundle.py
+ops/fleet_mac.py
 ops/fleet_routing.py
 ops/fleetctl.py
 ops/instance_root.py

@@ -86,7 +86,7 @@ Rollback: run [will_set_camoff_prefix.py](will_set_camoff_prefix.py) `<label-has
 The hash is the first 10 hex characters of the SHA-256 of the lowercased label of the Codex
 credential whose ID is `camoff-astra`, computed at run time from the Mac's credential list.
 
-## Monitor (installed 17:56, paused 17:57:57)
+## Monitor (installed 17:56, paused 17:57:57, briefly resumed and paused 19:03:30, resumed about 19:26)
 
 The install block in FLEET.md ran: `plutil` OK, Text Me health OK, bootstrap rc 0. The first run
 exited 0 in about 12 seconds and wrote `health.json`, `latest.json` and 8 history rows; Text Me
@@ -98,8 +98,9 @@ commands from a shell or `env -i` connected. Little Snitch's network extension i
 macOS firewall is off. The job was booted out before a second matching sample could send a false
 Will alert. Z.ai quota read `quota-unavailable` with no error; that needs its own follow-up.
 
-Resume: allow SSH from launchd jobs to Will, rerun `ssh_probe_launchd.sh <file>` until both lines
-show `rc=0`, then run the install block in FLEET.md again.
+Resume (the plan after the 17:57:57 pause, superseded by the 19:03 follow-up and the outcome
+below): allow SSH from launchd jobs to Will, rerun `ssh_probe_launchd.sh <file>` until both
+lines show `rc=0`, then run the install block in FLEET.md again.
 
 Follow-up at 19:03: after Andrew added a Little Snitch rule, the `/bin/sh` probe reached
 `will.local` (`rc=0`; the bare Tailscale address then failed only on key auth because
@@ -111,6 +112,10 @@ from the November 7 Messenger Access case; a `/bin/sh` parent did not help, and 
 `/usr/bin/python3` connected (`rc=0`). The monitor plist now uses `/usr/bin/python3`.
 `ssh_probe_launchd.sh <file>` now defaults to that chain ([ssh-probe.py](ssh-probe.py) under Apple's
 `python3`); pass `sh` as the second argument for the original `/bin/sh` probe.
+
+Outcome: at about 19:26 the monitor was reinstalled from the bundle shipped at `663471d0`
+(PR #24, Apple's `/usr/bin/python3`), and its first run reached both hosts. The Z.ai reads were
+empty because the Coding Plan reply had moved to `CREDIT_LIMIT` windows; PR #27 reads them.
 
 ## Side effects found afterwards
 

@@ -109,6 +109,7 @@ Those files are ignored by Git and can contain secrets.
 For rollback, first compare the current configuration with the activation
 record so later edits are preserved. Remove only the affected provider change
 in place. Do not replace or rename the single bind-mounted `config.yaml` file.
+On the Mac, host-side edits do not load at the moment; follow [FLEET_ARCHITECTURE section 4](FLEET_ARCHITECTURE.md#4-what-is-still-manual-or-accepted).
 After the watcher reloads, verify client authentication, provider-specific
 catalogs, and the fleet and owner checks. Never restore an old full
 configuration over later edits.

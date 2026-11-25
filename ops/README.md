@@ -1,6 +1,6 @@
 # CLIProxy recovery operations
 
-This directory owns the host-side recovery and archive-before-prune paths for the localhost CLIProxy service. It does not contain credentials. Runtime state and the jobs' bounded logs live in ignored `ops/runtime/`.
+This directory owns host-side recovery and log archiving for the localhost CLIProxy service. It does not contain credentials. Runtime state and the jobs' bounded logs live in ignored `ops/runtime/`.
 
 The primary Linux instance has its own secret-free owner contract under
 [`instances/will/`](instances/will/README.md). That contract is separate from
@@ -93,7 +93,7 @@ private deployment backup after confirming no task-owned client uses it.
 
 `CLIPROXY_FALLBACK_URL` names a second CLIProxy origin for a shared-pool
 profile. On the Mac, `claude_cliproxy` uses it for Will-to-Mac failover,
-and `codex_cliproxy` has used it for session-start failover since November 18 (see [Codex failover](#codex-failover)).
+and `codex_cliproxy` has used it for session-start failover since November 18, and `codex_kimi_mac` since November 21 (see [Codex failover](#codex-failover)).
 The Claude launcher refuses it on a named account route, because a pinned
 account must never move to another host. Without the variable, the Claude
 launcher keeps the default connection agent and starts no timers or probes.
@@ -295,7 +295,14 @@ rollout, closed-port drill and rollback.
 
 ## Recovery behavior
 
-`com.rever.cliproxy-watchdog` runs at login and every 120 seconds. One run performs these checks in order:
+`com.rever.cliproxy-watchdog` runs at login and every 120 seconds. While
+`ops/runtime/fleet/mac-paused.json` exists under the Mac instance root, the
+watchdog skips every check and recovery action. The marker stays in place
+until `mac resume` confirms the Docker engine is up. A cycle that starts while
+`mac pause` or `mac resume` holds the transition lock is skipped. See
+[Quitting Docker on the Mac](FLEET.md#quitting-docker-on-the-mac).
+
+During normal operation the watchdog performs these checks in order:
 
 1. A direct HTTP `GET /_ping` on the configured Docker Unix socket must return
    `200` and `OK`. The socket timeout is three seconds. This does not start the
@@ -340,26 +347,35 @@ The Mac's Compose guard requires the running container and Compose inputs
 to match the approved activation receipt before running `compose up`. The
 [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) covers recording
 that receipt and using `ops/runtime/watchdog.pause` before an approved Compose
-activation. The pause suppresses repairs for up to 30 minutes while checks
-continue. Remove the pause file after checking the refreshed receipt.
+activation. That maintenance pause suppresses repairs for up to 30 minutes
+while checks continue. Remove the pause file after checking the refreshed
+receipt.
 
 Factory reset, Docker volume deletion, and deleting `Docker.raw` are never watchdog actions.
 
-`com.rever.cliproxy-log-archive` runs at login and every 300 seconds. It handles only closed `.log` and `.log.gz` files older than one hour; the active `main.log` and recent request logs are never candidates. Each candidate is copied to the archive drive (Innie since November 18, 2026; see below), SHA-256 checked, recorded in the archive manifest, and fingerprinted again before the local copy is unlinked. A missing or unwritable archive mount means zero pruning. Lumberjack's closed `main-<timestamp>.log` rotations are eligible, so the active `main.log` remains local while completed rotations are preserved in the archive.
+`com.rever.cliproxy-log-archive` runs at login and every 300 seconds with
+`--archive-only`, keeping the Mac copies. It considers closed `.log` and
+`.log.gz` files at least one hour old, including Lumberjack's closed
+`main-<timestamp>.log` rotations. The active `main.log` stays local.
 
 ## Install and inspect
 
-Follow the [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) to
-ship a reviewed bundle and install its LaunchAgents. The installer checks both
-script paths before touching either job. Inspect the installed jobs and their
+For the log archiver, follow [Install or resume the log archive job](#install-or-resume-the-log-archive-job).
+The [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover) records the first
+installation of the bundled jobs. The fleet monitor's LaunchAgent,
+`com.rever.cliproxy-fleet-monitor`, installs with the block in
+[Install or resume on the Mac](FLEET.md#install-or-resume-on-the-mac) and logs to
+`~/Library/Logs/cliproxy-fleet-monitor.log`. Inspect the installed jobs and their
 logs from the instance checkout.
 
 ```bash
 cd /Users/rever/cliproxy
 launchctl print gui/$(id -u)/com.rever.cliproxy-watchdog
 launchctl print gui/$(id -u)/com.rever.cliproxy-log-archive
+launchctl print gui/$(id -u)/com.rever.cliproxy-fleet-monitor
 tail -n 100 ops/runtime/watchdog.log
 tail -n 100 ops/runtime/archive.log
+tail -n 100 ~/Library/Logs/cliproxy-fleet-monitor.log
 ```
 
 Run the infrastructure checks without recovery actions or auth gating:
@@ -485,14 +501,16 @@ docker exec -it cli-proxy-api \
 
 `claude_usage_resets.py` reads each Claude account's weekly and per-model
 limits, plus its Anthropic reset grants. It can also watch a limit or redeem a
-grant. Every request goes through this proxy's management API, so tokens never
-leave CLIProxy. `status` and `watch` are read-only. `claim` consumes a grant
-and needs Andrew's approval for that account and grant.
+grant. Every request goes through a proxy's management API, so tokens never
+leave CLIProxy. `status` and `watch` are read-only and ask Will first over SSH,
+falling back to the local proxy only when Will is unreachable. `claim` consumes
+a grant, runs only on the host it names, and needs Andrew's approval for that
+account and grant.
 
 ```sh
 python3 ops/claude_usage_resets.py status
 python3 ops/claude_usage_resets.py watch --account <email> --limit Fable --threshold 99 --notify
-python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --dry-run
+python3 ops/claude_usage_resets.py claim --host will --account <email> --grant <grant-id> --dry-run
 python3 -m unittest -v ops.test_claude_usage_resets
 ```
 
@@ -509,14 +527,176 @@ The durable archive is:
 /Volumes/Innie/backups/llm-logs/cliproxy/m5/live/
 ```
 
-Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free. The T9 drive had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, update the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR. Ship the reviewed commit and reinstall the LaunchAgents from the bundle using the [Mac ops bundle cutover](FLEET.md#mac-ops-bundle-cutover).
+Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free. The T9 drive had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, update the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR, then follow the installation steps below.
 
-Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`; `SHA256SUMS` is append-only evidence for archived content. The local copy is pruned only after content verification. If the archive drive is unavailable, local files accumulate and `ops/runtime/archive.log` records the failure. `main.log` itself is never pruned while active and rolls at 10 MB; its closed rotations then follow the same archive path.
+Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`.
+Each new copy is SHA-256 verified and recorded in the append-only `SHA256SUMS`
+manifest. The command keeps local copies by default. `--archive-only` explicitly
+selects that mode, and `--prune` explicitly allows deletion after verification.
+The flags are mutually exclusive. Archive-only runs keep a verification index in
+`ops/runtime/archive-index.json` under the instance root. The job counts a
+file as `skipped_by_index` when the source and archive metadata still match,
+and `SHA256SUMS` has the recorded inode and is at least as long as recorded.
+Device numbers assigned during attachment are excluded from the index.
+A missing or corrupt index or a missing, replaced, or
+shortened manifest triggers fresh verification. The first index miss in a
+run reads the full manifest. A run with only index hits checks metadata and
+the manifest's final byte. The job reports an unterminated tail as a failure
+and completes it with a newline only when the record names a regular archive
+file with a matching SHA-256. A malformed tail blocks index hits and new
+archive records until the manifest is repaired.
+Publishing a new archive copy requires hard-link support on the archive
+filesystem so competing writers can preserve both copies. Archive failures
+are reported in `ops/runtime/archive.log`.
 
-To archive without pruning, use:
+### Repair a malformed manifest tail
 
-```bash
-python3 ops/archive_logs.py --archive-only --verbose
+Use this procedure for a reported malformed unterminated final record. Keep
+every archive copy during repair. Confirm the configured archive mount is
+present and adjust `mount` and `archive` below if the job's settings differ.
+The checksum check runs from the archive root over every complete record
+before the damaged last line. If a complete record fails verification, stop
+and investigate before changing the manifest.
+
+```sh
+(
+  set -e
+  set -o pipefail
+  label=com.rever.cliproxy-log-archive
+  domain="gui/$(id -u)"
+  export instance="$HOME/cliproxy"
+  bundle="$HOME/cliproxy-live/ops"
+  mount=/Volumes/Innie
+  export archive="$mount/backups/llm-logs/cliproxy/m5/live"
+  launchctl disable "$domain/$label"
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then
+    launchctl bootout "$domain/$label"
+  fi
+  # bootout can return before the job exits, so wait until launchd no longer lists it.
+  for _ in {1..60}; do
+    launchctl print "$domain/$label" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  ! launchctl print "$domain/$label" >/dev/null 2>&1
+
+  repair=$(cat <<'EOS'
+set -e
+set -o pipefail
+cd "$archive"
+test -f SHA256SUMS && test ! -L SHA256SUMS && test -s SHA256SUMS || exit 1
+test "$(stat -f '%l' SHA256SUMS)" -eq 1
+test "$(tail -c 1 SHA256SUMS | od -An -tu1 | tr -d '[:space:]')" != 10
+backup=$(mktemp -d "$instance/ops/runtime/archive-repair.XXXXXXXX")
+cp -p SHA256SUMS "$backup/SHA256SUMS"
+printf 'Saved manifest backup at %s\n' "$backup/SHA256SUMS"
+repaired=$(mktemp "$archive/.SHA256SUMS.repair.XXXXXXXX")
+trap 'rm -f -- "$repaired"' EXIT
+complete_lines=$(wc -l < SHA256SUMS)
+if [ "$((complete_lines))" -gt 0 ]; then
+  head -n "$((complete_lines))" SHA256SUMS > "$repaired"
+  shasum -a 256 --strict -c "$repaired"
+fi
+chmod "$(stat -f '%Lp' SHA256SUMS)" "$repaired"
+mv -f "$repaired" SHA256SUMS
+EOS
+)
+  # Hold the archiver's own lock (-k keeps the lock file), so no run can write
+  # to the manifest during the repair. A busy lock fails after 60 seconds.
+  /usr/bin/lockf -k -t 60 "$instance/ops/runtime/archive.lock" /bin/zsh -c "$repair"
+
+  CLIPROXY_ROOT="$instance" /opt/homebrew/bin/python3 "$bundle/archive_logs.py" \
+    --archive-only --verbose --source "$instance/logs" \
+    --destination "$archive" --mount-point "$mount"
+)
+```
+
+The manual run verifies and records an already-published copy from its retained
+source. Confirm that run reports `pruned=0` and `failures=0`, then resume with
+[Install the archive plist from the active bundle](#install-the-archive-plist-from-the-active-bundle).
+
+### Install or resume the log archive job
+
+From a clean worktree at the reviewed, merged commit, wait for Andrew's
+`promote fleet <id>` phrase before shipping and installing the job. Run this
+block for a new ship. Keep `commit` set for the installation check below.
+
+```sh
+commit=$(git rev-parse HEAD)
+(
+  set -e
+  label=com.rever.cliproxy-log-archive
+  domain="gui/$(id -u)"
+  launchctl disable "$domain/$label"
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then
+    launchctl bootout "$domain/$label"
+  fi
+
+  python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+)
+```
+
+#### Install the archive plist from the active bundle
+
+After the bundle ship succeeds, run this block from the reviewed checkout
+with `commit` set to the full expected SHA. This also applies after a bundle
+rollback. The block checks the active release and installs its plist without
+shipping. It assumes the job is disabled and unloaded. Enable the job before
+bootstrapping it.
+
+```sh
+(
+  set -e
+  label=com.rever.cliproxy-log-archive
+  domain="gui/$(id -u)"
+  bundle="$HOME/cliproxy-live/ops"
+  installed="$HOME/Library/LaunchAgents/$label.plist"
+  staged=$(mktemp -d "${TMPDIR:-/tmp}/cliproxy-archive.XXXXXXXX")
+  trap 'rm -rf -- "$staged"' EXIT
+  /opt/homebrew/bin/python3 - "$bundle" "${commit:?Set the expected bundle SHA}" "$staged/$label.plist" <<'PY'
+from pathlib import Path
+import plistlib
+import sys
+
+from ops import fleet_bundle
+
+root = Path(sys.argv[1]).resolve()
+commit = sys.argv[2]
+staged = Path(sys.argv[3])
+release = fleet_bundle.current_release(root)
+manifest = fleet_bundle.active_manifest(root, release)
+if release is None or manifest.get("commit") != commit:
+    raise SystemExit("Active bundle does not match the expected SHA")
+data, mode = fleet_bundle.read_regular(release / staged.name)
+if fleet_bundle.file_record(data, mode) != manifest["files"].get(f"ops/{staged.name}"):
+    raise SystemExit("Archive plist does not match the active bundle manifest")
+expected = ["/opt/homebrew/bin/python3", str(root / "archive_logs.py"), "--archive-only"]
+if plistlib.loads(data).get("ProgramArguments") != expected:
+    raise SystemExit("Unexpected log archive ProgramArguments")
+staged.write_bytes(data)
+PY
+  /usr/bin/plutil -lint "$staged/$label.plist"
+  /usr/bin/install -m 0644 "$staged/$label.plist" "$installed"
+  launchctl enable "$domain/$label"
+  launchctl bootstrap "$domain" "$installed"
+  launchctl print "$domain/$label"
+)
+```
+
+Confirm the loaded arguments include `--archive-only`. Require a fresh
+completed run after `bootstrap` with both `pruned=0` and `failures=0` in the
+same summary line in `ops/runtime/archive.log` under the Mac instance root.
+When an eligible new log is available, confirm the archive copy and its
+manifest entry appear and the Mac copy remains.
+
+To roll back the activation, return the job to its disabled and unloaded state.
+
+```sh
+label=com.rever.cliproxy-log-archive
+domain="gui/$(id -u)"
+launchctl disable "$domain/$label"
+if launchctl print "$domain/$label" >/dev/null 2>&1; then
+  launchctl bootout "$domain/$label"
+fi
 ```
 
 The August 27 recovery set and downstream reconstruction are described in `ops/RECOVERY-2026-08-27.md`.

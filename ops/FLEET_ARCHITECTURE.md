@@ -1,6 +1,6 @@
 # How the CLIProxy fleet is set up, and why
 
-This document explains the reasons behind the fleet's shape, as of November 18, 2026. Read it
+This document explains the reasons behind the fleet's shape, as of November 21, 2026. Read it
 before you change anything, so that you know which problem each part solves.
 
 It is an explanation, not a procedure:
@@ -37,11 +37,11 @@ secrets and logs.
                                                                       |   by address: M1 only        OpenAI Codex
                                                                       +-> Mac   (fallback)           Kimi
    claude_cliproxy_mac (shared pool) -> launcher, pool mode ------------> Mac                        Z.ai Coding Plan
-   3 named Claude profiles -----------> launcher, account prefix -------> Mac                        Cursor plugin
-                                                                          Docker Desktop, arm64      NVIDIA
-   codex_cliproxy --------------------> codex_fallback_launcher.mjs ---> Will  (tailnet name);
-                                        picks a host at session start      Mac if Will fails at start
-   codex_cliproxy_mac, codex_kimi_mac - (no launcher, one base_url) ----> Mac   127.0.0.1:8317
+                                                                          Docker Desktop, arm64      Cursor plugin
+   3 named Claude profiles -----------> launcher, account prefix -------> Will (no fallback)         NVIDIA
+   codex_cliproxy, codex_kimi_mac ----> codex_fallback_launcher.mjs ----> Will  (tailnet name);
+                                        picks a host at session start     Mac if Will fails at start
+   codex_cliproxy_mac ----------------- (no launcher, one base_url) ----> Mac   127.0.0.1:8317
 
  Will, T3
    claude_cliproxy -------------------> launcher, pool mode ------------> Will  (own loopback)
@@ -49,15 +49,16 @@ secrets and logs.
  M1, T3
    codex_cliproxy --------------------- (no launcher) ------------------> Will  (tailnet address)
 
- claude_cliproxy fails over per request and codex_cliproxy per session; every other profile has
- one fixed host. On the Mac both launchers run from the ops bundle in ~/cliproxy-live/ops.
+ claude_cliproxy fails over per request. codex_cliproxy and codex_kimi_mac pick a host at session
+ start. Every other profile has one fixed host. The Mac launchers run from ~/cliproxy-live/ops.
  The two proxies share no runtime state and neither is in the other's request path.
  CLIProxyBar (the Mac menu-bar quota app, not shown) still reaches Will by address (section 4).
 ```
 
-Sources: profile list and hosts in [FLEET.md](FLEET.md#running-fleet); per-client routes in
-[FLEET_DESIGN.md](FLEET_DESIGN.md) section 6; addresses and platforms in
-[fleet-release.json](fleet-release.json).
+The runbook lists the [running hosts](FLEET.md#running-fleet) and the
+[November 21 profile changes](FLEET.md#operations-on-november-21-2026).
+[FLEET_DESIGN.md](FLEET_DESIGN.md) section 6 covers the client route design.
+[fleet-release.json](fleet-release.json) lists addresses and platforms.
 
 Three ideas explain most of the picture:
 
@@ -72,7 +73,7 @@ Three ideas explain most of the picture:
    a host that has neither: with two or more eligible accounts, its first turn there can land on
    another account and pay a cold cache write. That cost is why the launcher does not move a
    conversation back and forth on a flapping link (section 2.6, Recovery).
-3. **Failover lives in the client's launcher, for one profile.** There is no new service and no
+3. **Failover lives in each enabled profile's launcher.** There is no new service and no
    daemon in the request path.
 
 ## 2. The choices and their reasons
@@ -370,8 +371,10 @@ listed in [README.md](README.md#host-failover-for-the-shared-pool); this section
 **For Claude, only `claude_cliproxy` on the Mac fails over.** The launcher refuses `CLIPROXY_FALLBACK_URL` on
 a named account route, because a pinned account must never move to another host. Named routes
 never cross hosts, so failover cannot reach an account mismatch even if the hosts drift
-([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 6 and 14). The `_mac` profiles are already local and
-need no fallback.
+([FLEET_DESIGN.md](FLEET_DESIGN.md) sections 6 and 14). Since November 21 the three named profiles
+on the Mac reach Will. `claude_lockdown_mac`, `claude_gmail_mac` and `claude_icloud_mac` still pin
+`t3-pro`, `t3-gmail` and `t3-icloud`, respectively. The IDs retain their `_mac` suffixes. The
+shared `claude_cliproxy_mac` pool still points only at the Mac.
 
 **The scope guard.** The same launcher file serves all five Mac profiles and Will's T3. Without
 `CLIPROXY_FALLBACK_URL` the request path is the old code: the default connection agent, no timers,
@@ -565,7 +568,7 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | Location | What it is | Consequence |
 | --- | --- | --- |
 | `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. Since the November 18 cutover the installed jobs and new T3 sessions use the bundle, not its checkout paths. | A pull, checkout, or uncommitted edit no longer changes a job or new session. Compose inputs here are still live. |
-| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`, and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
 | `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
@@ -594,7 +597,8 @@ Sessions that predate the repoint retain their original launcher until they end.
 renaming it breaks the mount's link to the inode, so every config change is one in-place write
 that preserves the inode and mode 600, followed by a check of the loaded values
 ([GLM_ROUTING.md](GLM_ROUTING.md), [evidence/cache-affinity-20261118/README.md](evidence/cache-affinity-20261118/README.md)).
-Never restore an old full config over later edits; remove only the lines you added.
+Never restore an old full config over later edits; remove only the lines you added. On the Mac,
+host-side edits do not load at the moment (section 4).
 
 **Why OAuth files are never synchronized.** Claude refresh tokens rotate. Two servers sharing one
 token file would invalidate each other, so each host logs in separately to the same accounts
@@ -615,12 +619,14 @@ a 1,024 MB cap with no archive, which is why the log cap is a host-specific path
 ([FLEET.md](FLEET.md#operations-on-november-18-2026)) and provider keys (session record) into
 their own transcripts.
 
-**The response, all on November 18:**
+**The response, on November 18 and 19:**
 
 - Two new client keys were added at the top of both hosts' key lists and every client moved to
-  them. The two old keys stay accepted until a scheduled task removes them on 2026-11-19 at 10:30
-  UTC. The repository records no reason for this overlap. Its effect is that sessions already
-  running keep working, because a running session keeps the key it launched with.
+  them. The two old keys stayed accepted for 24 hours. On 2026-11-19 a scheduled task removed them
+  on Will; on the Mac its edit did not load, and the keys were removed through the v8 management
+  API at Andrew's choice ([FLEET.md](FLEET.md#operations-on-november-19-2026)). The repository records no reason for this
+  overlap. Its effect was that sessions already running kept working, because a running session
+  keeps the key it launched with.
 - The Z.ai Coding Plan key was replaced on both hosts and the old one deleted.
 - The NVIDIA key (then Mac only) was rotated and the old one deleted. The new key expires on
   2027-11-18. Later that day the NVIDIA provider was added to Will as well.
@@ -642,8 +648,8 @@ Nothing tracked by git holds one.
 
 ### 2.10 Health and quota monitoring
 
-Once Andrew activates the LaunchAgent, the Mac runs it from the shipped
-bundle. Each five-minute tick reads both instances' loopback `/healthz` and checks provider egress
+The Mac runs the monitor's LaunchAgent from the shipped bundle; Andrew
+activated it on November 18. Each five-minute tick reads both instances' loopback `/healthz` and checks provider egress
 with bounded TCP connects from inside their containers. The sockets send no
 TLS, HTTP or credentials. A healthy proxy with a failed upstream dial is
 `egress-down`. A failed proxy health check is `unreachable`. An incomplete
@@ -682,6 +688,21 @@ service sends to its configured recipient. The
 [runbook](FLEET.md#health-and-quota-monitor) covers activation, pause, and
 private charts generated from the JSONL history.
 
+### 2.11 Intentionally pausing the Mac fallback
+
+Andrew wants to be able to quit Docker Desktop while his work uses Will. `mac pause` writes
+the marker under the Mac instance root before it stops Docker. The watchdog and the pause
+command share a lock so a recovery cannot race the shutdown. The marker tells later watchdog
+cycles to skip all checks and recovery, even if the stop fails. It also tells the monitor to
+report the Mac as paused, skip collection from the Mac and parity, and suppress Mac-down
+alerts. `mac resume` waits for Docker before clearing the marker so recovery can run again.
+A watchdog cycle that starts while `mac pause` or `mac resume` holds the lock is skipped.
+
+The engine state is `unknown` when the Docker probe could not complete. A running engine
+can be slow under memory pressure. Pause requires a definite engine state at its final check
+and skips the stop only when Docker is `down`. See
+[Quitting Docker on the Mac](FLEET.md#quitting-docker-on-the-mac).
+
 ## 3. Problem, fix, location, evidence
 
 | Problem | Fix | Where it lives | Evidence |
@@ -698,7 +719,7 @@ private charts generated from the JSONL history.
 | A dropped SYN made one Claude dial wait about 133 to 135 s | `net.ipv4.tcp_syn_retries: 2`, live since the November 18 recreate | Both Compose files; Will's policy and verifier | PR #13; [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Z.ai answered `glm-5.2` with GLM-5.3, and Will's Cursor `glm-5.2` entry returned 503 `auth_not_found` | Client ID `glm-5.2` maps to upstream `glm-5.3` on `zai-coding-plan` | Host `config.yaml` on both hosts | [GLM_ROUTING.md](GLM_ROUTING.md#glm-52-maps-to-glm-53) |
 | Only the Mac served the NVIDIA models | NVIDIA provider and its three aliases added to Will | Will `config.yaml` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
-| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; the monitor collects quota history after activation | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
+| Will ran an unpinned quota plugin for account types neither host has | `cliproxybar-quota` disabled, its config removed, its library moved to a private backup; the monitor collects quota history | Will `config.yaml`; Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026) |
 | Will's extra `kimi-ai` login looked like extra Kimi capacity | Removed: its usage counters matched the `kimi` login, so both share one quota | Will `auths/`; private backup in Will `ops/runtime/` | [FLEET.md](FLEET.md#operations-on-november-18-2026); [KIMI_ROUTING.md](KIMI_ROUTING.md) |
 | A restart could select a different release | Image IDs with `pull_policy: never` | Compose files; `fleet-release.json` | [FLEET.md](FLEET.md#running-fleet) |
 | A release passed health checks and failed inference (`v8.0.66-fleet.2`) | Mac first, then a live inference gate, then Will | Release procedure | [FLEET.md](FLEET.md#running-fleet) |
@@ -714,11 +735,15 @@ fails its health check and the Mac passes. If both fail, it starts with the Will
 launcher reuses the three-second `/healthz` probe from section 2.6. A healthy `/healthz`
 cannot reveal an upstream egress outage. Codex CLI keeps one `base_url` per process, so an
 existing session stays on its selected host. Andrew enabled the launcher on November 18, from
-the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed to the Mac.
+the bundle. On November 21, `codex_cliproxy` replaced `codex_cliproxy_mac` as the default for new
+threads and the selection for T3's review guide. `codex_kimi_mac` uses the same launcher and
+tries Will first at session start. `codex_cliproxy_mac` stays fixed to the Mac.
 
 **Not automatic:**
 
-- **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances.
+- **CLIProxyBar's Will entry uses Will's raw address.** Keep the app for live quota glances. Its
+  Z.ai rows read the credit windows through a local, unpublished parser fix (November 19), which an
+  upstream update would drop.
   The monitor supplies fleet quota history, alerts and summaries. The Mac's `codex_cliproxy`
   moved to the tailnet name on November 18 ([FLEET.md](FLEET.md#operations-on-november-18-2026)), but
   CLIProxyBar's Will entry still reaches Will at its raw tailnet IP address, so the section 2.6
@@ -733,11 +758,25 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   to M1 whenever it runs with Tailscale stopped on another network.
 - **Will's own T3.** Loopback to Will's proxy only. The container's `restart: always` is the
   remedy.
-- **Monitor paused.** The Mac LaunchAgent is installed from the bundle but booted out,
-  because SSH from launchd jobs to Will times out on the Mac (FLEET.md, live activation).
-  Until it resumes, use `fleetctl health` and `parity` by hand. With only egress down,
-  `/healthz` can stay green. Look for `egress_hold` lines in
-  `ops/runtime/fleet/failover.jsonl` on the Mac or dial-error 5xx answers from Will.
+- **Host-side config edits on the Mac do not load.** On November 19, in-place edits of the Mac's
+  `config.yaml` changed the host file but not the running config; the container logged no reload,
+  and a second write never reached it. When this started is not known. Confirm a Mac edit with a
+  `config file changed, reloading` log line and a live check within 30 s. If none appears, write
+  once more with a comment change; if that does not load either, write the original bytes back and
+  ask Andrew. With his approval, apply the change through the v8 management API (for example
+  `PUT /v8/management/config/access/api-keys`), which edits the container's copy of the file and
+  saves it over the host file. Use it only when the two copies match: compare the `ETag` from
+  `GET /v8/management/config` (the SHA-256 of the container's bytes) with `shasum -a 256` of the
+  host file, and send that `ETag` as `If-Match`, so a changed container copy returns 412
+  ([FLEET.md](FLEET.md#operations-on-november-19-2026)).
+- **The monitor reports, it does not fail over.** The Mac LaunchAgent runs from the bundle every
+  five minutes on Apple's `/usr/bin/python3`, because macOS Local Network privacy blocked SSH to
+  Will from Homebrew's Python under launchd ([FLEET.md](FLEET.md#install-or-resume-on-the-mac)). It texts Andrew when
+  either proxy is unreachable, when Will loses egress, on parity drift and on quota limits, and
+  nothing acts on those texts automatically. With only egress down, `/healthz` can stay green, so
+  the monitor also checks egress from inside each container. If the monitor is stopped, use `fleetctl health` and `parity` by hand and look
+  for `egress_hold` lines in `ops/runtime/fleet/failover.jsonl` on the Mac or dial-error 5xx
+  answers from Will.
 - **Will's first ship** (unit 2c) awaits its own approval. The Mac cutover ran on
   November 18 with a passing P0 check of the installed paths and checksums (section 2.8).
 
@@ -759,8 +798,6 @@ the bundle. The `codex_cliproxy_mac` and `codex_kimi_mac` profiles remain fixed 
   The two `camoff-astra` exceptions are gone; the prefix itself was removed from both hosts.
 - **Will uses the flat legacy YAML layout** until the layout migration (design unit 7). The loaded
   view makes the two layouts comparable in the meantime.
-- **Old client keys overlap** until 2026-11-19 10:30 UTC, so sessions launched with an old key
-  keep working until then (section 2.9).
 - **No measurement of affinity with two or more eligible accounts** after the change.
 - **Deploys drop open streams**, because the idle gate does not work as designed (section 2.7).
 
@@ -827,7 +864,7 @@ text).
 **Config.**
 
 - One in-place write that keeps the inode and mode 600; then verify the loaded values, not the
-  file.
+  file. On the Mac, host-side edits do not load at the moment (section 4).
 - Remove only your own lines on rollback.
 - A reload reconfigures plugins and can close Cursor bridges.
 
@@ -846,5 +883,8 @@ text).
 **Compose and container settings.**
 
 - They take effect at a recreate, and a recreate drops every stream on that host.
-- On the Mac the watchdog can run `docker compose up` by itself, so a Compose change pulled into
-  the checkout can go live without an activation.
+- On the Mac the watchdog runs `docker compose up` by itself only while the Compose files, resolved
+  image and service config hash match the activation receipt, which is recorded only after the
+  running container was checked against them; otherwise it starts the existing container
+  (`ops/cliproxy_watchdog.py`, `guarded_compose_up`). A Compose change pulled into the checkout
+  waits for an activation, but a hand-run `docker compose up` in the instance root applies it.

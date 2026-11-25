@@ -10,6 +10,40 @@ OAuth token stays inside CLIProxy. The tool sends each upstream request through
 Redeeming a grant consumes it. Andrew must approve each redemption: the
 account, the grant ID, and the timing. Reading status needs no approval.
 
+## Which host answers
+
+Will is the primary proxy, so `status` and `watch` ask Will first. The tool
+sends its own source to Will over SSH stdin (`python3 -I -B -`), using the
+SSH destination, instance root, and port in `fleet/hosts.json`. On Will it reads
+the `.env` under that instance root and calls Will's proxy at `127.0.0.1`, so no
+management key leaves its host. The management client ignores `HTTP_PROXY`
+settings and refuses redirects, and `--base-url` must be a loopback URL, so
+the key goes only to a proxy on the same host.
+
+The tool falls back to the local proxy only when SSH fails or Will's proxy never
+answered, and only before Will has printed anything, so a `watch` never
+switches hosts partway through. Any other error from Will is the answer: an
+HTTP 429 from the usage endpoint, a management API error, or a connection lost
+after Will's proxy answered. Stderr names the host and URL that answered, for
+example `answered by Will (will.local) at http://127.0.0.1:8317`.
+
+- `--host auto` is the default for `status` and `watch`.
+- `--host will` or `--host local` asks only that host and never falls back.
+  `--root` and `--base-url` name the local proxy, so the tool refuses them with
+  `--host will`.
+- From a worktree, which has no `.env`, `status` and `watch` read the local key
+  from the Mac instance root in `fleet/hosts.json`. Global options go before the
+  subcommand: `python3 ops/claude_usage_resets.py --root ~/cliproxy status --host local`.
+- `claim` accepts only `--host will` or `--host local`. `--yes` requires one
+  of them; a dry run without `--host` stays local. A claim never falls back,
+  because its request ID and receipt stay on the host that sent it, and a
+  rerun on another host would carry a new request ID and could spend a second
+  grant. Run local claims from the checkout, as before, so their request IDs
+  stay in one place.
+- Run on Will itself, `auto` and `will` use Will's own proxy. A hand-copied
+  `ops/` without `fleet/hosts.json` also answers from the local proxy, as before.
+- Exit status 3 means no proxy answered at the URL tried.
+
 ## Read limits and grants
 
 ```sh
@@ -35,9 +69,39 @@ This request is read-only. The claude-cli `User-Agent`, `x-app: cli`, and
   suggestion. On 2026-11-11 the server accepted a Fable grant while it named
   the full reset as next.
 
+Below each account's limits, `status` prints the answering proxy's own view
+from `GET /v8/management/credentials`. Anthropic's usage numbers cannot show
+this part:
+
+- `proxy cooldown:` lines show every cooldown that keeps the proxy from
+  picking the account, for the whole account or for one model, with its
+  reason and the time left. A whole-account cooldown prints once.
+- `proxy: no cooldown` means the proxy lists no cooldown and does not mark
+  the account unavailable or disabled. `proxy: disabled`, `needs a new
+  sign-in`, `unavailable with no cooldown listed` and `cooldowns unknown`
+  (a proxy that cannot see cooldowns, such as one run by Home) mean the proxy
+  will not pick the account, or cannot say whether it will.
+- `last failure:` lines show each model's latest upstream failure: the HTTP
+  status, Anthropic's `error.type` (such as `overloaded_error`) and its age.
+  A later success does not clear the line, and a proxy restart does. The proxy
+  keeps only these structured fields, not the upstream message. "Latest"
+  includes failures the client caused, such as a 400 for a bad request, so a
+  529 can be replaced by a later 400 on the same model.
+- `last failures: not reported by this proxy` means the proxy predates
+  `v8.0.66-fleet.5` or runs without its account manager.
+- `proxy state unavailable:` means the tool could not read the proxy's view
+  or found no entry for the account. The line says which. The usage numbers
+  above it still come from Anthropic.
+
+Read these lines first when a delegated Claude lane fails with `529 Overloaded`.
+On November 24, 2026, every Fable request went to the Gmail account, the only
+one not capped, and Anthropic returned `overloaded_error` on that account. The
+fix was to wait. Routing to Gmail by name changed nothing. `--json` puts the
+same data under each account's `proxy` key.
+
 Run the tool from the checkout. The ops bundle ships a copy only for the fleet
-monitor's imports, and that copy exits with an error if run as a command. Once
-the monitor is active it also reads each Claude account about every 15 minutes
+monitor's imports, and that copy exits with an error if run as a command. The
+monitor also reads each Claude account about every 15 minutes
 and records the readings in `ops/runtime/fleet/quota-history-YYYY-MM.jsonl`.
 Use that file for history only, not as a current reading, and pause the
 monitor before a `watch`.
@@ -55,13 +119,15 @@ endpoint returned HTTP 429 to some polls. Run it in the background. To redeem
 when the limit triggers, chain a claim that Andrew approved:
 
 ```sh
-python3 ops/claude_usage_resets.py watch --account <email> --threshold 99 --notify \
-  && python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> \
+python3 ops/claude_usage_resets.py watch --host will --account <email> --threshold 99 --notify \
+  && python3 ops/claude_usage_resets.py claim --host will --account <email> --grant <grant-id> \
        --min-fable-percent 99 --yes
 ```
 
 `--min-fable-percent 99` makes the claim check the threshold again on a fresh
-read, so a stale or wrong trigger cannot spend the grant.
+read, so a stale or wrong trigger cannot spend the grant. Pin the watch and
+the claim to the same host. `--notify` shows the notification on the machine
+that runs the command, even when Will answered the watch.
 
 For a full reset at a weekly-total threshold, pass the weekly guards instead.
 Copy the pin from the `weekly_resets_at` value that `status --json` reported
@@ -94,9 +160,28 @@ checks to `claim`. Do not compare timestamps by hand in the task prompt.
 ## Redeem a grant
 
 ```sh
-python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --dry-run
-python3 ops/claude_usage_resets.py claim --account <email> --grant <grant-id> --yes
+python3 ops/claude_usage_resets.py claim --host will --account <email> --grant <grant-id> --dry-run
+python3 ops/claude_usage_resets.py claim --host will --account <email> --grant <grant-id> --yes
 ```
+
+Run the dry run and the real claim on the same host. With `--host will`, the
+request ID and receipt are written under `ops/runtime/claude-resets/` in Will's
+instance root, and a `--receipt` path is a path on Will (relative to the SSH
+user's home directory). Each receipt records the host that sent it.
+
+The receipt is written with `result: sending` before the claim goes out. If the
+connection drops before the response arrives, or the management API answers
+the claim with HTTP 5xx, the receipt says `indeterminate`, the tool exits 1, and
+the claim may have been sent. A management HTTP 4xx means the proxy rejected
+the request before forwarding it, so the receipt says `refused`. If SSH drops
+during `--host will --yes`, the outcome is unknown in the same way as
+`indeterminate`. Either way, read the receipt and run `status --host <same host>`
+first. If the grant is still usable, rerun the same command on
+that host: it reuses the stored request ID. A fresh threshold check can refuse
+the rerun, for example when the first claim already worked. A rerun on another
+host would use a new request ID and could spend a second grant. Once the claim
+result is known, a failed usage reread is recorded as `after_error` and the
+result is kept.
 
 For a conditional redemption, add `--min-fable-percent 99` or
 `--min-weekly-percent 100` to the claim, and `--weekly-resets-at` to pin the

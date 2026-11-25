@@ -17,9 +17,10 @@ class BundleLaunchAgentsTest(unittest.TestCase):
         ops = Path(__file__).resolve().parent
         host = json.loads((ops / "fleet/hosts.json").read_text())["m5"]
         allowlist = (ops / "fleet/bundle.txt").read_text().splitlines()
-        for job, script, seconds in (
-            ("watchdog", "cliproxy_watchdog.py", 120),
-            ("log-archive", "archive_logs.py", 300),
+        self.assertIn("ops/fleet_mac.py", allowlist)
+        for job, script, seconds, args in (
+            ("watchdog", "cliproxy_watchdog.py", 120, []),
+            ("log-archive", "archive_logs.py", 300, ["--archive-only"]),
         ):
             label = "com.rever.cliproxy-" + job
             with self.subTest(label=label):
@@ -29,7 +30,7 @@ class BundleLaunchAgentsTest(unittest.TestCase):
                     plist = plistlib.load(stream)
                 self.assertEqual(plist["Label"], label)
                 self.assertEqual(plist["ProgramArguments"],
-                                 ["/opt/homebrew/bin/python3", host["bundle_root"] + "/" + script])
+                                 ["/opt/homebrew/bin/python3", host["bundle_root"] + "/" + script, *args])
                 self.assertEqual(plist["WorkingDirectory"], host["instance_root"])
                 self.assertEqual(plist["EnvironmentVariables"]["CLIPROXY_ROOT"], host["instance_root"])
                 self.assertTrue(plist["RunAtLoad"])
@@ -55,6 +56,98 @@ class BundleLaunchAgentsTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result)
             self.assertIn("Cannot install com.rever.cliproxy-log-archive", result.stderr)
             self.assertFalse((root / "Library").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
+    def test_installer_requires_archive_only_before_installing_either_job(self):
+        ops = Path(__file__).resolve().parent
+        for args, allowed in (
+            ([], False), (["--prune"], False), (["--archive-only\n"], False),
+            (["--archive-only", "--prune"], False),
+            (["--prune", "--archive-only"], False), (["--verbose", "--archive-only"], True),
+        ):
+            with self.subTest(args=args), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                installer = root / "install_watchdog.sh"
+                installer.write_text((ops / installer.name).read_text().replace("/bin/launchctl", "/usr/bin/true"))
+                for job, arguments in (("watchdog", []), ("log-archive", args)):
+                    label = f"com.rever.cliproxy-{job}"
+                    script = root / f"{job}.py"
+                    script.touch()
+                    plist = {"Label": label, "ProgramArguments": [sys.executable, str(script), *arguments]}
+                    (root / f"{label}.plist").write_bytes(plistlib.dumps(plist))
+
+                result = subprocess.run(
+                    ["/bin/zsh", "-f", str(installer), str(root)], env={"HOME": str(root)},
+                    capture_output=True, text=True, check=False,
+                )
+
+                self.assertEqual(result.returncode, 0 if allowed else 1, result)
+                self.assertEqual((root / "Library/LaunchAgents").exists(), allowed)
+                if not allowed:
+                    self.assertIn("requires --archive-only and forbids --prune", result.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "needs macOS plutil and zsh")
+    def test_installer_uses_validated_bytes_after_bundle_switch(self):
+        ops = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tmp = root / "tmp"
+            tmp.mkdir()
+            installer = root / "install_watchdog.sh"
+            installer.write_text((ops / installer.name).read_text()
+                                 .replace("/bin/launchctl", "/usr/bin/true")
+                                 .replace("/usr/bin/install", '"$HOME/switch-and-install"'))
+            switch = root / "switch-and-install"
+            switch.write_text('#!/bin/zsh\n/bin/ln -sfn "$HOME/older" "$HOME/current"\n'
+                              'exec /usr/bin/install "$@"\n')
+            switch.chmod(0o700)
+            for generation in ("newer", "older"):
+                bundle = root / generation
+                bundle.mkdir()
+                for job in ("watchdog", "log-archive"):
+                    label = f"com.rever.cliproxy-{job}"
+                    script = root / f"{job}.py"
+                    script.touch()
+                    arguments = ["--archive-only"] if job == "log-archive" and generation == "newer" else []
+                    plist = {"Label": label, "ProgramArguments": [sys.executable, str(script), *arguments],
+                             "RunAtLoad": True, "Generation": generation}
+                    (bundle / f"{label}.plist").write_bytes(plistlib.dumps(plist))
+            current = root / "current"
+            current.symlink_to(root / "newer")
+
+            result = subprocess.run(
+                ["/bin/zsh", "-f", str(installer), str(current)],
+                env={"HOME": str(root), "TMPDIR": str(tmp)}, capture_output=True, text=True, check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual(current.resolve(), (root / "older").resolve())
+            for original in (root / "newer").iterdir():
+                self.assertEqual((root / "Library/LaunchAgents" / original.name).read_bytes(), original.read_bytes())
+            self.assertEqual(list(tmp.iterdir()), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "needs macOS mktemp and zsh")
+    def test_installer_cleans_staging_when_interrupted(self):
+        ops = Path(__file__).resolve().parent
+        for signal, exit_code in (("INT", 130), ("TERM", 143)):
+            with self.subTest(signal=signal), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tmp = root / "tmp"
+                tmp.mkdir()
+                installer = root / "install_watchdog.sh"
+                installer.write_text((ops / installer.name).read_text()
+                                     .replace("/bin/launchctl", "/usr/bin/false")
+                                     .replace("/bin/cp ", 'kill -s "$TEST_SIGNAL" "$$"; /bin/cp ', 1))
+
+                result = subprocess.run(
+                    ["/bin/zsh", "-f", str(installer), str(root)],
+                    env={"HOME": str(root), "TMPDIR": str(tmp), "TEST_SIGNAL": signal},
+                    capture_output=True, text=True, check=False,
+                )
+
+                self.assertEqual(result.returncode, exit_code, result)
+                self.assertEqual(list(tmp.iterdir()), [])
+                self.assertFalse((root / "Library").exists())
 
 
 class BundleJobsTest(unittest.TestCase):
@@ -179,7 +272,7 @@ class BundleJobsTest(unittest.TestCase):
         ops = Path(__file__).resolve().parent
         live = self.root / "release/ops"
         live.mkdir(parents=True)
-        for name in ("cliproxy_watchdog.py", "auth_health.py", "instance_root.py"):
+        for name in ("cliproxy_watchdog.py", "auth_health.py", "fleet_mac.py", "instance_root.py"):
             (live / name).write_bytes((ops / name).read_bytes())
         result = subprocess.run([sys.executable, "-E", "-B", str(live / "cliproxy_watchdog.py"), "--help"],
                                 capture_output=True, text=True, check=False)
@@ -197,7 +290,7 @@ class BundleJobsTest(unittest.TestCase):
             "archive_logs.py": ["--check-only", "--mount-point", str(self.root / "not-mounted")],
             "auth_health.py": ["--json"],
         }
-        for name in (*jobs, "instance_root.py"):
+        for name in (*jobs, "fleet_mac.py", "instance_root.py"):
             (release / name).write_bytes((ops / name).read_bytes())
             (live / name).symlink_to(Path(".fleet-current") / name)
         fake_environment = {"CLIPROXY_DOCKER": "/usr/bin/false", "CLIPROXY_CURL": "/usr/bin/false",

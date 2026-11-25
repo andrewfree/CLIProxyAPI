@@ -691,6 +691,15 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
 	}
+	// v0 management is frozen, so only v8 reports each model's latest failure.
+	// An empty object, not an absent key, means none was recorded.
+	if quota.v8 {
+		failures := auth.ModelFailuresSnapshot()
+		if failures == nil {
+			failures = map[string]coreauth.ModelFailure{}
+		}
+		entry["model_failures"] = failures
+	}
 	if pluginID := quota.pluginIDs[strings.ToLower(strings.TrimSpace(auth.Provider))]; pluginID != "" {
 		entry["supports_quota"] = true
 		entry["quota_provider"] = auth.Provider

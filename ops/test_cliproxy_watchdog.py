@@ -7,6 +7,7 @@ from collections import deque
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from ops import fleet_mac
 from ops.cliproxy_watchdog import (
     CommandResult,
     ProbeResult,
@@ -98,6 +99,26 @@ class WatchdogTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_mac_pause_skips_all_checks_and_recovery(self) -> None:
+        fleet_mac.write_marker(self.root, "maintenance", ["cli-proxy-api"])
+        marker = fleet_mac.read_marker(self.root)
+        logger = logging.getLogger("watchdog-test")
+        watchdog = Watchdog(self.config, logger=logger)
+        with patch.object(watchdog, "check_and_recover") as checks, self.assertLogs(logger, "INFO") as logs:
+            self.assertEqual(watchdog.run_once(), 0)
+        checks.assert_not_called()
+        self.assertFalse(self.state_path.exists())
+        self.assertEqual(logs.output, [
+            f"INFO:watchdog-test:Watchdog paused by mac-paused.json since {marker['paused_at']}. "
+            "Skipping checks and recovery."
+        ])
+
+    def test_transition_lock_prevents_an_overlapping_watchdog_cycle(self) -> None:
+        watchdog = Watchdog(self.config, logger=logging.getLogger("watchdog-test"))
+        with fleet_mac.transition_lock(self.root), patch.object(watchdog, "check_and_recover") as checks:
+            self.assertEqual(watchdog.run_once(), 0)
+        checks.assert_not_called()
 
     def test_failed_engine_probe_cannot_restart_a_healthy_proxy(self) -> None:
         watchdog = FakeWatchdog(

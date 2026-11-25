@@ -154,7 +154,10 @@ type Auth struct {
 	cooldownRecordedSeq uint64 `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
-	indexAssigned  bool              `json:"-"`
+	// modelFailures keeps each model's latest upstream failure, including
+	// after later successes. Runtime only; see model_failures.go.
+	modelFailures map[string]ModelFailure `json:"-"`
+	indexAssigned bool                    `json:"-"`
 	// fileSnapshotPath and fileSnapshotDigest bind an unversioned file-synthesized
 	// Auth snapshot to the source file path and SHA-256 byte digest it observed.
 	// Cleared when committed to a Manager so runtime clones are not treated as
@@ -516,6 +519,7 @@ func (a *Auth) Clone() *Auth {
 			copyAuth.ModelStates[key] = state.Clone()
 		}
 	}
+	copyAuth.modelFailures = a.ModelFailuresSnapshot()
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
 }

@@ -769,7 +769,7 @@ def report(command, snapshots, exceptions, today):
     return output, int(failed)
 
 
-def main(argv=None):
+def main(argv=None, *, settings_path=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="check tracked pins or verify a shipped bundle (P0)")
@@ -783,6 +783,15 @@ def main(argv=None):
     mode.add_argument("--dry-run", action="store_true", help="report changes (default)")
     mode.add_argument("--apply", action="store_true", help="write the bundle to the selected host")
     commands.add_parser("parity", help="compare both hosts, using SSH for Will")
+    mac = commands.add_parser("mac", help="manage the Mac's Docker Desktop fallback")
+    mac_commands = mac.add_subparsers(dest="mac_command", required=True)
+    pause = mac_commands.add_parser("pause", help="stop Docker Desktop and pause Mac recovery")
+    pause.add_argument("--reason")
+    pause.add_argument("--will-origin", help="override the Will origin from the T3 Claude pool profile")
+    pause.add_argument("--force", action="store_true", help="bypass Will, session, and bundle preflight refusals")
+    pause.add_argument("--yes", action="store_true", help="skip the Docker Desktop confirmation")
+    mac_commands.add_parser("resume", help="start Docker Desktop and restore Mac recovery")
+    mac_commands.add_parser("status", help="show the pause marker, Docker engine, and proxy health")
     for command in ("fingerprint", "health"):
         action = commands.add_parser(command)
         action.add_argument("--host", choices=FLEET_HOSTS, required=command == "fingerprint")
@@ -794,6 +803,19 @@ def main(argv=None):
         return bundle_command(args)
     try:
         hosts = read_json(OPS / "fleet/hosts.json")
+        if args.command == "mac":
+            # Keep the fleetctl source standalone for its SSH workers.
+            if __package__:
+                from . import fleet_mac
+            else:
+                import fleet_mac
+            if settings_path is None:
+                settings_path = Path.home() / ".t3/userdata/settings.json"
+            return fleet_mac.command(
+                args, hosts["m5"],
+                lambda name: probe(name, hosts, None, None, None, "health").get("status"),
+                settings_path=settings_path,
+            )
         paths = read_json(OPS / "fleet/paths.json")
         release = read_json(OPS / "fleet-release.json")
         exceptions = read_json(OPS / "fleet/exceptions.json")
