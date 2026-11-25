@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 from typing import Any
 from unittest import mock
 
@@ -77,6 +78,143 @@ class SummarizeUsageTest(unittest.TestCase):
     def test_grants_are_listed(self):
         grants = resets.summarize_usage(usage_body())["resets"]["grants"]
         self.assertEqual([g["id"] for g in grants], ["full-reset-2611", "launch-2610-fable"])
+
+
+def credential(failures: Any = None, cooldowns: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """A trimmed v8 /credentials entry for one Claude account."""
+    entry: dict[str, Any] = {"provider": "claude", "email": EMAIL, "status": "active",
+                             "cooldowns": cooldowns or []}
+    if failures is not None:
+        entry["model_failures"] = failures
+    return entry
+
+
+FABLE_529 = {"claude-fable-5-2": {"http_status": 529, "type": "overloaded_error",
+                                  "at": "2026-11-25T04:52:27.123456789Z"}}
+
+
+class ProxyViewTest(unittest.TestCase):
+    NOW = resets.datetime.datetime(2026, 11, 25, 5, 0, tzinfo=resets.datetime.timezone.utc)
+
+    def test_failures_are_newest_first(self):
+        view = resets.proxy_view(credential({
+            "claude-opus-5-5": {"http_status": 500, "code": "upstream", "at": "2026-11-25T04:40:00Z"},
+            **FABLE_529,
+        }))
+        self.assertEqual([f["model"] for f in view["failures"]], ["claude-fable-5-2", "claude-opus-5-5"])
+        self.assertEqual(view["failures"][0]["type"], "overloaded_error")
+
+    def test_an_old_proxy_a_quiet_account_and_a_missing_one_are_told_apart(self):
+        self.assertIsNone(resets.proxy_view(credential())["failures"])
+        self.assertEqual(resets.proxy_view(credential({}))["failures"], [])
+        missing = resets.proxy_view(None)
+        self.assertFalse(missing["available"])
+        text = resets.format_proxy_view(missing, self.NOW)
+        self.assertIn("proxy state unavailable", text)
+        self.assertNotIn("no cooldown", text)
+
+    def test_go_timestamps_parse_with_any_fraction(self):
+        for stamp in ("2026-11-25T04:52:27Z", "2026-11-25T04:52:27.1Z", "2026-11-25T04:52:27.1234Z",
+                      "2026-11-25T04:52:27.123456789Z", "2026-11-25T04:52:27.123456789-08:00"):
+            self.assertIsNotNone(resets.parse_go_time(stamp), stamp)
+        self.assertEqual(resets.age_text("2026-11-25T04:52:27.123456789Z", self.NOW), "7m ago")
+        self.assertIsNone(resets.parse_go_time("2026-11-25T04:52:27"))  # no offset
+        self.assertEqual(resets.age_text("garbage", self.NOW), "at an unknown time")
+
+    def test_text_names_the_model_status_type_and_age(self):
+        view = resets.proxy_view(credential(
+            FABLE_529,
+            [{"scope": "credential", "reason": "credential_quota", "retry_at": "2026-11-25T05:41:00Z",
+              "remaining_seconds": 2459},
+             {"scope": "model", "model_key": "claude-fable-5-2", "reason": "quota", "remaining_seconds": 59}]))
+        text = resets.format_proxy_view(view, self.NOW)
+        self.assertIn("proxy cooldown: whole account credential_quota, 41m left", text)
+        self.assertIn("proxy cooldown: claude-fable-5-2 quota, 1m left", text)
+        copied = resets.proxy_view(credential({}, [
+            {"scope": "credential", "reason": "credential_quota", "remaining_seconds": 240},
+            {"scope": "model", "model_key": "claude-haiku-5-5", "reason": "credential_quota", "remaining_seconds": 240}]))
+        self.assertEqual(resets.format_proxy_view(copied, self.NOW).count("proxy cooldown:"), 1)
+        self.assertIn("last failure: claude-fable-5-2 HTTP 529 overloaded_error 7m ago", text)
+        self.assertIn("proxy: no cooldown", resets.format_proxy_view(resets.proxy_view(credential({})), self.NOW))
+        self.assertIn("not reported by this proxy",
+                      resets.format_proxy_view(resets.proxy_view(credential()), self.NOW))
+
+
+class ProxyHealthWordingTest(unittest.TestCase):
+    NOW = resets.datetime.datetime(2026, 11, 25, 5, 0, tzinfo=resets.datetime.timezone.utc)
+
+    def text(self, **fields):
+        entry = credential({})
+        entry.update(fields)
+        return resets.format_proxy_view(resets.proxy_view(entry), self.NOW)
+
+    def test_only_a_usable_entry_reads_as_no_cooldown(self):
+        self.assertIn("proxy: no cooldown", self.text())
+        for fields, expected in (({"disabled": True}, "disabled, never picked"),
+                                 ({"requires_sign_in": True, "status": "error", "unavailable": True},
+                                  "needs a new sign-in"),
+                                 ({"cooldowns": None}, "cooldowns unknown"),
+                                 ({"unavailable": True, "status": "error"}, "unavailable with no cooldown listed")):
+            text = self.text(**fields)
+            self.assertIn(expected, text, fields)
+            self.assertNotIn("no cooldown\n", text + "\n", fields)
+
+    def test_failures_sort_by_time_not_by_string(self):
+        view = resets.proxy_view(credential({
+            "a": {"http_status": 529, "type": "overloaded_error", "at": "2026-11-25T04:52:36Z"},
+            "b": {"http_status": 502, "type": "overloaded_error", "at": "2026-11-25T04:52:36.5Z"},
+        }))
+        self.assertEqual([f["model"] for f in view["failures"]], ["b", "a"])
+
+
+class StatusCommandTest(unittest.TestCase):
+    class StatusProxy(FakeProxy):
+        def __init__(self, entries=None, failure: Exception | None = None):
+            super().__init__([(200, usage_body())])
+            self.entries = entries or {}
+            self.failure = failure
+
+        def claude_accounts(self):
+            return [{"provider": "claude", "email": EMAIL}]
+
+        def claude_credentials(self):
+            if self.failure is not None:
+                raise self.failure
+            return self.entries
+
+    def run_status(self, proxy, json_output):
+        args = resets.build_parser().parse_args(["status", *(["--json"] if json_output else [])])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = resets.cmd_status(proxy, args)
+        return code, out.getvalue()
+
+    def test_status_shows_the_proxys_latest_failure(self):
+        code, text = self.run_status(self.StatusProxy({EMAIL: credential(FABLE_529)}), json_output=False)
+        self.assertEqual(code, 0)
+        self.assertIn("Fable: 99% of its cap", text)
+        self.assertIn("last failure: claude-fable-5-2 HTTP 529 overloaded_error", text)
+        code, raw = self.run_status(self.StatusProxy({EMAIL: credential(FABLE_529)}), json_output=True)
+        failure = json.loads(raw)["accounts"][0]["proxy"]["failures"][0]
+        self.assertEqual((failure["http_status"], failure["type"]), (529, "overloaded_error"))
+
+    def test_a_failed_credentials_read_keeps_the_usage_report(self):
+        not_found = urllib.error.HTTPError("http://proxy.invalid/v8/management/credentials", 404, "Not Found",
+                                           {}, None)
+        for failure, reason in ((not_found, "HTTP 404"),
+                                (resets.ProxyConnectionError("reset by peer"), "ProxyConnectionError")):
+            code, text = self.run_status(self.StatusProxy(failure=failure), json_output=False)
+            self.assertEqual(code, 0)
+            self.assertIn("Fable: 99% of its cap", text)
+            self.assertIn("proxy state unavailable", text)
+            self.assertIn(reason, text)
+            code, raw = self.run_status(self.StatusProxy(failure=failure), json_output=True)
+            self.assertFalse(json.loads(raw)["accounts"][0]["proxy"]["available"])
+
+    def test_an_account_missing_from_the_proxy_view_is_not_called_healthy(self):
+        code, text = self.run_status(self.StatusProxy({}), json_output=False)
+        self.assertEqual(code, 0)
+        self.assertIn("proxy state unavailable: the proxy has no entry for this account", text)
+        self.assertNotIn("no cooldown", text)
 
 
 class CheckClaimableTest(unittest.TestCase):

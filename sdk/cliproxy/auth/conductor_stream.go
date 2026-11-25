@@ -140,6 +140,7 @@ func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth
 	action, okAction := matchRequestScopedErrorAction(auth, err, m.requestScopedErrorConfig(ctx))
 	result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(err), Options: opts, RetryAfter: retryAfter, AccessToken: authAccessTokenForRequest(ctx, auth, opts.Headers), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 	result.CredentialScope = isCredentialScopedError(err)
+	result.upstreamErrorType = upstreamErrorTypeFromError(err)
 	applyRequestScopedActionToResult(action, okAction, &result)
 	m.recordExecutionResult(context.WithoutCancel(ctx), result, auth, ephemeral)
 }
@@ -491,6 +492,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(ctx))
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+			result.upstreamErrorType = upstreamErrorTypeFromError(errStream)
 			result.RetryAfter = retryAfterFromError(errStream)
 			if isCredentialScopedError(errStream) {
 				result.CredentialScope = true

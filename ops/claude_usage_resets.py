@@ -120,6 +120,11 @@ class Proxy:
         files = self.mgmt("/v0/management/auth-files")["files"]
         return [f for f in files if f.get("provider") == "claude"]
 
+    def claude_credentials(self) -> dict[str, dict[str, Any]]:
+        """The proxy's own view of each Claude account (cooldowns, latest failures), by email."""
+        files = self.mgmt("/v8/management/credentials").get("files") or []
+        return {f.get("email"): f for f in files if f.get("provider") == "claude"}
+
     def upstream(self, email: str, method: str, url: str, body: dict[str, Any] | None = None) -> tuple[int, Any]:
         account = next((a for a in self.claude_accounts() if a.get("email") == email), None)
         if account is None:
@@ -332,18 +337,130 @@ def format_status(email: str, tier: str | None, summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def proxy_view(credential: dict[str, Any] | None, error: str | None = None) -> dict[str, Any]:
+    """Reduce a v8 credentials entry to its cooldowns and each model's latest failure, newest first.
+
+    `available` is False when the proxy's view could not be read or has no
+    entry for the account; `error` then says why. `failures` is None when the
+    entry carries no `model_failures` (a proxy before fleet.5, or one running
+    without an auth manager) and empty when the proxy recorded none.
+    """
+    if credential is None:
+        return {"available": False, "error": error or "the proxy has no entry for this account",
+                "status": None, "disabled": None, "unavailable": None, "requires_sign_in": None,
+                "cooldowns": [], "failures": None}
+    raw_cooldowns = credential.get("cooldowns")
+    # null means the proxy cannot see cooldowns (Home mode), not that there are none.
+    cooldowns = None if raw_cooldowns is None else [
+        {k: c.get(k) for k in ("scope", "model_key", "reason", "retry_at", "remaining_seconds")}
+        for c in raw_cooldowns if isinstance(c, dict)]
+    raw = credential.get("model_failures")
+    failures = None
+    if isinstance(raw, dict):
+        failures = sorted(({"model": model, "http_status": f.get("http_status"), "code": f.get("code"),
+                            "type": f.get("type"), "at": f.get("at")}
+                           for model, f in raw.items() if isinstance(f, dict)),
+                          key=failure_time, reverse=True)
+    return {"available": True, "error": None, "status": credential.get("status"),
+            "disabled": credential.get("disabled") is True, "unavailable": credential.get("unavailable") is True,
+            "requires_sign_in": credential.get("requires_sign_in") is True,
+            "cooldowns": cooldowns, "failures": failures}
+
+
+# Go writes 0-9 fractional digits; Python 3.9's fromisoformat accepts only 3 or 6.
+FRACTION_RE = re.compile(r"(T\d{2}:\d{2}:\d{2})(?:\.(\d+))?")
+
+
+def parse_go_time(value: Any) -> datetime.datetime | None:
+    if not isinstance(value, str):
+        return None
+    text = FRACTION_RE.sub(lambda m: m.group(1) + ("." + (m.group(2) + "000000")[:6] if m.group(2) else ""),
+                           value.replace("Z", "+00:00"), count=1)
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def failure_time(failure: dict[str, Any]) -> datetime.datetime:
+    """Sort key for failures; Go trims trailing zeros, so raw strings misorder within a second."""
+    return parse_go_time(failure.get("at")) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
+
+def age_text(at: Any, now: datetime.datetime) -> str:
+    then = parse_go_time(at)
+    if then is None:
+        return "at an unknown time"
+    seconds = max(0, int((now - then).total_seconds()))
+    if seconds < 120:
+        return f"{seconds}s ago"
+    if seconds < 7200:
+        return f"{seconds // 60}m ago"
+    return f"{seconds // 3600}h ago"
+
+
+def format_proxy_view(view: dict[str, Any], now: datetime.datetime) -> str:
+    if not view["available"]:
+        return f"  proxy state unavailable: {view['error']}"
+    lines = []
+    cooldowns = view["cooldowns"]
+    if view["disabled"]:
+        lines.append("  proxy: disabled, never picked")
+    elif view["requires_sign_in"]:
+        lines.append(f"  proxy: needs a new sign-in, not picked (status {view['status']})")
+    elif cooldowns is None:
+        lines.append(f"  proxy: cooldowns unknown on this proxy (status {view['status']})")
+    elif not cooldowns and view["unavailable"]:
+        lines.append(f"  proxy: unavailable with no cooldown listed (status {view['status']})")
+    elif not cooldowns:
+        lines.append("  proxy: no cooldown")
+    cooldowns = cooldowns or []
+    # A whole-account cooldown is copied onto each model with the same reason; print it once.
+    account_reasons = {c["reason"] for c in cooldowns if c["scope"] != "model"}
+    for c in cooldowns:
+        if c["scope"] == "model" and c["reason"] in account_reasons:
+            continue
+        target = c["model_key"] if c["scope"] == "model" and c["model_key"] else "whole account"
+        left = c["remaining_seconds"]
+        left = f"{math.ceil(left / 60)}m left" if isinstance(left, (int, float)) else f"until {c['retry_at']}"
+        lines.append(f"  proxy cooldown: {target} {c['reason']}, {left}")
+    if view["failures"] is None:
+        lines.append("  last failures: not reported by this proxy")
+    for f in view["failures"] or []:
+        kind = f["type"] or f["code"] or "error"
+        lines.append(f"  last failure: {f['model']} HTTP {f['http_status']} {kind} {age_text(f['at'], now)} ({f['at']})")
+    return "\n".join(lines)
+
+
+def read_credentials(proxy: Proxy) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """The proxy's view of each Claude account, or an empty view and the reason it could not be read."""
+    try:
+        return proxy.claude_credentials(), None
+    except urllib.error.HTTPError as err:
+        return {}, f"/v8/management/credentials returned HTTP {err.code}"
+    except (ProxyConnectionError, ValueError, AttributeError) as err:
+        return {}, f"/v8/management/credentials could not be read ({type(err).__name__})"
+
+
 def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
     report = []
+    credentials = None
+    now = datetime.datetime.now(datetime.timezone.utc)
     for account in proxy.claude_accounts():
         email = account.get("email")
         if args.account and email != args.account:
             continue
+        if credentials is None:
+            credentials, credentials_error = read_credentials(proxy)
         status, profile = proxy.upstream(email, "GET", PROFILE_URL)
         tier = (profile.get("organization") or {}).get("rate_limit_tier") if status == 200 else None
         summary = fetch_usage(proxy, email)
-        report.append({"account": email, "tier": tier, **summary})
+        view = proxy_view(credentials.get(email), credentials_error)
+        report.append({"account": email, "tier": tier, **summary, "proxy": view})
         if not args.json:
             print(format_status(email, tier, summary))
+            print(format_proxy_view(view, now))
     if args.json:
         print(json.dumps({"captured_at": now_iso(), "accounts": report}, indent=2))
     return 0 if report else 1

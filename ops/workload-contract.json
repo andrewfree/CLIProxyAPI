@@ -10,7 +10,7 @@
       "compose_file": "docker-compose.yml",
       "service": "cli-proxy-api",
       "container_name": "cli-proxy-api",
-      "image": "sha256:f57649a96d5b1e8404309a5d5a25da050ea000c68f00f937f29b153a838e774f",
+      "image": "sha256:dd6522aa27e21d3aab83e98cae2899b23125b873040765bcac08fa35af052876",
       "restart_policy": "always"
     },
     "expected_lan_exposure": [
