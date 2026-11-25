@@ -140,6 +140,33 @@ class ProxyViewTest(unittest.TestCase):
                       resets.format_proxy_view(resets.proxy_view(credential()), self.NOW))
 
 
+class ProxyHealthWordingTest(unittest.TestCase):
+    NOW = resets.datetime.datetime(2026, 11, 25, 5, 0, tzinfo=resets.datetime.timezone.utc)
+
+    def text(self, **fields):
+        entry = credential({})
+        entry.update(fields)
+        return resets.format_proxy_view(resets.proxy_view(entry), self.NOW)
+
+    def test_only_a_usable_entry_reads_as_no_cooldown(self):
+        self.assertIn("proxy: no cooldown", self.text())
+        for fields, expected in (({"disabled": True}, "disabled, never picked"),
+                                 ({"requires_sign_in": True, "status": "error", "unavailable": True},
+                                  "needs a new sign-in"),
+                                 ({"cooldowns": None}, "cooldowns unknown"),
+                                 ({"unavailable": True, "status": "error"}, "unavailable with no cooldown listed")):
+            text = self.text(**fields)
+            self.assertIn(expected, text, fields)
+            self.assertNotIn("no cooldown\n", text + "\n", fields)
+
+    def test_failures_sort_by_time_not_by_string(self):
+        view = resets.proxy_view(credential({
+            "a": {"http_status": 529, "type": "overloaded_error", "at": "2026-11-25T04:52:36Z"},
+            "b": {"http_status": 502, "type": "overloaded_error", "at": "2026-11-25T04:52:36.5Z"},
+        }))
+        self.assertEqual([f["model"] for f in view["failures"]], ["b", "a"])
+
+
 class StatusCommandTest(unittest.TestCase):
     class StatusProxy(FakeProxy):
         def __init__(self, entries=None, failure: Exception | None = None):

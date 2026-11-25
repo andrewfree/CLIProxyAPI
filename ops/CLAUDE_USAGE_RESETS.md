@@ -75,11 +75,18 @@ this part:
 
 - `proxy cooldown:` lines show every cooldown that keeps the proxy from
   picking the account, for the whole account or for one model, with its
-  reason and the time left. `proxy: no cooldown` means the proxy can pick it.
+  reason and the time left. A whole-account cooldown prints once.
+- `proxy: no cooldown` means the proxy lists no cooldown and does not mark
+  the account unavailable or disabled. `proxy: disabled`, `needs a new
+  sign-in`, `unavailable with no cooldown listed` and `cooldowns unknown`
+  (a proxy that cannot see cooldowns, such as one run by Home) mean the proxy
+  will not pick the account, or cannot say whether it will.
 - `last failure:` lines show each model's latest upstream failure: the HTTP
   status, Anthropic's `error.type` (such as `overloaded_error`) and its age.
   A later success does not clear the line, and a proxy restart does. The proxy
-  keeps only these structured fields, not the upstream message.
+  keeps only these structured fields, not the upstream message. "Latest"
+  includes failures the client caused, such as a 400 for a bad request, so a
+  529 can be replaced by a later 400 on the same model.
 - `last failures: not reported by this proxy` means the proxy predates
   `v8.0.66-fleet.5` or runs without its account manager.
 - `proxy state unavailable:` means the tool could not read the proxy's view

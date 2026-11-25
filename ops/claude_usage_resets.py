@@ -347,17 +347,23 @@ def proxy_view(credential: dict[str, Any] | None, error: str | None = None) -> d
     """
     if credential is None:
         return {"available": False, "error": error or "the proxy has no entry for this account",
-                "status": None, "cooldowns": [], "failures": None}
-    cooldowns = [{k: c.get(k) for k in ("scope", "model_key", "reason", "retry_at", "remaining_seconds")}
-                 for c in credential.get("cooldowns") or [] if isinstance(c, dict)]
+                "status": None, "disabled": None, "unavailable": None, "requires_sign_in": None,
+                "cooldowns": [], "failures": None}
+    raw_cooldowns = credential.get("cooldowns")
+    # null means the proxy cannot see cooldowns (Home mode), not that there are none.
+    cooldowns = None if raw_cooldowns is None else [
+        {k: c.get(k) for k in ("scope", "model_key", "reason", "retry_at", "remaining_seconds")}
+        for c in raw_cooldowns if isinstance(c, dict)]
     raw = credential.get("model_failures")
     failures = None
     if isinstance(raw, dict):
         failures = sorted(({"model": model, "http_status": f.get("http_status"), "code": f.get("code"),
                             "type": f.get("type"), "at": f.get("at")}
                            for model, f in raw.items() if isinstance(f, dict)),
-                          key=lambda f: str(f["at"] or ""), reverse=True)
+                          key=failure_time, reverse=True)
     return {"available": True, "error": None, "status": credential.get("status"),
+            "disabled": credential.get("disabled") is True, "unavailable": credential.get("unavailable") is True,
+            "requires_sign_in": credential.get("requires_sign_in") is True,
             "cooldowns": cooldowns, "failures": failures}
 
 
@@ -377,6 +383,11 @@ def parse_go_time(value: Any) -> datetime.datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
+def failure_time(failure: dict[str, Any]) -> datetime.datetime:
+    """Sort key for failures; Go trims trailing zeros, so raw strings misorder within a second."""
+    return parse_go_time(failure.get("at")) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+
+
 def age_text(at: Any, now: datetime.datetime) -> str:
     then = parse_go_time(at)
     if then is None:
@@ -393,11 +404,21 @@ def format_proxy_view(view: dict[str, Any], now: datetime.datetime) -> str:
     if not view["available"]:
         return f"  proxy state unavailable: {view['error']}"
     lines = []
-    if not view["cooldowns"]:
+    cooldowns = view["cooldowns"]
+    if view["disabled"]:
+        lines.append("  proxy: disabled, never picked")
+    elif view["requires_sign_in"]:
+        lines.append(f"  proxy: needs a new sign-in, not picked (status {view['status']})")
+    elif cooldowns is None:
+        lines.append(f"  proxy: cooldowns unknown on this proxy (status {view['status']})")
+    elif not cooldowns and view["unavailable"]:
+        lines.append(f"  proxy: unavailable with no cooldown listed (status {view['status']})")
+    elif not cooldowns:
         lines.append("  proxy: no cooldown")
+    cooldowns = cooldowns or []
     # A whole-account cooldown is copied onto each model with the same reason; print it once.
-    account_reasons = {c["reason"] for c in view["cooldowns"] if c["scope"] != "model"}
-    for c in view["cooldowns"]:
+    account_reasons = {c["reason"] for c in cooldowns if c["scope"] != "model"}
+    for c in cooldowns:
         if c["scope"] == "model" and c["reason"] in account_reasons:
             continue
         target = c["model_key"] if c["scope"] == "model" and c["model_key"] else "whole account"
