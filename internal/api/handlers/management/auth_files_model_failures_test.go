@@ -51,8 +51,11 @@ func TestListAuthFilesReportsModelFailuresOnV8Only(t *testing.T) {
 	if got := failure.Get("http_status").Int(); got != 529 {
 		t.Fatalf("http_status = %d, want 529", got)
 	}
-	if got := failure.Get("message").String(); got != body {
-		t.Fatalf("message = %q, want %q", got, body)
+	if got := failure.Get("type").String(); got != "overloaded_error" {
+		t.Fatalf("type = %q, want overloaded_error", got)
+	}
+	if failure.Get("message").Exists() {
+		t.Fatalf("the upstream message must not be exposed: %s", failure.Raw)
 	}
 	if failure.Get("at").String() == "" {
 		t.Fatal("failure has no time")
