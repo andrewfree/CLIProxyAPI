@@ -15,10 +15,10 @@ import sys
 import tarfile
 
 VERSION = "v8.0.66-fleet.5"
-COMMIT = "e0f4810785231d68e0eb62fb6d17d1adcc4b3647"
+COMMIT = "312f2ef991d0ab18d4daea3afaa27751d9473d2a"
 BUILDER = "sha256:420b7ecff28ef9fd9e87ea50d53de965740c065da8bfa06807d5a6db364c0ad1"  # cliproxy-cross-builder:20261102
 PARENT_AMD64 = "sha256:9e9da16e283e20da4a534d1397d4b6433a5708f4f04b6faf2d03b1367d357af6"  # fleet.4 amd64
-ROOT = pathlib.Path("/srv/share/drives/disk12/cliproxy-v8.0.66-fleet.5-20261125")
+ROOT = pathlib.Path("/srv/share/drives/disk12/cliproxy-v8.0.66-fleet.5-20261125-r2")
 CACHE = pathlib.Path("/home/andrew/.cache/cliproxy-upgrade-20261102")
 ART = ROOT / "artifacts"
 SOURCE = ROOT / "source"
@@ -74,7 +74,7 @@ run("focused-tests", base + ["go", "test", "-count=1", "./sdk/cliproxy/auth/", "
                              "./internal/runtime/executor/"])
 flags = f"-s -w -X main.Version={VERSION} -X main.Commit={COMMIT} -X main.BuildDate={build_date}"
 for arch, cc in (("amd64", "gcc"), ("arm64", "aarch64-linux-gnu-gcc")):
-    name = f"CLIProxyAPI-v8066-fleet5-{arch}"
+    name = f"CLIProxyAPI-v8066-fleet5r2-{arch}"
     assert not (CACHE / name).exists(), "do not overwrite an earlier binary"
     run(f"{arch}-compile", base + ["env", "CGO_ENABLED=1", "GOOS=linux", "GOARCH=" + arch, "CC=" + cc,
                                    "go", "build", "-buildvcs=false", "-ldflags=" + flags,
