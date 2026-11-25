@@ -81,8 +81,8 @@ Three ideas explain most of the picture:
 ### 2.1 Two hosts, one release, checked for parity
 
 **What it is.** Will (Linux, AMD64, always on) is the primary. The M5 Mac (Docker Desktop, ARM64)
-runs the same release as a local fallback at `127.0.0.1:8317`. Both run `v8.0.66-fleet.4`, built
-from source `4a1d49c3`. [fleet-release.json](fleet-release.json) pins the image ID for each
+runs the same release as a local fallback at `127.0.0.1:8317`. Both run `v8.0.66-fleet.5`, built
+from source `312f2ef9`. [fleet-release.json](fleet-release.json) pins the image ID for each
 architecture, and both Compose files use those IDs with `pull_policy: never`
 ([docker-compose.yml](../docker-compose.yml),
 [instances/will/docker-compose.yml](instances/will/docker-compose.yml)).
