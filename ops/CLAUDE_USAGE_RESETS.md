@@ -69,6 +69,25 @@ This request is read-only. The claude-cli `User-Agent`, `x-app: cli`, and
   suggestion. On 2026-11-11 the server accepted a Fable grant while it named
   the full reset as next.
 
+Below each account's limits, `status` prints the answering proxy's own view
+from `GET /v8/management/credentials`. Anthropic's usage numbers cannot show
+this part:
+
+- `proxy cooldown:` lines show every cooldown that keeps the proxy from
+  picking the account, for the whole account or for one model, with its
+  reason and the time left. `proxy: no cooldown` means the proxy can pick it.
+- `last failure:` lines show each model's latest upstream failure: the HTTP
+  status, Anthropic's `error.type` (such as `overloaded_error`) and its age.
+  A later success does not clear the line, and a proxy restart does.
+  `last failures: not reported by this proxy version` means the proxy predates
+  `v8.0.66-fleet.5`.
+
+Read these lines first when a delegated Claude lane fails with `529 Overloaded`.
+On November 24, 2026, every Fable request went to the Gmail account, the only
+one not capped, and Anthropic returned `overloaded_error` on that account. The
+fix was to wait. Routing to Gmail by name changed nothing. `--json` puts the
+same data under each account's `proxy` key.
+
 Run the tool from the checkout. The ops bundle ships a copy only for the fleet
 monitor's imports, and that copy exits with an error if run as a command. The
 monitor also reads each Claude account about every 15 minutes

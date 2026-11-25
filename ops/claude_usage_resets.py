@@ -120,6 +120,11 @@ class Proxy:
         files = self.mgmt("/v0/management/auth-files")["files"]
         return [f for f in files if f.get("provider") == "claude"]
 
+    def claude_credentials(self) -> dict[str, dict[str, Any]]:
+        """The proxy's own view of each Claude account (cooldowns, latest failures), by email."""
+        files = self.mgmt("/v8/management/credentials").get("files") or []
+        return {f.get("email"): f for f in files if f.get("provider") == "claude"}
+
     def upstream(self, email: str, method: str, url: str, body: dict[str, Any] | None = None) -> tuple[int, Any]:
         account = next((a for a in self.claude_accounts() if a.get("email") == email), None)
         if account is None:
@@ -332,18 +337,84 @@ def format_status(email: str, tier: str | None, summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def upstream_error_type(message: Any) -> str | None:
+    """The `error.type` of an Anthropic error body, such as `overloaded_error`."""
+    try:
+        body = json.loads(message) if isinstance(message, str) else None
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    kind = error.get("type") if isinstance(error, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
+def proxy_view(credential: dict[str, Any] | None) -> dict[str, Any]:
+    """Reduce a v8 credentials entry to its cooldowns and each model's latest failure, newest first.
+
+    `failures` is None when the proxy predates per-model failure reporting
+    (fleet.4 and earlier) and empty when it has recorded none.
+    """
+    credential = credential or {}
+    cooldowns = [{k: c.get(k) for k in ("scope", "model_key", "reason", "retry_at", "remaining_seconds")}
+                 for c in credential.get("cooldowns") or [] if isinstance(c, dict)]
+    raw = credential.get("model_failures")
+    failures = None if raw is None else []
+    if isinstance(raw, dict):
+        failures = sorted(({"model": model, "http_status": f.get("http_status"), "code": f.get("code"),
+                            "error_type": upstream_error_type(f.get("message")), "at": f.get("at")}
+                           for model, f in raw.items() if isinstance(f, dict)),
+                          key=lambda f: f["at"] or "", reverse=True)
+    return {"status": credential.get("status"), "cooldowns": cooldowns, "failures": failures}
+
+
+def age_text(at: str | None, now: datetime.datetime) -> str:
+    try:
+        then = datetime.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+        seconds = max(0, int((now - then).total_seconds()))
+    except (TypeError, ValueError):
+        return "at an unknown time"
+    if seconds < 120:
+        return f"{seconds}s ago"
+    if seconds < 7200:
+        return f"{seconds // 60}m ago"
+    return f"{seconds // 3600}h ago"
+
+
+def format_proxy_view(view: dict[str, Any], now: datetime.datetime) -> str:
+    lines = []
+    if not view["cooldowns"]:
+        lines.append("  proxy: no cooldown")
+    for c in view["cooldowns"]:
+        target = c["model_key"] if c["scope"] == "model" and c["model_key"] else "whole account"
+        left = c["remaining_seconds"]
+        left = f"{math.ceil(left / 60)}m left" if isinstance(left, (int, float)) else f"until {c['retry_at']}"
+        lines.append(f"  proxy cooldown: {target} {c['reason']}, {left}")
+    if view["failures"] is None:
+        lines.append("  last failures: not reported by this proxy version")
+    for f in view["failures"] or []:
+        kind = f["error_type"] or f["code"] or "error"
+        lines.append(f"  last failure: {f['model']} HTTP {f['http_status']} {kind} {age_text(f['at'], now)} ({f['at']})")
+    return "\n".join(lines)
+
+
 def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
     report = []
+    credentials = None
+    now = datetime.datetime.now(datetime.timezone.utc)
     for account in proxy.claude_accounts():
         email = account.get("email")
         if args.account and email != args.account:
             continue
+        if credentials is None:
+            credentials = proxy.claude_credentials()
         status, profile = proxy.upstream(email, "GET", PROFILE_URL)
         tier = (profile.get("organization") or {}).get("rate_limit_tier") if status == 200 else None
         summary = fetch_usage(proxy, email)
-        report.append({"account": email, "tier": tier, **summary})
+        view = proxy_view(credentials.get(email))
+        report.append({"account": email, "tier": tier, **summary, "proxy": view})
         if not args.json:
             print(format_status(email, tier, summary))
+            print(format_proxy_view(view, now))
     if args.json:
         print(json.dumps({"captured_at": now_iso(), "accounts": report}, indent=2))
     return 0 if report else 1

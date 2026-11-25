@@ -79,6 +79,79 @@ class SummarizeUsageTest(unittest.TestCase):
         self.assertEqual([g["id"] for g in grants], ["full-reset-2611", "launch-2610-fable"])
 
 
+OVERLOADED = '{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+
+
+def credential(failures: Any = None, cooldowns: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """A trimmed v8 /credentials entry for one Claude account."""
+    entry: dict[str, Any] = {"provider": "claude", "email": EMAIL, "status": "active",
+                             "cooldowns": cooldowns or []}
+    if failures is not None:
+        entry["model_failures"] = failures
+    return entry
+
+
+class ProxyViewTest(unittest.TestCase):
+    def test_failures_are_newest_first_with_the_anthropic_error_type(self):
+        view = resets.proxy_view(credential({
+            "claude-opus-5-5": {"http_status": 500, "message": "not json", "at": "2026-11-25T04:40:00Z"},
+            "claude-fable-5-2": {"http_status": 529, "message": OVERLOADED, "at": "2026-11-25T04:52:27Z"},
+        }))
+        self.assertEqual([f["model"] for f in view["failures"]], ["claude-fable-5-2", "claude-opus-5-5"])
+        self.assertEqual(view["failures"][0]["error_type"], "overloaded_error")
+        self.assertIsNone(view["failures"][1]["error_type"])
+
+    def test_an_old_proxy_and_a_quiet_account_are_told_apart(self):
+        self.assertIsNone(resets.proxy_view(credential())["failures"])
+        self.assertEqual(resets.proxy_view(credential({}))["failures"], [])
+        self.assertIsNone(resets.proxy_view(None)["failures"])
+
+    def test_text_names_the_model_status_type_and_age(self):
+        now = resets.datetime.datetime(2026, 11, 25, 5, 0, tzinfo=resets.datetime.timezone.utc)
+        view = resets.proxy_view(credential(
+            {"claude-fable-5-2": {"http_status": 529, "message": OVERLOADED, "at": "2026-11-25T04:52:27Z"}},
+            [{"scope": "credential", "reason": "credential_quota", "retry_at": "2026-11-25T05:41:00Z",
+              "remaining_seconds": 2459},
+             {"scope": "model", "model_key": "claude-fable-5-2", "reason": "quota", "remaining_seconds": 59}]))
+        text = resets.format_proxy_view(view, now)
+        self.assertIn("proxy cooldown: whole account credential_quota, 41m left", text)
+        self.assertIn("proxy cooldown: claude-fable-5-2 quota, 1m left", text)
+        self.assertIn("last failure: claude-fable-5-2 HTTP 529 overloaded_error 7m ago", text)
+        self.assertIn("proxy: no cooldown", resets.format_proxy_view(resets.proxy_view(credential({})), now))
+        self.assertIn("not reported by this proxy version",
+                      resets.format_proxy_view(resets.proxy_view(credential()), now))
+
+
+class StatusCommandTest(unittest.TestCase):
+    class StatusProxy(FakeProxy):
+        def __init__(self, entry):
+            super().__init__([(200, usage_body())])
+            self.entry = entry
+
+        def claude_accounts(self):
+            return [{"provider": "claude", "email": EMAIL}]
+
+        def claude_credentials(self):
+            return {EMAIL: self.entry}
+
+    def run_status(self, entry, json_output):
+        args = resets.build_parser().parse_args(["status", *(["--json"] if json_output else [])])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = resets.cmd_status(self.StatusProxy(entry), args)
+        return code, out.getvalue()
+
+    def test_status_shows_the_proxys_latest_failure(self):
+        entry = credential({"claude-fable-5-2": {"http_status": 529, "message": OVERLOADED,
+                                                 "at": "2026-11-25T04:52:27Z"}})
+        code, text = self.run_status(entry, json_output=False)
+        self.assertEqual(code, 0)
+        self.assertIn("Fable: 99% of its cap", text)
+        self.assertIn("last failure: claude-fable-5-2 HTTP 529 overloaded_error", text)
+        code, raw = self.run_status(entry, json_output=True)
+        failure = json.loads(raw)["accounts"][0]["proxy"]["failures"][0]
+        self.assertEqual((failure["http_status"], failure["error_type"]), (529, "overloaded_error"))
+
+
 class CheckClaimableTest(unittest.TestCase):
     def check(self, body, grant="launch-2610-fable"):
         return resets.check_claimable(resets.summarize_usage(body), grant)
