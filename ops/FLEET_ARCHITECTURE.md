@@ -574,6 +574,7 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
 | `config.yaml`, `.env`, `auths/` | Per-host secrets. | Keep them on the instance that owns them. |
 | `/Volumes/Storage/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 25 (Innie from November 18). | See below. |
+| `/Volumes/Innie/backups/llm-logs-encrypted/cliproxy/m5/` | Encrypted daily parts of that archive, written by `backup_log_archive.py`, never deleted. | [README.md](README.md#encrypted-backup-of-the-archive) |
 
 The checkout used to provide both the ops code and its working data. A checkout
 edit could reach launchd within 120 or 300 seconds, or T3 on the next session.

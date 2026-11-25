@@ -23,3 +23,5 @@ ops/fleet_monitor_probe.py
 ops/fleet_quota_chart.py
 ops/claude_usage_resets.py
 ops/com.rever.cliproxy-fleet-monitor.plist
+ops/backup_log_archive.py
+ops/com.rever.cliproxy-log-backup.plist

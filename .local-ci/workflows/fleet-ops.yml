@@ -32,6 +32,12 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y ruby
           fi
+      - name: Install age and zstd for the encrypted log backup tests
+        run: |
+          if ! command -v age >/dev/null || ! command -v zstd >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y age zstd
+          fi
       - run: go test ./ops/...
       - name: Run portable ops Python tests
         shell: bash

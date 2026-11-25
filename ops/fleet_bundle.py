@@ -26,6 +26,8 @@ JOBS = {
     "com.rever.cliproxy-log-archive": "archive_logs.py",
 }
 MONITOR = "com.rever.cliproxy-fleet-monitor"
+# Optional jobs installed verbatim from the bundle once Andrew activates them.
+VERBATIM_JOBS = (MONITOR, "com.rever.cliproxy-log-backup")
 
 
 class BundleError(Exception):
@@ -361,17 +363,19 @@ def verify_bundle(host, manifest, launchers):
                     ExpatError, plistlib.InvalidFileException):
                 issues.append("P0/" + label)
 
-        # The monitor plist is installed verbatim from the bundle once Andrew activates
-        # it, so an installed copy must match the shipped bytes. Not installed is fine.
-        monitor = home / "Library/LaunchAgents" / (MONITOR + ".plist")
-        if os.path.lexists(monitor):
-            expected = manifest["files"].get("ops/" + MONITOR + ".plist", {}).get("sha256")
+        # These plists are installed verbatim from the bundle once Andrew activates
+        # them, so an installed copy must match the shipped bytes. Not installed is fine.
+        for job_label in VERBATIM_JOBS:
+            installed_plist = home / "Library/LaunchAgents" / (job_label + ".plist")
+            if not os.path.lexists(installed_plist):
+                continue
+            expected = manifest["files"].get("ops/" + job_label + ".plist", {}).get("sha256")
             try:
-                actual = hashlib.sha256(read_regular(monitor)[0]).hexdigest()
+                actual = hashlib.sha256(read_regular(installed_plist)[0]).hexdigest()
             except (OSError, BundleError):
                 actual = None
             if expected is None or actual != expected:
-                issues.append("P0/" + MONITOR)
+                issues.append("P0/" + job_label)
 
         token = home / ".local/bin/cliproxy-codex-token"
         try:

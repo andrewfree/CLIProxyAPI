@@ -549,6 +549,23 @@ Publishing a new archive copy requires hard-link support on the archive
 filesystem so competing writers can preserve both copies. Archive failures
 are reported in `ops/runtime/archive.log`.
 
+### Encrypted backup of the archive
+
+`com.rever.cliproxy-log-backup` runs `ops/backup_log_archive.py` daily at 04:30. It keeps a second, encrypted copy of the archive on Innie at `/Volumes/Innie/backups/llm-logs-encrypted/cliproxy/m5/`. Andrew chose this on November 25, 2026: a copy for recovery on Innie, encrypted, kept forever. OpenObserve on Will provides search.
+
+- **One part per finished UTC day.** The job reads `SHA256SUMS`, skips the current and previous UTC day because the archiver may still add to them, and packs each older day's files that no committed part holds yet. It tars, compresses with zstd and encrypts with age to the public recipient in the plist. Later arrivals for a day go into the next part.
+- **Checked while packing.** Each file's SHA-256 must match its manifest record, or the run fails and commits nothing.
+- **Committed last, never overwritten.** A part is `<day>.partNN.tar.zst.age`, `.members` and finally `.sha256`, which holds the ciphertext digest. A part without `.sha256` is not counted. Part numbers are never reused, and the job never deletes.
+- **Key.** The recipient is the public half of the age key the OpenObserve backup work made on November 24. Its private half has a passphrase-protected recovery copy on Will. The daily job never reads the private key.
+
+Check restores with the private key. This decrypts every committed part, checks the ciphertext against `.sha256` and every member against `.members`, and writes a `.verified` receipt per part:
+
+```sh
+python3 ops/backup_log_archive.py --verify --identity <age identity file> --verbose
+```
+
+Add `--day YYYY-MM-DD` to check one day. Runs log to `ops/runtime/log-backup.log`. Install the plist the way the archive plist is installed, from the active bundle: P0 requires an installed copy to match the shipped bytes. Innie is an SD card that writes about 7 MB/s, so the first run takes hours.
+
 ### Repair a malformed manifest tail
 
 Use this procedure for a reported malformed unterminated final record. Keep
