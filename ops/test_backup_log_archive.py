@@ -1,4 +1,5 @@
 import datetime
+import functools
 import hashlib
 import os
 import plistlib
@@ -234,7 +235,10 @@ class BackupTest(unittest.TestCase):
         backup.back_up(self.config, TODAY)
         argv = ["--backup-root", str(self.backup_root), "--backup-mount", str(self.config.backup_mount),
                 "--verify", "--identity", str(self.identity)]
-        with mock.patch.dict(os.environ, {"CLIPROXY_ROOT": self.tmp.name}):
+        # main() uses the Homebrew paths the LaunchAgent runs with; hand it the tools found on this host.
+        tools = functools.partial(backup.Config, age=AGE, zstd=ZSTD)
+        with mock.patch.dict(os.environ, {"CLIPROXY_ROOT": self.tmp.name}), \
+                mock.patch.object(backup, "Config", tools):
             os.environ.pop("CLIPROXY_LOG_BACKUP_RECIPIENT", None)
             self.assertEqual(backup.main(argv), 0)
             self.assertEqual(backup.main(argv + ["--day", "2026-11-19"]), 1)
