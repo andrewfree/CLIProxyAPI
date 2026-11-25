@@ -59,6 +59,15 @@ OAUTH_HEADERS = {
 GRANT_ID_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+# status reads every account, so it retries a usage read once and only on a server
+# error; a 429 means the 300 s polling spacing was not met, and a retry 30 s later
+# would hit it again. claim and watch keep the longer backoff.
+STATUS_USAGE_TRIES = 2
+STATUS_USAGE_WAIT_SECONDS = 30
+STATUS_RETRY_STATUS = {500, 502, 503, 504}
+# The proxy's api-call route times out at 60 s and answers 502; wait longer, so a
+# slow upstream comes back as that account's error and not as a lost connection.
+MGMT_TIMEOUT_SECONDS = 75
 # The usage API's weekly resets_at jitters by about a second between reads.
 RESET_TOLERANCE_SECONDS = 120.0
 # Weekly windows are seven days apart; a tolerance below one day cannot match the wrong one.
@@ -126,7 +135,7 @@ class Proxy:
             headers={"Authorization": "Bearer " + self.key, "Content-Type": "application/json"},
         )
         try:
-            with OPENER.open(req, timeout=60) as resp:
+            with OPENER.open(req, timeout=MGMT_TIMEOUT_SECONDS) as resp:
                 self.answered = True
                 return json.load(resp)
         except urllib.error.HTTPError:
@@ -204,7 +213,8 @@ def limit_percent(summary: dict[str, Any], limit: str) -> int | None:
 
 
 def fetch_usage(proxy: Proxy, email: str, tries: int = 6, wait: float = 60,
-                sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+                sleep: Callable[[float], None] = time.sleep,
+                retry_status: set[int] | None = None) -> dict[str, Any]:
     """Read usage, backing off on 429/5xx. The usage endpoint rate-limits frequent polls."""
     status = None
     for attempt in range(1, tries + 1):
@@ -213,7 +223,7 @@ def fetch_usage(proxy: Proxy, email: str, tries: int = 6, wait: float = 60,
             if not isinstance(body, dict):
                 raise ResetError(f"usage endpoint returned an unreadable body for {email}")
             return summarize_usage(body)
-        if status not in RETRYABLE_STATUS or attempt == tries:
+        if status not in (RETRYABLE_STATUS if retry_status is None else retry_status) or attempt == tries:
             break
         print(f"{now_iso()} usage HTTP {status}; retry {attempt}/{tries - 1} in {wait:g}s", file=sys.stderr, flush=True)
         sleep(wait)
@@ -510,6 +520,7 @@ def read_credentials(proxy: Proxy) -> tuple[dict[str, dict[str, Any]], str | Non
 
 def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
     report = []
+    failed = 0
     credentials = None
     now = datetime.datetime.now(datetime.timezone.utc)
     for account in proxy.claude_accounts():
@@ -518,17 +529,40 @@ def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
             continue
         if credentials is None:
             credentials, credentials_error = read_credentials(proxy)
-        status, profile = proxy.upstream(email, "GET", PROFILE_URL)
-        tier = (profile.get("organization") or {}).get("rate_limit_tier") if status == 200 else None
-        summary = fetch_usage(proxy, email)
         view = proxy_view(credentials.get(email), credentials_error)
+        try:
+            status, profile = proxy.upstream(email, "GET", PROFILE_URL)
+            organization = profile.get("organization") if status == 200 and isinstance(profile, dict) else None
+            tier = organization.get("rate_limit_tier") if isinstance(organization, dict) else None
+            summary = fetch_usage(proxy, email, tries=STATUS_USAGE_TRIES, wait=STATUS_USAGE_WAIT_SECONDS,
+                                  sleep=time.sleep, retry_status=STATUS_RETRY_STATUS)
+        except ProxyConnectionError:
+            # A connection lost after the proxy answered ends the report (exit 1)
+            # rather than printing one failure for every remaining account.
+            raise
+        except (ResetError, urllib.error.HTTPError) as err:
+            # One account's failed read must not hide the others, nor this
+            # account's proxy view, which often explains the failure. The
+            # management api-call route reports the proxy's own failure to reach
+            # the provider for this account (502, or 400 for a missing token) as
+            # an HTTP error, separately from the provider's own status.
+            failed += 1
+            if isinstance(err, urllib.error.HTTPError):
+                err = f"management HTTP {err.code}"
+            report.append({"account": email, "error": str(err), "proxy": view})
+            if not args.json:
+                print(f"{email}\n  usage unavailable: {err}")
+                print(format_proxy_view(view, now))
+            continue
         report.append({"account": email, "tier": tier, **summary, "proxy": view})
         if not args.json:
             print(format_status(email, tier, summary))
             print(format_proxy_view(view, now))
     if args.json:
         print(json.dumps({"captured_at": now_iso(), "accounts": report}, indent=2))
-    return 0 if report else 1
+    if failed:
+        print(f"error: usage could not be read for {failed} of {len(report)} account(s)", file=sys.stderr)
+    return 0 if report and not failed else 1
 
 
 def notify(message: str) -> None:

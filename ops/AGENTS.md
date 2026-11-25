@@ -12,6 +12,9 @@ and covers the Go server. Keep fork-only operational rules here.
   report as current (a claim, a fan-out check, a cap decision), run `status`
   in this turn. Never reuse a percentage from an earlier turn or note as
   current.
+- `status` exits 1 when any account's read failed. That account's numbers
+  are unknown (`usage unavailable:`, or an `error` field in `--json`); the
+  other accounts' numbers are still current.
 - Run the tool from the checkout. The ops bundle ships a copy only for the
   fleet monitor's imports, and that copy refuses to run as a command.
 - `status` and `watch` ask Will first and fall back to the local proxy only
