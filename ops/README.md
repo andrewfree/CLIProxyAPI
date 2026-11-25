@@ -524,10 +524,10 @@ claim request copied from Claude Code, and the 2026-11-11 Fable reset record.
 The durable archive is:
 
 ```text
-/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/
+/Volumes/Storage/backups/llm-logs/cliproxy/m5/live/
 ```
 
-Until November 18, 2026 it was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Andrew chose Innie, a local drive with about 600 GiB free. The T9 drive had just thrown a disk error. Logs archived before that date stay on TheCloud. To switch destinations, update the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR, then follow the installation steps below.
+Andrew chose Storage on November 25, 2026. It is a 4 TB external APFS drive, which supports the hard links the archive needs. From November 18 to 25 the archive was on Innie (`/Volumes/Innie/backups/llm-logs/cliproxy/m5/live/`). Its copies were moved to Storage and verified by SHA-256 against `SHA256SUMS`. Until November 18 the archive was `/Users/rever/Volumes/TheCloud/backups/llm-logs/cliproxy/m5/live/`. That NAS share filled up (0 bytes free), so no log was archived or pruned and the Mac data volume fell to about 6 GiB free. Logs archived before that date stay on TheCloud. To switch destinations, update the two archive variables in the tracked `ops/com.rever.cliproxy-log-archive.plist` and `ops/test_launchd_plist.py` in one PR, then follow the installation steps below.
 
 Closed logs are grouped by UTC modification date under `requests/YYYY/MM/DD/`.
 Each new copy is SHA-256 verified and recorded in the append-only `SHA256SUMS`
@@ -566,7 +566,7 @@ and investigate before changing the manifest.
   domain="gui/$(id -u)"
   export instance="$HOME/cliproxy"
   bundle="$HOME/cliproxy-live/ops"
-  mount=/Volumes/Innie
+  mount=/Volumes/Storage
   export archive="$mount/backups/llm-logs/cliproxy/m5/live"
   launchctl disable "$domain/$label"
   if launchctl print "$domain/$label" >/dev/null 2>&1; then

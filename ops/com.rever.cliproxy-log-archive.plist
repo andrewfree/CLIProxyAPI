@@ -19,9 +19,9 @@
         <key>PATH</key>
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>CLIPROXY_LOG_ARCHIVE_MOUNT</key>
-        <string>/Volumes/Innie</string>
+        <string>/Volumes/Storage</string>
         <key>CLIPROXY_LOG_ARCHIVE_ROOT</key>
-        <string>/Volumes/Innie/backups/llm-logs/cliproxy/m5/live</string>
+        <string>/Volumes/Storage/backups/llm-logs/cliproxy/m5/live</string>
         <key>CLIPROXY_LOG_MIN_AGE_SECONDS</key>
         <string>3600</string>
     </dict>
