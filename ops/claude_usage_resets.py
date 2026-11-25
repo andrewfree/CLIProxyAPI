@@ -337,42 +337,51 @@ def format_status(email: str, tier: str | None, summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def upstream_error_type(message: Any) -> str | None:
-    """The `error.type` of an Anthropic error body, such as `overloaded_error`."""
-    try:
-        body = json.loads(message) if isinstance(message, str) else None
-    except ValueError:
-        return None
-    error = body.get("error") if isinstance(body, dict) else None
-    kind = error.get("type") if isinstance(error, dict) else None
-    return kind if isinstance(kind, str) else None
-
-
-def proxy_view(credential: dict[str, Any] | None) -> dict[str, Any]:
+def proxy_view(credential: dict[str, Any] | None, error: str | None = None) -> dict[str, Any]:
     """Reduce a v8 credentials entry to its cooldowns and each model's latest failure, newest first.
 
-    `failures` is None when the proxy predates per-model failure reporting
-    (fleet.4 and earlier) and empty when it has recorded none.
+    `available` is False when the proxy's view could not be read or has no
+    entry for the account; `error` then says why. `failures` is None when the
+    entry carries no `model_failures` (a proxy before fleet.5, or one running
+    without an auth manager) and empty when the proxy recorded none.
     """
-    credential = credential or {}
+    if credential is None:
+        return {"available": False, "error": error or "the proxy has no entry for this account",
+                "status": None, "cooldowns": [], "failures": None}
     cooldowns = [{k: c.get(k) for k in ("scope", "model_key", "reason", "retry_at", "remaining_seconds")}
                  for c in credential.get("cooldowns") or [] if isinstance(c, dict)]
     raw = credential.get("model_failures")
-    failures = None if raw is None else []
+    failures = None
     if isinstance(raw, dict):
         failures = sorted(({"model": model, "http_status": f.get("http_status"), "code": f.get("code"),
-                            "error_type": upstream_error_type(f.get("message")), "at": f.get("at")}
+                            "type": f.get("type"), "at": f.get("at")}
                            for model, f in raw.items() if isinstance(f, dict)),
-                          key=lambda f: f["at"] or "", reverse=True)
-    return {"status": credential.get("status"), "cooldowns": cooldowns, "failures": failures}
+                          key=lambda f: str(f["at"] or ""), reverse=True)
+    return {"available": True, "error": None, "status": credential.get("status"),
+            "cooldowns": cooldowns, "failures": failures}
 
 
-def age_text(at: str | None, now: datetime.datetime) -> str:
+# Go writes 0-9 fractional digits; Python 3.9's fromisoformat accepts only 3 or 6.
+FRACTION_RE = re.compile(r"(T\d{2}:\d{2}:\d{2})(?:\.(\d+))?")
+
+
+def parse_go_time(value: Any) -> datetime.datetime | None:
+    if not isinstance(value, str):
+        return None
+    text = FRACTION_RE.sub(lambda m: m.group(1) + ("." + (m.group(2) + "000000")[:6] if m.group(2) else ""),
+                           value.replace("Z", "+00:00"), count=1)
     try:
-        then = datetime.datetime.fromisoformat(str(at).replace("Z", "+00:00"))
-        seconds = max(0, int((now - then).total_seconds()))
-    except (TypeError, ValueError):
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def age_text(at: Any, now: datetime.datetime) -> str:
+    then = parse_go_time(at)
+    if then is None:
         return "at an unknown time"
+    seconds = max(0, int((now - then).total_seconds()))
     if seconds < 120:
         return f"{seconds}s ago"
     if seconds < 7200:
@@ -381,6 +390,8 @@ def age_text(at: str | None, now: datetime.datetime) -> str:
 
 
 def format_proxy_view(view: dict[str, Any], now: datetime.datetime) -> str:
+    if not view["available"]:
+        return f"  proxy state unavailable: {view['error']}"
     lines = []
     if not view["cooldowns"]:
         lines.append("  proxy: no cooldown")
@@ -390,11 +401,21 @@ def format_proxy_view(view: dict[str, Any], now: datetime.datetime) -> str:
         left = f"{math.ceil(left / 60)}m left" if isinstance(left, (int, float)) else f"until {c['retry_at']}"
         lines.append(f"  proxy cooldown: {target} {c['reason']}, {left}")
     if view["failures"] is None:
-        lines.append("  last failures: not reported by this proxy version")
+        lines.append("  last failures: not reported by this proxy")
     for f in view["failures"] or []:
-        kind = f["error_type"] or f["code"] or "error"
+        kind = f["type"] or f["code"] or "error"
         lines.append(f"  last failure: {f['model']} HTTP {f['http_status']} {kind} {age_text(f['at'], now)} ({f['at']})")
     return "\n".join(lines)
+
+
+def read_credentials(proxy: Proxy) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """The proxy's view of each Claude account, or an empty view and the reason it could not be read."""
+    try:
+        return proxy.claude_credentials(), None
+    except urllib.error.HTTPError as err:
+        return {}, f"/v8/management/credentials returned HTTP {err.code}"
+    except (ProxyConnectionError, ValueError, AttributeError) as err:
+        return {}, f"/v8/management/credentials could not be read ({type(err).__name__})"
 
 
 def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
@@ -406,11 +427,11 @@ def cmd_status(proxy: Proxy, args: argparse.Namespace) -> int:
         if args.account and email != args.account:
             continue
         if credentials is None:
-            credentials = proxy.claude_credentials()
+            credentials, credentials_error = read_credentials(proxy)
         status, profile = proxy.upstream(email, "GET", PROFILE_URL)
         tier = (profile.get("organization") or {}).get("rate_limit_tier") if status == 200 else None
         summary = fetch_usage(proxy, email)
-        view = proxy_view(credentials.get(email))
+        view = proxy_view(credentials.get(email), credentials_error)
         report.append({"account": email, "tier": tier, **summary, "proxy": view})
         if not args.json:
             print(format_status(email, tier, summary))

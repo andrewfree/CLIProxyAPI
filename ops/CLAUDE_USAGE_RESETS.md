@@ -78,9 +78,13 @@ this part:
   reason and the time left. `proxy: no cooldown` means the proxy can pick it.
 - `last failure:` lines show each model's latest upstream failure: the HTTP
   status, Anthropic's `error.type` (such as `overloaded_error`) and its age.
-  A later success does not clear the line, and a proxy restart does.
-  `last failures: not reported by this proxy version` means the proxy predates
-  `v8.0.66-fleet.5`.
+  A later success does not clear the line, and a proxy restart does. The proxy
+  keeps only these structured fields, not the upstream message.
+- `last failures: not reported by this proxy` means the proxy predates
+  `v8.0.66-fleet.5` or runs without its account manager.
+- `proxy state unavailable:` means the tool could not read the proxy's view
+  or found no entry for the account. The line says which. The usage numbers
+  above it still come from Anthropic.
 
 Read these lines first when a delegated Claude lane fails with `529 Overloaded`.
 On November 24, 2026, every Fable request went to the Gmail account, the only
