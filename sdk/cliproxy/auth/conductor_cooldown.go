@@ -1014,6 +1014,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Success++
 		} else {
 			auth.Failed++
+			auth.recordModelFailure(modelKey, result.Error, now)
 		}
 		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
 
