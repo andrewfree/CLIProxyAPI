@@ -145,8 +145,9 @@ func (m *Manager) findClaudeUpgradeAttempt(ctx context.Context, providers []stri
 		reader := executor.(claudeOAuthRateLimitTierReader)
 		tier, errProbe := reader.ClaudeOAuthRateLimitTier(profileCtx, candidate)
 		higherTier := errProbe == nil && claudeUpgradeTierIncreased(candidate, tier)
+		profileInterrupted := profileCtx.Err() != nil
 		interval := claudeTierCheckBackoff
-		if higherTier {
+		if higherTier || profileInterrupted {
 			interval = claudeTierUpgradeRetry
 		}
 		now := time.Now()

@@ -563,6 +563,7 @@ func TestClaudePoolUpgradeRefundsUnsentClaim(t *testing.T) {
 			m, e, id := upgradeFixture(t, upgradePro)
 			store := &upgradeClaimStore{CooldownStateStore: NewFileCooldownStateStore(t.TempDir())}
 			m.SetCooldownStateStore(store)
+			markUpgradeQuota(m, id, upgradeSibling, false)
 			markUpgradeQuota(m, id, upgradeModel, true)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -611,6 +612,10 @@ func TestClaudePoolUpgradeRefundsUnsentClaim(t *testing.T) {
 			if _, err := m.Execute(t.Context(), []string{"claude"}, req, exec.Options{}); err != nil || generations != 1 {
 				t.Fatalf("retry after unsent claim: generations %d, error %v", generations, err)
 			}
+			auth, _ := m.GetByID(id)
+			if !isAuthBlockedByQuotaOrAuthForModel(auth, upgradeSibling, time.Now()) {
+				t.Fatal("claim rollback and recovery removed an independent model cooldown")
+			}
 		})
 	}
 }
@@ -640,6 +645,24 @@ func TestClaudePoolUpgradeBacksOffUnchangedProfile(t *testing.T) {
 	m.mu.Unlock()
 	if _, err := m.Execute(t.Context(), []string{"claude"}, req, exec.Options{}); statusCodeFromError(err) != 429 || e.profileCalls.Load() != 2 {
 		t.Fatalf("request after backoff: profile calls %d, error %v", e.profileCalls.Load(), err)
+	}
+}
+
+func TestClaudePoolUpgradeRetriesCanceledProfileSooner(t *testing.T) {
+	m, e, id := upgradeFixture(t, upgradePro)
+	markUpgradeQuota(m, id, upgradeModel, true)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	e.onProfile = cancel
+	e.profileErr = context.Canceled
+	if _, err := m.Execute(ctx, []string{"claude"}, exec.Request{Model: upgradeModel}, exec.Options{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("profile interrupted error = %v", err)
+	}
+	m.mu.RLock()
+	delay := time.Until(m.claudeTierChecks[id].nextAt)
+	m.mu.RUnlock()
+	if delay <= 0 || delay > time.Minute {
+		t.Fatalf("canceled profile retry delay = %v, want at most one minute", delay)
 	}
 }
 
