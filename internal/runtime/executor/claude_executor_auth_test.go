@@ -88,6 +88,7 @@ func TestClaudeExecutorPrepareRequestAuthPopulatesCredentialIdentity(t *testing.
 		profile.Account.Email = "user@example.com"
 		profile.Organization.UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 		profile.Organization.Name = "Example Org"
+		profile.Organization.RateLimitTier = "default_claude_pro"
 		return profile, nil
 	}
 	auth := &cliproxyauth.Auth{
@@ -115,8 +116,52 @@ func TestClaudeExecutorPrepareRequestAuthPopulatesCredentialIdentity(t *testing.
 	if got := prepared.Metadata["organization_uuid"]; got != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" {
 		t.Fatalf("organization_uuid = %#v, want upstream profile organization", got)
 	}
+	if got := prepared.Metadata[claudeauth.RateLimitTierMetadataKey]; got != "default_claude_pro" {
+		t.Fatalf("rate limit tier = %#v, want Pro", got)
+	}
 	if executor.ShouldPrepareRequestAuth(prepared) {
 		t.Fatal("ShouldPrepareRequestAuth() = true after identity was populated")
+	}
+}
+
+func TestClaudeExecutorOAuthRateLimitTierRequiresMatchingIdentity(t *testing.T) {
+	const (
+		account = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		org     = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		tier    = "default_claude_max_5x"
+	)
+	for _, tc := range []struct {
+		name, upstreamAccount, upstreamOrg, want string
+	}{
+		{name: "same identity", upstreamAccount: account, upstreamOrg: org, want: tier},
+		{name: "different account", upstreamAccount: "another-account", upstreamOrg: org},
+		{name: "different organization", upstreamAccount: account, upstreamOrg: "another-org"},
+		{name: "missing organization", upstreamAccount: account},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := NewClaudeExecutor(&config.Config{})
+			executor.oauthProfileFetcher = func(_ context.Context, _ *cliproxyauth.Auth, accessToken string) (*claudeauth.OAuthProfile, error) {
+				if accessToken != "sk-ant-oat-test" {
+					t.Fatal("profile request did not use the selected OAuth credential")
+				}
+				profile := &claudeauth.OAuthProfile{}
+				profile.Account.UUID = tc.upstreamAccount
+				profile.Organization.UUID = tc.upstreamOrg
+				profile.Organization.RateLimitTier = tier
+				return profile, nil
+			}
+			auth := &cliproxyauth.Auth{Metadata: map[string]any{
+				"access_token": "sk-ant-oat-test", "account_uuid": account, "organization_uuid": org,
+				claudeauth.RateLimitTierMetadataKey: "default_claude_pro",
+			}}
+			got, err := executor.ClaudeOAuthRateLimitTier(context.Background(), auth)
+			if err != nil || got != tc.want {
+				t.Fatalf("ClaudeOAuthRateLimitTier() = %q, %v; want %q", got, err, tc.want)
+			}
+			if got := auth.Metadata[claudeauth.RateLimitTierMetadataKey]; got != "default_claude_pro" {
+				t.Fatalf("profile check changed stored tier to %#v", got)
+			}
+		})
 	}
 }
 

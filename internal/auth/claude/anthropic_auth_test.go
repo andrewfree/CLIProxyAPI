@@ -91,7 +91,7 @@ func TestExchangeCodeForTokensPersistsUpstreamAccountAndDevicePool(t *testing.T)
 				case ProfileURL:
 					return jsonResponse(req, `{
 						"account":{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","email":"user@example.com"},
-						"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Example Org"}
+						"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Example Org","rate_limit_tier":"default_claude_pro"}
 					}`), nil
 				case RolesURL:
 					return jsonResponse(req, `{"roles":[]}`), nil
@@ -112,6 +112,9 @@ func TestExchangeCodeForTokensPersistsUpstreamAccountAndDevicePool(t *testing.T)
 	}
 	if bundle.TokenData.OrganizationUUID != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" || bundle.TokenData.OrganizationName != "Example Org" {
 		t.Fatalf("organization = %q/%q, want OAuth response organization", bundle.TokenData.OrganizationUUID, bundle.TokenData.OrganizationName)
+	}
+	if bundle.TokenData.RateLimitTier != "default_claude_pro" {
+		t.Fatalf("login tier = %q, want Pro", bundle.TokenData.RateLimitTier)
 	}
 	if len(bundle.DeviceIDs) != ClaudeDevicePoolSize {
 		t.Fatalf("device pool length = %d, want %d", len(bundle.DeviceIDs), ClaudeDevicePoolSize)
@@ -530,7 +533,7 @@ func TestRefreshTokensUsesNative220ControlPlaneShape(t *testing.T) {
 						StatusCode: http.StatusOK,
 						Body: io.NopCloser(strings.NewReader(`{
 							"account":{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","email":"shared@example.com"},
-							"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Shared Org"}
+							"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Shared Org","rate_limit_tier":"default_claude_max_5x"}
 						}`)),
 						Header:  make(http.Header),
 						Request: req,
@@ -552,6 +555,9 @@ func TestRefreshTokensUsesNative220ControlPlaneShape(t *testing.T) {
 	}
 	if tokenData.AccountUUID == "" || tokenData.Email == "" || tokenData.OrganizationUUID == "" {
 		t.Fatalf("profile identity was not populated: %#v", tokenData)
+	}
+	if tokenData.RateLimitTier != "default_claude_max_5x" {
+		t.Fatalf("refreshed tier = %q, want Max 5x", tokenData.RateLimitTier)
 	}
 }
 
@@ -585,7 +591,7 @@ func TestFetchOAuthProfile(t *testing.T) {
 					StatusCode: http.StatusOK,
 					Body: io.NopCloser(strings.NewReader(`{
 						"account":{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","email":"user@example.com"},
-						"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Example Org"}
+						"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Example Org","rate_limit_tier":"default_claude_max_5x"}
 					}`)),
 					Header:  make(http.Header),
 					Request: req,
@@ -603,6 +609,9 @@ func TestFetchOAuthProfile(t *testing.T) {
 	}
 	if profile.Organization.UUID != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" || profile.Organization.Name != "Example Org" {
 		t.Fatalf("organization = %#v, want upstream profile organization", profile.Organization)
+	}
+	if got := profile.Organization.RateLimitTier; got != "default_claude_max_5x" {
+		t.Fatalf("rate limit tier = %q, want Max 5x", got)
 	}
 }
 

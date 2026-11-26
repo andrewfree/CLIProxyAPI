@@ -167,8 +167,9 @@ type OAuthProfile struct {
 		Email string `json:"email"`
 	} `json:"account"`
 	Organization struct {
-		UUID string `json:"uuid"`
-		Name string `json:"name"`
+		UUID          string `json:"uuid"`
+		Name          string `json:"name"`
+		RateLimitTier string `json:"rate_limit_tier"`
 	} `json:"organization"`
 }
 
@@ -464,6 +465,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 		}
 		if value := strings.TrimSpace(profile.Organization.UUID); value != "" {
 			tokenData.OrganizationUUID = value
+			tokenData.RateLimitTier = strings.TrimSpace(profile.Organization.RateLimitTier)
 		}
 		if value := strings.TrimSpace(profile.Organization.Name); value != "" {
 			tokenData.OrganizationName = value
@@ -601,6 +603,9 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 	tokenData.AccountUUID = profile.Account.UUID
 	tokenData.OrganizationUUID = profile.Organization.UUID
 	tokenData.OrganizationName = profile.Organization.Name
+	if strings.TrimSpace(profile.Organization.UUID) != "" {
+		tokenData.RateLimitTier = strings.TrimSpace(profile.Organization.RateLimitTier)
+	}
 	return tokenData, nil
 }
 

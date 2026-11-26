@@ -420,6 +420,14 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		if len(quota.cooldownSignals) == 0 && auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) && !quota.NextRecoverAt.After(auth.Quota.NextRecoverAt) {
 			quota.cooldownSignals = auth.Quota.cooldownSignals
 		}
+		if quota.Reason == "credential_quota" && record.ClaudeTier != nil &&
+			record.ClaudeTier.Identity != "" && record.ClaudeTier.Identity == claudeTierIdentity(auth) && claudeTierRank(record.ClaudeTier.Tier) > 0 {
+			quota.claudeTier = *record.ClaudeTier
+			if auth.Quota.claudeTier.Identity == quota.claudeTier.Identity && auth.Quota.claudeTier.Tier == quota.claudeTier.Tier &&
+				claudeTierRank(auth.Quota.claudeTier.Attempted) > claudeTierRank(quota.claudeTier.Attempted) {
+				quota.claudeTier.Attempted = auth.Quota.claudeTier.Attempted
+			}
+		}
 		applyCooldownFields(&auth.Quota, quota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
 		auth.Generation++
@@ -798,6 +806,9 @@ func cooldownStateRecordEqual(a, b CooldownStateRecord) bool {
 	if !maps.Equal(a.CooldownSignals, b.CooldownSignals) || !maps.Equal(a.IndependentCooldownSignals, b.IndependentCooldownSignals) {
 		return false
 	}
+	if (a.ClaudeTier == nil) != (b.ClaudeTier == nil) || a.ClaudeTier != nil && *a.ClaudeTier != *b.ClaudeTier {
+		return false
+	}
 	return cooldownIndependentStateEqual(a.IndependentState, b.IndependentState)
 }
 
@@ -839,7 +850,13 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) && !auth.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
 		cooldownSignals = sanitizePersistedClaudeCooldownSignals(auth.Quota.cooldownSignals)
 	}
+	var claudeTier *claudeQuotaTierState
+	if hasActiveClaudeQuotaTier(auth, now) {
+		copyTier := auth.Quota.claudeTier
+		claudeTier = &copyTier
+	}
 	return CooldownStateRecord{
+		ClaudeTier:      claudeTier,
 		Provider:        strings.TrimSpace(auth.Provider),
 		AuthID:          auth.ID,
 		AuthFile:        cooldownAuthFile(auth),
@@ -1033,6 +1050,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 		retainAuthCooldown := modelKey == "" && !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
 			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
+		upgrade := claudeUpgradeAttemptFromContext(ctx)
+		confirmedUpgrade := upgrade.appliesToResult(auth, result, now)
+		if confirmedUpgrade {
+			result.quotaRecheckGeneration = &upgrade.auth.Generation
+			auth.Metadata[claudeRateLimitTierKey] = upgrade.tier
+		}
 		if applyClaudeVerifiedQuotaRecovery(auth, result, modelKey, responseHeaders, now) {
 			result.CredentialScope = true
 		}
@@ -1349,6 +1372,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									}
 									auth.Quota.Exceeded = true
 									auth.Quota.Reason = "credential_quota"
+									if !prevAuthCredActive || confirmedUpgrade {
+										auth.Quota.claudeTier = claudeQuotaTierAtFailure(auth)
+									}
 									auth.Quota.NextRecoverAt = authNext
 									auth.Quota.BackoffLevel = backoffLevel
 									auth.Quota.cooldownSignals = maps.Clone(credCooldownSignals)

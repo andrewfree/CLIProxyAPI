@@ -104,7 +104,7 @@ type Result struct {
 	// cooldown. Zero means unknown (direct MarkResult callers) and is exempt
 	// from the ordering guard.
 	ExecutionSeq uint64
-	// Only account-pinned operator verification can authorize early quota recovery.
+	// A verified account attempt can authorize early quota recovery.
 	quotaRecheckGeneration *uint64
 }
 
@@ -196,6 +196,7 @@ type Manager struct {
 	auths              map[string]*Auth
 	authEpochs         map[string]uint64
 	authChangeWatchers map[string]map[chan struct{}]struct{}
+	claudeTierChecks   map[string]claudeTierCheck
 	scheduler          *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler

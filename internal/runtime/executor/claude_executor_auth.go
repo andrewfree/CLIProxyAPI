@@ -126,8 +126,34 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 	claudeauth.StoreMetadataString(&auth.Metadata, "email", profile.Account.Email)
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_uuid", profile.Organization.UUID)
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_name", profile.Organization.Name)
+	tier := ""
+	if strings.TrimSpace(profile.Organization.UUID) != "" {
+		tier = strings.TrimSpace(profile.Organization.RateLimitTier)
+	}
+	claudeauth.StoreMetadataValue(&auth.Metadata, claudeauth.RateLimitTierMetadataKey, tier)
 	claudeauth.StoreMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey, time.Now().UTC().Format(time.RFC3339))
 	return auth, nil
+}
+
+// ClaudeOAuthRateLimitTier checks the profile of an existing Claude OAuth credential.
+func (e *ClaudeExecutor) ClaudeOAuthRateLimitTier(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+	apiKey, _ := claudeCreds(auth)
+	if !isClaudeOAuthToken(apiKey) || isClaudeSetupToken(auth, apiKey) {
+		return "", nil
+	}
+	account := strings.TrimSpace(claudeauth.ReadMetadataString(&auth.Metadata, "account_uuid"))
+	organization := strings.TrimSpace(claudeauth.ReadMetadataString(&auth.Metadata, "organization_uuid"))
+	if account == "" || organization == "" {
+		return "", nil
+	}
+	profile, errProfile := e.fetchClaudeOAuthProfile(ctx, auth, apiKey)
+	if errProfile != nil {
+		return "", errProfile
+	}
+	if profile == nil || strings.TrimSpace(profile.Account.UUID) != account || strings.TrimSpace(profile.Organization.UUID) != organization {
+		return "", nil
+	}
+	return strings.TrimSpace(profile.Organization.RateLimitTier), nil
 }
 
 func (e *ClaudeExecutor) fetchClaudeOAuthProfile(ctx context.Context, auth *cliproxyauth.Auth, apiKey string) (*claudeauth.OAuthProfile, error) {
@@ -175,6 +201,10 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", td.AccountUUID)
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_uuid", td.OrganizationUUID)
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_name", td.OrganizationName)
+	// A resolved account profile replaces the tier, including an empty tier.
+	if td.AccountUUID != "" {
+		claudeauth.StoreMetadataValue(&auth.Metadata, claudeauth.RateLimitTierMetadataKey, td.RateLimitTier)
+	}
 	claudeauth.StoreMetadataValue(&auth.Metadata, "expired", td.Expire)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "type", "claude")
 	claudeauth.StoreMetadataValue(&auth.Metadata, "last_refresh", time.Now().Format(time.RFC3339))

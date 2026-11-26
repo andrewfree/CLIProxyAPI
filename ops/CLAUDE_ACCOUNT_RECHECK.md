@@ -1,8 +1,24 @@
 # Recheck a Claude account after an upgrade
 
 A subscription upgrade can take effect at Anthropic while CLIProxy still holds
-the account's previous quota cooldown. Use `claude_account_recheck.py` to verify
-that exact account and release the stale restriction safely.
+the account's previous quota cooldown.
+
+When shared Claude routing would return a cooldown rejection, CLIProxy can
+recheck the OAuth profile of a cooled credential with a recorded tier. A
+confirmed increase for the same account and organization allows one attempt
+using the incoming request. The request must complete with allowed Anthropic
+quota signals to clear the old credential cooldown. Independent model cooldowns
+remain in force. The profile checks share a ten-second budget. If the profile
+shows no eligible increase, CLIProxy waits at least fifteen minutes before
+checking that credential again.
+
+CLIProxy learns the tier during OAuth login, token refresh, and credential
+profile setup. Cooldowns saved without a known tier remain in effect until they
+expire or an operator verifies the account. A request interrupted after it was
+sent still uses the automatic attempt. Use `claude_account_recheck.py` if the
+account needs another recheck before the cooldown expires.
+
+## Operator recheck
 
 Run this on the proxy host that owns the credential. Mac and Will maintain
 separate credentials and routing state. The command uses v8 management routes
@@ -45,7 +61,7 @@ generation captured before the probe under the same mutation lock that applies
 the result. A credential replacement, quota rejection, or other state change
 during the probe prevents early recovery. Independent restrictions for sibling
 models survive, including those hidden beneath the credential-wide restriction.
-Ordinary successful requests retain the existing cooldown behavior.
+Shared-pool recovery after a confirmed tier increase uses the same safeguards.
 
 The current guard refuses early recovery if any reported unified quota window
 is rejected, including a scoped model limit. This can retain a cooldown even

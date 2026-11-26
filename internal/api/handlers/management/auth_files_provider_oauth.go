@@ -219,7 +219,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Create token storage
 		tokenStorage := anthropicAuth.CreateTokenStorage(bundle)
-		metadata := map[string]any{"email": tokenStorage.Email}
+		metadata := map[string]any{
+			"email":                         tokenStorage.Email,
+			claude.RateLimitTierMetadataKey: bundle.TokenData.RateLimitTier,
+		}
 		if tokenStorage.AccountUUID != "" {
 			metadata["account_uuid"] = tokenStorage.AccountUUID
 		}

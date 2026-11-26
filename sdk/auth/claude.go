@@ -202,7 +202,8 @@ waitForCallback:
 
 	fileName := claude.CredentialFileName(tokenStorage.Email, tokenStorage.OrganizationUUID, tokenStorage.AccountUUID)
 	metadata := map[string]any{
-		"email": tokenStorage.Email,
+		"email":                         tokenStorage.Email,
+		claude.RateLimitTierMetadataKey: authBundle.TokenData.RateLimitTier,
 	}
 	if tokenStorage.AccountUUID != "" {
 		metadata["account_uuid"] = tokenStorage.AccountUUID

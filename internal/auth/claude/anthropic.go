@@ -1,5 +1,8 @@
 package claude
 
+// RateLimitTierMetadataKey stores the latest tier observed in the OAuth profile.
+const RateLimitTierMetadataKey = "claude_rate_limit_tier"
+
 // PKCECodes holds PKCE verification codes for OAuth2 PKCE flow
 type PKCECodes struct {
 	// CodeVerifier is the cryptographically random string used to correlate
@@ -23,6 +26,8 @@ type ClaudeTokenData struct {
 	OrganizationUUID string `json:"organization_uuid"`
 	// OrganizationName is the display name returned by OAuth.
 	OrganizationName string `json:"organization_name"`
+	// RateLimitTier is the subscription tier returned by the OAuth profile.
+	RateLimitTier string `json:"rate_limit_tier,omitempty"`
 	// Expire is the timestamp of the token expiry.
 	Expire string `json:"expired"`
 }
