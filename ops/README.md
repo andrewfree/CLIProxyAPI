@@ -549,6 +549,50 @@ Publishing a new archive copy requires hard-link support on the archive
 filesystem so competing writers can preserve both copies. Archive failures
 are reported in `ops/runtime/archive.log`.
 
+### Encrypted backup of the archive
+
+`com.rever.cliproxy-log-backup` runs `ops/backup_log_archive.py` daily at 04:30. It keeps a second, encrypted copy of the archive on Innie at `/Volumes/Innie/backups/llm-logs-encrypted/cliproxy/m5/`. Andrew chose this on November 25, 2026: a copy for recovery on Innie, encrypted, kept forever. OpenObserve on Will provides search.
+
+- **One part per finished UTC day.** The job reads `SHA256SUMS`, skips the current and previous UTC day because the archiver may still add to them, and packs each older day's files that no committed part holds yet. It tars, compresses with zstd and encrypts with age to the public recipient in the plist. Later arrivals for a day go into the next part.
+- **Checked while packing.** Each file's SHA-256 must match its manifest record, and the file must not change while it is read. Otherwise that day's part is not committed and is logged as a failure. Later days still run, and the run exits 1 at the end.
+- **Committed last, never replaced.** A part is `<day>.partNN.tar.zst.age`, then `.members`, then `.sha256`, which holds the ciphertext digest. Files are created exclusively and published with a hard link, so an existing name is never replaced, and each step is flushed to the card first. A part counts only when all three files exist. A failed attempt removes only the unfinished files it created. Committed parts are never deleted.
+- **Free space.** A part is refused unless the card has its uncompressed size plus 2 GiB free. Messages from age and zstd go to the log.
+- **Key.** The recipient is the public half of the age key the OpenObserve backup work made on November 24. Its private half has a passphrase-protected recovery copy on Will, and a copy on this Mac. The daily job never reads the private key.
+- **What stays readable.** The `.members` lists and `.sha256` markers are not encrypted, so file names and plaintext SHA-256 values are visible on Innie. That lets `--check`, restores and later runs work without the private key.
+- **Lock and logs.** The lock file `.backup.lock` lives in the backup folder, so runs from any checkout exclude each other. Runs log to `ops/runtime/log-backup.log` under the instance root. A successful backup run writes `ops/runtime/log-backup-last-success`.
+
+Check every ciphertext against its `.sha256` without a key, or decrypt and check every member with the private key. `--verify` appends a line to each part's `.verified` file. Both modes report every failing part and exit 1, and a `--day` with no committed part fails:
+
+```sh
+python3 ops/backup_log_archive.py --check --verbose
+python3 ops/backup_log_archive.py --verify --identity <age identity file> --verbose
+```
+
+**Restore a file.** Find its part, then decrypt and extract only that path:
+
+```sh
+cd /Volumes/Innie/backups/llm-logs-encrypted/cliproxy/m5
+rg -l '<log file name>' *.members
+age -d -i <age identity file> <day>.partNN.tar.zst.age | zstd -dc | tar -xf - requests/YYYY/MM/DD/<log file name>
+```
+
+A part is one stream, so damage inside a ciphertext loses the files after it in that part. Run `--check` after anything unusual happens to Innie.
+
+**Retire a damaged part.** Rename its marker, for example `mv <part>.sha256 <part>.sha256.retired`. The next backup run packs that part's files again from Storage, if they are still there.
+
+**Install.** Run from a clean worktree at the reviewed, merged commit, after Andrew's `promote fleet <id>` phrase. Ship the bundle, then install the plist verbatim: P0 requires an installed copy to match the shipped bytes.
+
+```sh
+commit=$(git rev-parse HEAD)
+python3 ops/fleetctl.py ship --host m5 --commit "$commit" --apply
+label=com.rever.cliproxy-log-backup
+install -m 0644 "$HOME/cliproxy-live/ops/$label.plist" "$HOME/Library/LaunchAgents/$label.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$label.plist"
+launchctl kickstart "gui/$(id -u)/$label"   # first run now; it takes hours on the SD card
+```
+
+After the first run, run `--verify` once. It is the only proof that the shipped recipient matches the private key. Innie is an SD card that writes about 7 MB/s.
+
 ### Repair a malformed manifest tail
 
 Use this procedure for a reported malformed unterminated final record. Keep

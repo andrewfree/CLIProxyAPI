@@ -218,7 +218,7 @@ class FleetBundleTest(unittest.TestCase):
         ops = Path(__file__).resolve().parent
         fixture_names = ["ops/fleet/bundle.txt", bundle.BUNDLE_MARKER, bundle.LAUNCHER,
                          "ops/cliproxy-codex-token", *("ops/" + name for name in bundle.JOBS.values()),
-                         "ops/" + bundle.MONITOR + ".plist"]
+                         "ops/" + bundle.MONITOR + ".plist", "ops/com.rever.cliproxy-log-backup.plist"]
         for name in fixture_names[3:]:
             self.write(name, "fixture " + name, mode=0o755)
         # P0 reads the archive destination from the shipped plist, as a real bundle ships it.
@@ -248,6 +248,13 @@ class FleetBundleTest(unittest.TestCase):
         monitor = agents / (bundle.MONITOR + ".plist")
         shutil.copyfile(self.destination / monitor.name, monitor)
         self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], [])
+        # The encrypted log backup job is optional too, but an installed copy must match.
+        backup_plist = agents / "com.rever.cliproxy-log-backup.plist"
+        shutil.copyfile(self.destination / backup_plist.name, backup_plist)
+        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], [])
+        backup_plist.write_text("stale")
+        self.assertEqual(bundle.verify_bundle(host, manifest, launchers)["issues"], ["P0/com.rever.cliproxy-log-backup"])
+        backup_plist.unlink()
         archive_label = "com.rever.cliproxy-log-archive"
         archive_plist = agents / (archive_label + ".plist")
         stale = plistlib.loads(archive_plist.read_bytes())

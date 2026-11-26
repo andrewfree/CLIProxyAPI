@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rever.cliproxy-log-backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/rever/cliproxy-live/ops/backup_log_archive.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/rever/cliproxy</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CLIPROXY_ROOT</key>
+        <string>/Users/rever/cliproxy</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>CLIPROXY_LOG_ARCHIVE_ROOT</key>
+        <string>/Volumes/Storage/backups/llm-logs/cliproxy/m5/live</string>
+        <key>CLIPROXY_LOG_BACKUP_ROOT</key>
+        <string>/Volumes/Innie/backups/llm-logs-encrypted/cliproxy/m5</string>
+        <key>CLIPROXY_LOG_BACKUP_MOUNT</key>
+        <string>/Volumes/Innie</string>
+        <key>CLIPROXY_LOG_BACKUP_RECIPIENT</key>
+        <string>age18r2ck2xh520eqv477378a8s7a2yxgcfywwssknk3ngcq0j5yy47qj0wchz</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>/dev/null</string>
+</dict>
+</plist>

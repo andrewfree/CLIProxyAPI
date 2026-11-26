@@ -568,12 +568,13 @@ different approach ([FLEET.md](FLEET.md#operations-on-november-18-2026), prechec
 | Location | What it is | Consequence |
 | --- | --- | --- |
 | `/Users/rever/cliproxy` on the Mac | Instance root for Compose, local config, logs, and private state. Since the November 18 cutover the installed jobs and new T3 sessions use the bundle, not its checkout paths. | A pull, checkout, or uncommitted edit no longer changes a job or new session. Compose inputs here are still live. |
-| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`, and the monitor LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
+| `~/cliproxy-live/ops` on the Mac | Unit 2b's separate bundle root, live since November 18. It supplies the watchdog and archiver LaunchAgents, the five T3 Claude launcher paths, the Codex fallback launcher for `codex_cliproxy` and, since November 21, `codex_kimi_mac`, the monitor LaunchAgent, and the encrypted log backup LaunchAgent. | `fleetctl ship` publishes the allowlist from a recorded commit. The jobs use `CLIPROXY_ROOT` to find the instance. |
 | `~/cliproxy` on Will | The instance and a hand-copied ops subset. Unit 2c will ship into its existing `ops/` directory. | The ship leaves private runtime state and unmanaged files where they are. |
 | `ops/runtime/` on each host | Private state, ignored by git: backups, receipts, bounded logs, the failover log. | It can contain secrets. Never commit it. Check a receipt before copying it into `ops/evidence/`. |
 | `ops/evidence/` | Sanitized, tracked records and as-run scripts of activations and measurements. | Maintained live tools and their tests live in `ops/`. |
 | `config.yaml`, `.env`, `auths/` | Per-host secrets. | Keep them on the instance that owns them. |
 | `/Volumes/Storage/backups/llm-logs/cliproxy/m5/live/` | The Mac's log archive since November 25 (Innie from November 18). | See below. |
+| `/Volumes/Innie/backups/llm-logs-encrypted/cliproxy/m5/` | Encrypted daily parts of that archive, written by `backup_log_archive.py`, never deleted. | [README.md](README.md#encrypted-backup-of-the-archive) |
 
 The checkout used to provide both the ops code and its working data. A checkout
 edit could reach launchd within 120 or 300 seconds, or T3 on the next session.
