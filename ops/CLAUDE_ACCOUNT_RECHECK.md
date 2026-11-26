@@ -8,12 +8,15 @@ recheck the OAuth profile of a cooled credential with a recorded tier. A
 confirmed increase for the same account and organization allows one attempt
 using the incoming request. The request must complete with allowed Anthropic
 quota signals to clear the old credential cooldown. Independent model cooldowns
-remain in force.
+remain in force. The profile checks share a ten-second budget. If the profile
+shows no eligible increase, CLIProxy waits at least fifteen minutes before
+checking that credential again.
 
 CLIProxy learns the tier during OAuth login, token refresh, and credential
 profile setup. Cooldowns saved without a known tier remain in effect until they
-expire or an operator verifies the account. Use `claude_account_recheck.py` for
-an explicit recheck.
+expire or an operator verifies the account. A request interrupted after it was
+sent still uses the automatic attempt. Use `claude_account_recheck.py` if the
+account needs another recheck before the cooldown expires.
 
 ## Operator recheck
 

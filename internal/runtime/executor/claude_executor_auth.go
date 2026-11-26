@@ -201,7 +201,7 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", td.AccountUUID)
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_uuid", td.OrganizationUUID)
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_name", td.OrganizationName)
-	// A profile that did not resolve an organization cannot seed a tier for it.
+	// A resolved account profile replaces the tier, including an empty tier.
 	if td.AccountUUID != "" {
 		claudeauth.StoreMetadataValue(&auth.Metadata, claudeauth.RateLimitTierMetadataKey, td.RateLimitTier)
 	}

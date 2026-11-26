@@ -14,7 +14,9 @@ import (
 
 const (
 	claudeRateLimitTierKey     = "claude_rate_limit_tier"
-	claudeTierCheckInterval    = time.Minute
+	claudeTierCheckBudget      = 10 * time.Second
+	claudeTierCheckBackoff     = 15 * time.Minute
+	claudeTierUpgradeRetry     = time.Minute
 	claudeTierChecksPerRequest = 3
 	claudeMaxTier              = "default_claude_max_20x"
 )
@@ -133,21 +135,29 @@ func (m *Manager) findClaudeUpgradeAttempt(ctx context.Context, providers []stri
 		model == "" || strings.Contains(model, "/") || strings.Contains(requestedModelAliasFromOptions(opts, model), "/") {
 		return nil
 	}
-	for checks := 0; checks < claudeTierChecksPerRequest && ctx.Err() == nil; checks++ {
-		candidate, executor, check := m.reserveClaudeTierCheck(ctx, model, opts)
+	profileCtx, cancelProfile := context.WithTimeout(ctx, claudeTierCheckBudget)
+	defer cancelProfile()
+	for checks := 0; checks < claudeTierChecksPerRequest && profileCtx.Err() == nil; checks++ {
+		candidate, executor, check := m.reserveClaudeTierCheck(profileCtx, model, opts)
 		if candidate == nil {
 			return nil
 		}
 		reader := executor.(claudeOAuthRateLimitTierReader)
-		tier, errProbe := reader.ClaudeOAuthRateLimitTier(ctx, candidate)
+		tier, errProbe := reader.ClaudeOAuthRateLimitTier(profileCtx, candidate)
+		higherTier := errProbe == nil && claudeUpgradeTierIncreased(candidate, tier)
+		interval := claudeTierCheckBackoff
+		if higherTier {
+			interval = claudeTierUpgradeRetry
+		}
+		now := time.Now()
 		m.mu.Lock()
 		if m.claudeTierChecks[candidate.ID] == check {
 			check.inFlight = false
-			check.nextAt = time.Now().Add(claudeTierCheckInterval)
+			check.nextAt = now.Add(interval)
 			m.claudeTierChecks[candidate.ID] = check
 		}
-		ready := errProbe == nil && ctx.Err() == nil && claudeUpgradeTierIncreased(candidate, tier) &&
-			claudeUpgradeSameCredential(m.auths[candidate.ID], candidate, time.Now())
+		ready := higherTier && profileCtx.Err() == nil &&
+			claudeUpgradeSameCredential(m.auths[candidate.ID], candidate, now)
 		m.mu.Unlock()
 		if ready {
 			return &claudeUpgradeAttempt{auth: candidate, executor: executor, tier: tier, cooldown: cooldown}
@@ -235,17 +245,30 @@ func (m *Manager) claimClaudeUpgradeAttempt(ctx context.Context, attempt *claude
 		m.mu.Unlock()
 		return false
 	}
-	current.Quota.claudeTier.Attempted = attempt.tier
+	previous := current.Quota.claudeTier
+	claimed := previous
+	claimed.Attempted = attempt.tier
+	current.Quota.claudeTier = claimed
 	store := m.cooldownStore
 	m.mu.Unlock()
-	if !m.persistCooldownStatesToLocked(ctx, store) || ctx.Err() != nil || m.hasPluginScheduler() {
-		return false
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	canDispatch := m.persistCooldownStatesToLocked(ctx, store) && ctx.Err() == nil && !m.hasPluginScheduler()
+	m.mu.Lock()
 	current = m.auths[auth.ID]
-	return !m.HomeEnabled() && claudeUpgradeSelectorAllowed(m.selector) &&
-		claudeUpgradeSameCredential(current, attempt.auth, time.Now()) && current.Quota.claudeTier.Attempted == attempt.tier
+	stillClaimed := current != nil && current.RegistrationEpoch == auth.RegistrationEpoch && current.Quota.claudeTier == claimed
+	if canDispatch && stillClaimed && ctx.Err() == nil && !m.HomeEnabled() && claudeUpgradeSelectorAllowed(m.selector) &&
+		claudeUpgradeSameCredential(current, attempt.auth, time.Now()) {
+		m.mu.Unlock()
+		return true
+	}
+	if stillClaimed {
+		current.Quota.claudeTier = previous
+	}
+	m.mu.Unlock()
+	if stillClaimed {
+		// No request was sent. Undo the saved claim even if the client disconnected.
+		m.persistCooldownStatesToLocked(context.WithoutCancel(ctx), store)
+	}
+	return false
 }
 
 func (attempt *claudeUpgradeAttempt) appliesToResult(auth *Auth, result Result, now time.Time) bool {

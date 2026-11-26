@@ -540,3 +540,134 @@ func TestClaudePoolUpgradeWithQuotaAwareAffinity(t *testing.T) {
 		t.Fatal("recovery changed unchanged account")
 	}
 }
+
+type upgradeClaimStore struct {
+	CooldownStateStore
+	afterSave func() error
+}
+
+func (s *upgradeClaimStore) Save(ctx context.Context, records []CooldownStateRecord) error {
+	if err := s.CooldownStateStore.Save(ctx, records); err != nil {
+		return err
+	}
+	if afterSave := s.afterSave; afterSave != nil {
+		s.afterSave = nil
+		return afterSave()
+	}
+	return nil
+}
+
+func TestClaudePoolUpgradeRefundsUnsentClaim(t *testing.T) {
+	for _, name := range []string{"save error", "cancel after save"} {
+		t.Run(name, func(t *testing.T) {
+			m, e, id := upgradeFixture(t, upgradePro)
+			store := &upgradeClaimStore{CooldownStateStore: NewFileCooldownStateStore(t.TempDir())}
+			m.SetCooldownStateStore(store)
+			markUpgradeQuota(m, id, upgradeModel, true)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			store.afterSave = func() error {
+				if name == "cancel after save" {
+					cancel()
+					return nil
+				}
+				return errors.New("claim save failed after writing")
+			}
+			generations := 0
+			e.executeFn = func(ctx context.Context, _ *Auth, _ exec.Request, _ exec.Options) (exec.Response, error) {
+				generations++
+				logging.SetResponseHeaders(ctx, allowedUpgradeHeaders())
+				return exec.Response{Payload: []byte(upgradeReply)}, nil
+			}
+			req := exec.Request{Model: upgradeModel}
+			_, err := m.Execute(ctx, []string{"claude"}, req, exec.Options{})
+			if generations != 0 || e.profileCalls.Load() != 1 {
+				t.Fatalf("profile calls = %d, generations = %d", e.profileCalls.Load(), generations)
+			}
+			if name == "cancel after save" && !errors.Is(err, context.Canceled) || name == "save error" && statusCodeFromError(err) != 429 {
+				t.Fatalf("unsent claim error = %v", err)
+			}
+			restored, errLoad := store.Load(t.Context())
+			if errLoad != nil {
+				t.Fatal(errLoad)
+			}
+			foundTier := false
+			for _, record := range restored {
+				if record.ClaudeTier != nil {
+					foundTier = true
+					if record.ClaudeTier.Tier != upgradePro || record.ClaudeTier.Attempted != "" {
+						t.Fatal("disk did not retain the original cooldown without the claim")
+					}
+				}
+			}
+			if !foundTier {
+				t.Fatal("rollback removed the original tier from disk")
+			}
+			m.mu.Lock()
+			check := m.claudeTierChecks[id]
+			check.nextAt = time.Time{}
+			m.claudeTierChecks[id] = check
+			m.mu.Unlock()
+			if _, err := m.Execute(t.Context(), []string{"claude"}, req, exec.Options{}); err != nil || generations != 1 {
+				t.Fatalf("retry after unsent claim: generations %d, error %v", generations, err)
+			}
+		})
+	}
+}
+
+func TestClaudePoolUpgradeBacksOffUnchangedProfile(t *testing.T) {
+	m, e, id := upgradeFixture(t, upgradePro)
+	e.tier = upgradePro
+	markUpgradeQuota(m, id, upgradeModel, true)
+	req := exec.Request{Model: upgradeModel}
+	started := time.Now()
+	if _, err := m.Execute(t.Context(), []string{"claude"}, req, exec.Options{}); statusCodeFromError(err) != 429 {
+		t.Fatalf("unchanged tier error = %v, want 429", err)
+	}
+	m.mu.RLock()
+	nextAt := m.claudeTierChecks[id].nextAt
+	m.mu.RUnlock()
+	if delay := nextAt.Sub(started); delay < 15*time.Minute {
+		t.Fatalf("unchanged tier can be probed again after %v", delay)
+	}
+	if _, err := m.Execute(t.Context(), []string{"claude"}, req, exec.Options{}); statusCodeFromError(err) != 429 || e.profileCalls.Load() != 1 {
+		t.Fatalf("request inside backoff: profile calls %d, error %v", e.profileCalls.Load(), err)
+	}
+	m.mu.Lock()
+	check := m.claudeTierChecks[id]
+	check.nextAt = time.Time{}
+	m.claudeTierChecks[id] = check
+	m.mu.Unlock()
+	if _, err := m.Execute(t.Context(), []string{"claude"}, req, exec.Options{}); statusCodeFromError(err) != 429 || e.profileCalls.Load() != 2 {
+		t.Fatalf("request after backoff: profile calls %d, error %v", e.profileCalls.Load(), err)
+	}
+}
+
+func TestClaudePoolUpgradeKeepsDispatchedClaimAcrossRestart(t *testing.T) {
+	store := NewFileCooldownStateStore(t.TempDir())
+	m, e, id := upgradeFixture(t, upgradePro)
+	m.SetCooldownStateStore(store)
+	markUpgradeQuota(m, id, upgradeModel, true)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	e.executeFn = func(ctx context.Context, _ *Auth, _ exec.Request, _ exec.Options) (exec.Response, error) {
+		cancel()
+		return exec.Response{}, ctx.Err()
+	}
+	req := exec.Request{Model: upgradeModel}
+	if _, err := m.Execute(ctx, []string{"claude"}, req, exec.Options{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted attempt error = %v", err)
+	}
+	restarted, after, _ := upgradeFixture(t, upgradePro)
+	restarted.SetCooldownStateStore(store)
+	if errRestore := restarted.RestoreCooldownStates(t.Context()); errRestore != nil {
+		t.Fatal(errRestore)
+	}
+	after.executeFn = func(context.Context, *Auth, exec.Request, exec.Options) (exec.Response, error) {
+		t.Fatal("restarted manager replayed an already dispatched attempt")
+		return exec.Response{}, nil
+	}
+	if _, err := restarted.Execute(t.Context(), []string{"claude"}, req, exec.Options{}); statusCodeFromError(err) != 429 {
+		t.Fatalf("after restart error = %v, want 429", err)
+	}
+}
