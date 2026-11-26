@@ -89,6 +89,7 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.BackoffLevel = cooldown.BackoffLevel
 	dst.cooldownSignals = maps.Clone(cooldown.cooldownSignals)
 	dst.cooldownEvaluated = cooldown.Exceeded || cooldown.cooldownEvaluated
+	dst.claudeTier = cooldown.claudeTier
 }
 
 func rejectedClaudeSignalsForCooldown(provider string, headers http.Header) map[string]string {

@@ -362,6 +362,7 @@ type QuotaState struct {
 	// cooldown was recorded so out-of-order completions cannot overwrite them.
 	cooldownSignals   map[string]string
 	cooldownEvaluated bool
+	claudeTier        claudeQuotaTierState
 }
 
 // Clone returns an independent copy of the quota state.

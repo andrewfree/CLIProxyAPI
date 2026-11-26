@@ -437,6 +437,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+		if upgrade := claudeUpgradeAttemptFromContext(ctx); upgrade != nil && !m.claimClaudeUpgradeAttempt(ctx, upgrade, auth, routeModel, resultModel, execOpts) {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return nil, errCtx
+			}
+			return nil, upgrade.cooldown
+		}
 		executionSeq := m.nextExecutionSeq()
 		startStream := time.Now()
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)

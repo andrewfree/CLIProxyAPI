@@ -37,6 +37,8 @@ type CooldownStateRecord struct {
 	// CooldownSignals persists bounded rejected quota headers captured when
 	// this cooldown was recorded without touching passive Quota.Signals watermarks.
 	CooldownSignals map[string]string `json:"cooldown_signals,omitempty"`
+	// ClaudeTier preserves the tier behind a Claude account-wide cooldown.
+	ClaudeTier *claudeQuotaTierState `json:"claude_tier,omitempty"`
 	// IndependentCooldownSignals persists CooldownSignals for IndependentState.
 	IndependentCooldownSignals map[string]string `json:"independent_cooldown_signals,omitempty"`
 }

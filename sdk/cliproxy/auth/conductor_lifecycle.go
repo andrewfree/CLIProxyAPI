@@ -677,6 +677,7 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
+	delete(m.claudeTierChecks, id)
 	m.notifyAuthChangeLocked(id)
 	if m.modelPoolOffsets != nil {
 		delete(m.modelPoolOffsets, id)
@@ -798,6 +799,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	var removedTombstones []removalTombstone
 	for prevID := range previousAuths {
 		if _, exists := m.auths[prevID]; !exists {
+			delete(m.claudeTierChecks, prevID)
 			m.authEpochs[prevID]++
 			removedTombstones = append(removedTombstones, removalTombstone{
 				id:    prevID,

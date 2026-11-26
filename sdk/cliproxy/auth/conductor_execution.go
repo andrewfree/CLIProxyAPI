@@ -266,6 +266,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 				return resp, nil
 			}
 		}
+		if upgrade := m.findClaudeUpgradeAttempt(ctx, normalized, retryModel, opts, lastErr); upgrade != nil {
+			upgradeCtx := context.WithValue(ctx, claudeUpgradeAttemptKey{}, upgrade)
+			resp, errUpgrade := m.executeMixedOnce(upgradeCtx, normalized, req, opts, 1, 0, defaultRequestRetry)
+			return resp, unwrapExecutionBoundaryError(errUpgrade)
+		}
+		if errCtx := ctx.Err(); errCtx != nil {
+			return cliproxyexecutor.Response{}, errCtx
+		}
 		return cliproxyexecutor.Response{}, lastErr
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -424,6 +432,17 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			} else if ok {
 				return result, nil
 			}
+		}
+		if upgrade := m.findClaudeUpgradeAttempt(ctx, normalized, retryModel, opts, lastErr); upgrade != nil {
+			upgradeCtx := context.WithValue(ctx, claudeUpgradeAttemptKey{}, upgrade)
+			result, errUpgrade := m.executeStreamMixedOnce(upgradeCtx, normalized, req, opts, 1, &homeRetryLimit, 0, defaultRequestRetry)
+			if errUpgrade == nil {
+				return result, nil
+			}
+			lastErr = unwrapExecutionBoundaryError(errUpgrade)
+		}
+		if errCtx := ctx.Err(); errCtx != nil {
+			return nil, errCtx
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -685,6 +704,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	upgrade := claudeUpgradeAttemptFromContext(ctx)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -710,7 +730,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 			pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		var auth *Auth
+		var executor ProviderExecutor
+		var provider string
+		var errPick error
+		if upgrade != nil {
+			auth, executor, provider = upgrade.auth, upgrade.executor, "claude"
+		} else {
+			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		}
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, roundPickFailureError(lastErr, upstream.err(), errPick)
@@ -732,9 +760,19 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
 
-		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
+		selectionAuth := auth
+		if upgrade != nil {
+			selectionAuth = claudeUpgradeModelView(auth, time.Now())
+		}
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, selectionAuth, routeModel, pickOpts.Headers)
 		if len(models) == 0 {
+			if upgrade != nil {
+				return cliproxyexecutor.Response{}, upgrade.cooldown
+			}
 			continue
+		}
+		if upgrade != nil {
+			models = models[:1]
 		}
 		attempted[auth.ID] = struct{}{}
 		var errPrepare error
@@ -742,6 +780,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if errPrepare != nil {
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
+			}
+			if upgrade != nil {
+				return cliproxyexecutor.Response{}, upgrade.cooldown
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
@@ -791,6 +832,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			if upgrade != nil && !m.claimClaudeUpgradeAttempt(execCtx, upgrade, auth, routeModel, resultModel, execOpts) {
+				if errCtx := execCtx.Err(); errCtx != nil {
+					return cliproxyexecutor.Response{}, errCtx
+				}
+				return cliproxyexecutor.Response{}, upgrade.cooldown
+			}
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
@@ -804,7 +851,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
+				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized || upgrade != nil, execOpts.Headers); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
 					execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -848,6 +895,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
 					upstream.sync(errExec)
+				}
+				if upgrade != nil {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1136,6 +1186,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	upgrade := claudeUpgradeAttemptFromContext(ctx)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1177,7 +1228,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		var executor ProviderExecutor
 		var provider string
 		var errPick error
-		if homeMode {
+		if upgrade != nil {
+			auth, executor, provider = upgrade.auth, upgrade.executor, "claude"
+		} else if homeMode {
 			selection, errPick = m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
 			if selection != nil {
 				auth = selection.CloneAuthForRoute(routeModel)
@@ -1294,12 +1347,19 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
 		// Home owns dispatched credential availability; only local selections need state filtering.
 		if selection == nil {
-			models = m.filterExecutionModelsForRequest(execCtx, auth, routeModel, models, pooled, pickOpts.Headers)
+			selectionAuth := auth
+			if upgrade != nil {
+				selectionAuth = claudeUpgradeModelView(auth, time.Now())
+			}
+			models = m.filterExecutionModelsForRequest(execCtx, selectionAuth, routeModel, models, pooled, pickOpts.Headers)
 		}
 		if selection != nil && aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
 		if len(models) == 0 {
+			if upgrade != nil {
+				return nil, upgrade.cooldown
+			}
 			if selection != nil {
 				homeExcludedAuthIDs[auth.ID] = struct{}{}
 				lastHomeAuthID = auth.ID
@@ -1334,6 +1394,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 					return nil, errCancel
 				}
+			}
+			if upgrade != nil {
+				return nil, upgrade.cooldown
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
@@ -1406,7 +1469,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
+		if upgrade != nil {
+			models = models[:1]
+		}
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, upgrade == nil && (!homeMode || selection != nil), selection != nil)
+		if upgrade != nil {
+			return streamResult, errStream
+		}
 		if errStream != nil {
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstream.observe(errStream)
