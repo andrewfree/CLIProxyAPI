@@ -106,6 +106,10 @@ def record_policy_disabled(root, marker, disabled):
         write_json(marker_path(root), marker)
 
 
+def stdin_interactive():
+    return sys.stdin.isatty()
+
+
 @contextmanager
 def transition_lock(root, *, blocking=True, timeout=None):
     path = marker_path(root).with_name("mac-transition.lock")
@@ -608,6 +612,10 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
         print("Quitting Docker Desktop stops all running containers:")
         for name in containers or ["(none)"]:
             print(f"  {name}")
+    if expired_ids and not stdin_interactive():
+        # An expired lease needs a person's answer; never wait on a pipe that nobody reads.
+        raise MacError("Pause refused: an expired Docker lease needs a person to confirm. Release it with "
+                       "`mac lease release ID --thread THREAD`, or rerun mac pause in a terminal")
     if expired_ids or (not args.yes and not already_paused):
         prompt = ("Pause Mac fallback while Docker is down?" if containers is None else "Quit Docker Desktop?")
         try:

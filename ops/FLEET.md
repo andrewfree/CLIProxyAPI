@@ -171,11 +171,15 @@ the instance root for Compose, the host's logs, and private runtime state.
    )
    ```
 
-**Docker leases before a Mac rollback.** Announce the rollback in the coordination
-notes at `/Users/rever/omxlapi/out/coordination/THREADS.md`. Immediately before the
-rollback, confirm `mac lease list` shows no live leases, including leases with an
-unknown owner. Never roll back to a bundle whose watchdog predates leases while
-any lease is live.
+**Docker leases before a Mac rollback.** A bundle whose watchdog predates leases
+does not honor them, and a lease check is only a snapshot. Before such a rollback,
+announce a maintenance window in the coordination notes at
+`/Users/rever/omxlapi/out/coordination/THREADS.md` that forbids new Docker leases
+until a lease-aware bundle is installed again. Immediately before the rollback,
+confirm `mac lease list` shows no leases at all, including expired leases and
+leases with an unknown owner. Keep the window open until the lease-aware bundle is
+back and `mac lease list` still works; a lease acquired inside the window is not
+protected.
 
 For a later Compose activation, run these from the instance root immediately
 before and after the approved operation. Confirm an in-flight watchdog repair

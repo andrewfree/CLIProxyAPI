@@ -1546,7 +1546,8 @@ class MacCommandsTest(unittest.TestCase):
             first, second = self.acquire_lease(), self.acquire_lease(project="CodeOne")
             clock.now.return_value = now
             self.run.side_effect = self.docker_pause_runner
-            with patch("builtins.input", side_effect=["no", "yes"]) as confirm:
+            with patch("builtins.input", side_effect=["no", "yes"]) as confirm, \
+                    patch.object(fleet_mac, "stdin_interactive", return_value=True):
                 code, output = self.invoke("pause", "--yes")
                 self.assertEqual(code, 1, output)
                 self.assertIsNone(fleet_mac.read_marker(self.root))
@@ -1557,6 +1558,23 @@ class MacCommandsTest(unittest.TestCase):
             self.assertEqual(confirm.call_count, 2)
         self.assertEqual(code, 0, output)
         self.assertTrue(self.desktop_stopped)
+
+    def test_pause_with_an_expired_lease_refuses_without_a_terminal(self):
+        now = datetime(2026, 11, 22, 5, 4, tzinfo=timezone.utc)
+        with patch.object(fleet_mac, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = now - timedelta(hours=4)
+            lease = self.acquire_lease()
+            clock.now.return_value = now
+            self.run.side_effect = self.docker_pause_runner
+            with patch("builtins.input") as confirm, \
+                    patch.object(fleet_mac, "stdin_interactive", return_value=False):
+                code, output = self.invoke("pause", "--yes")
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"Lease {lease['id']} expired at", output)
+        self.assertIn("needs a person to confirm", output)
+        confirm.assert_not_called()
+        self.assertIsNone(fleet_mac.read_marker(self.root))
+        self.assertFalse(getattr(self, "desktop_stopped", False))
 
     def test_pause_refuses_to_stop_if_an_unacknowledged_expired_lease_appears(self):
         now = datetime(2026, 11, 22, 5, 4, tzinfo=timezone.utc)
