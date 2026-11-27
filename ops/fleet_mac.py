@@ -85,10 +85,11 @@ def write_json(path, value, *, create=False):
             staged.unlink(missing_ok=True)
 
 
-def write_marker(root, reason, containers, *, restart_policy=None, broken_leases=()):
+def write_marker(root, reason, containers, *, restart_policy=None, restart_policy_disabled=False, broken_leases=()):
     path = marker_path(root)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    marker = {"paused_at": datetime.now(timezone.utc).isoformat(), "containers": containers}
+    marker = {"paused_at": datetime.now(timezone.utc).isoformat(), "containers": containers,
+              "restart_policy_disabled": restart_policy_disabled}
     if reason is not None:
         marker["reason"] = reason
     if restart_policy is not None:
@@ -96,6 +97,13 @@ def write_marker(root, reason, containers, *, restart_policy=None, broken_leases
     if broken_leases:
         marker["broken_leases"] = list(broken_leases)
     write_json(path, marker)
+    return marker
+
+
+def record_policy_disabled(root, marker, disabled):
+    if marker.get("restart_policy_disabled") is not disabled:
+        marker["restart_policy_disabled"] = disabled
+        write_json(marker_path(root), marker)
 
 
 @contextmanager
@@ -140,10 +148,15 @@ def lease_time(value):
 def read_leases(root, *, now=None):
     """Return live and expired leases, including unknown live entries for read failures."""
     now = datetime.now(timezone.utc) if now is None else now
+    directory = lease_dir(root)
     try:
-        paths = sorted(lease_dir(root).iterdir())
-    except FileNotFoundError:
-        return []
+        try:
+            mode = directory.lstat().st_mode
+        except FileNotFoundError:
+            return []
+        if not stat.S_ISDIR(mode):
+            raise NotADirectoryError(directory)
+        paths = sorted(directory.iterdir())
     except OSError:
         return [{"id": None, "live": True, "unknown": True}]
     leases = []
@@ -180,6 +193,8 @@ def expiry_after(now, hours):
 
 def acquire_lease(root, bundle_root, *, thread, project, purpose, why_mac, hours=3, approved=None):
     fields = {"thread": thread, "project": project, "purpose": purpose, "why_mac": why_mac}
+    if approved is not None:
+        fields["approved"] = approved
     for field, value in fields.items():
         if not lease_text(value):
             raise MacError(f"--{field.replace('_', '-')} requires 1 to 200 printable characters")
@@ -192,20 +207,19 @@ def acquire_lease(root, bundle_root, *, thread, project, purpose, why_mac, hours
             raise MacError("Ship the bundle first so the Mac watchdog honors Docker leases")
         directory = lease_dir(root)
         directory.mkdir(mode=0o700, exist_ok=True)
-        record = {"version": 1, **fields, "created_at": now.isoformat(), "expires_at": expires.isoformat()}
-        if approved is not None:
-            record["approved"] = approved
-        while True:
-            lease_id = secrets.token_hex(8)
-            filename = f"{lease_id}.json"
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise MacError("Docker lease directory is unreadable")
+        lease_id = secrets.token_hex(8)
+        filename = f"{lease_id}.json"
+        record = {"version": 1, "id": lease_id, **fields,
+                  "created_at": now.isoformat(), "expires_at": expires.isoformat()}
+        try:
             if (directory / "broken" / filename).exists():
-                continue
-            record["id"] = lease_id
-            try:
-                write_json(directory / filename, record, create=True)
-            except FileExistsError:
-                continue
-            return record
+                raise FileExistsError(filename)
+            write_json(directory / filename, record, create=True)
+        except FileExistsError:
+            raise MacError(f"Docker lease ID {lease_id} already exists; run mac lease acquire again") from None
+        return record
 
 
 def valid_lease_id(lease_id):
@@ -215,7 +229,9 @@ def valid_lease_id(lease_id):
 
 def renew_lease(root, lease_id, hours):
     valid_lease_id(lease_id)
-    with transition_lock(root):
+    with transition_lock(root, timeout=LEASE_LOCK_WAIT) as acquired:
+        if not acquired:
+            raise MacError("Mac transition in progress; retry shortly")
         now = datetime.now(timezone.utc)
         expires = expiry_after(now, hours)
         for lease in read_leases(root, now=now):
@@ -228,37 +244,43 @@ def renew_lease(root, lease_id, hours):
     raise MacError(f"Lease {lease_id} is missing, expired, or unreadable")
 
 
-def release_lease(root, lease_id):
+def release_lease(root, lease_id, thread):
     valid_lease_id(lease_id)
-    with transition_lock(root):
-        if any(lease["id"] == lease_id and lease["unknown"] for lease in read_leases(root)):
-            raise MacError(f"Lease {lease_id} is unreadable; use mac pause --break-lease with a reason")
-        try:
+    with transition_lock(root, timeout=LEASE_LOCK_WAIT) as acquired:
+        if not acquired:
+            raise MacError("Mac transition in progress; retry shortly")
+        for lease in read_leases(root):
+            if lease["id"] is None:
+                raise MacError("Docker lease directory is unreadable")
+            if lease["id"] != lease_id:
+                continue
+            if lease["unknown"]:
+                raise MacError(f"Lease {lease_id} is unreadable; use mac pause --break-lease with a reason")
+            if lease["thread"] != thread:
+                raise MacError(f"Only the owning thread can release lease {lease_id}")
             (lease_dir(root) / f"{lease_id}.json").unlink()
-        except FileNotFoundError:
-            raise MacError(f"Lease {lease_id} does not exist") from None
-        return not live_leases(root) and read_marker(root) is not None and engine_up()
+            return not live_leases(root) and read_marker(root) is not None and engine_up()
+    raise MacError(f"Lease {lease_id} does not exist")
 
 
-def break_leases(root, leases, reason, containers):
+def break_leases(root, leases, reason, marker):
     """Archive the named live leases while the caller holds the transition lock."""
-    if not leases:
-        return []
     directory = lease_dir(root)
     archive = directory / "broken"
     archive.mkdir(mode=0o700, exist_ok=True)
     broken_at = datetime.now(timezone.utc).isoformat()
-    records = []
     for lease in leases:
         filename = f"{lease['id']}.json"
         record = {key: value for key, value in lease.items() if key not in ("live", "unknown")}
-        record.update(broken_at=broken_at, broken_by_reason=reason, containers=containers)
+        record.update(broken_at=broken_at, broken_by_reason=reason, containers=marker["containers"])
         if lease["unknown"]:
             record["owner"] = "unknown"
         write_json(archive / filename, record)
+        # Publish both receipts before removing the live lease. A retry can replace its receipt.
+        previous = marker.get("broken_leases", [])
+        marker["broken_leases"] = [item for item in previous if item["id"] != lease["id"]] + [record]
+        write_json(marker_path(root), marker)
         (directory / filename).unlink()
-        records.append(record)
-    return records
 
 
 def pacific(timestamp, *, date=False):
@@ -278,7 +300,7 @@ def lease_description(lease, *, date=False):
 
 def print_expired_lease(lease, *, details=False):
     expiry = pacific(lease["expires_at"], date=True)
-    print(f"Lease {lease['id']} expired at {expiry}; ask thread {lease['thread']} to renew or release it.")
+    print(f"Lease {lease['id']} expired at {expiry}; ask thread {lease['thread']} to release it or acquire a new lease.")
     if details:
         print(f"  {lease['project']}: {lease['purpose']}")
 
@@ -393,11 +415,16 @@ def desktop(action, *flags):
         raise MacError(f"Docker Desktop {action} failed (exit {result.returncode})")
 
 
+def proxy_container_missing(result):
+    missing = (f"No such container: {PROXY_CONTAINER}", f"No such object: {PROXY_CONTAINER}")
+    return any(line.strip().endswith(missing) for line in result.stderr.splitlines())
+
+
 def docker_restart_policy():
     result = run([*DESKTOP, "inspect", "--type", "container", "--format",
                   "{{json .HostConfig.RestartPolicy}}", PROXY_CONTAINER], 10)
     if result.returncode:
-        if re.search(r"No such (?:container|object): cli-proxy-api$", result.stderr.strip()):
+        if proxy_container_missing(result):
             return None
         raise MacError(f"Could not inspect the restart policy for {PROXY_CONTAINER}")
     try:
@@ -411,15 +438,23 @@ def docker_restart_policy():
         raise MacError(f"Could not read the restart policy for {PROXY_CONTAINER}") from None
 
 
+def docker_proxy_command(action, *flags):
+    error = f"Could not {action} {PROXY_CONTAINER}; the pause marker remains in place"
+    try:
+        result = run([*DESKTOP, action, *flags, PROXY_CONTAINER], DOCKER_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        raise MacError(error) from None
+    if result.returncode:
+        if proxy_container_missing(result):
+            return False
+        raise MacError(error)
+    return True
+
+
 def update_restart_policy(policy):
     if not isinstance(policy, str) or not RESTART_POLICY.fullmatch(policy):
         raise MacError("The pause marker contains an invalid restart policy")
-    try:
-        result = run([*DESKTOP, "update", f"--restart={policy}", PROXY_CONTAINER], DOCKER_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired):
-        raise MacError(f"Could not set {PROXY_CONTAINER} restart policy; the pause marker remains in place") from None
-    if result.returncode:
-        raise MacError(f"Could not set {PROXY_CONTAINER} restart policy; the pause marker remains in place")
+    return docker_proxy_command("update", f"--restart={policy}")
 
 
 def will_client_origin(override, settings_path):
@@ -486,14 +521,15 @@ def monitor_will_ok(root):
     return healthy
 
 
-def check_pause_leases(root, ids):
+def check_pause_leases(leases, ids):
     for lease_id in ids:
         valid_lease_id(lease_id)
-    leases = live_leases(root)
+    leases = [lease for lease in leases if lease["live"]]
     blocking = [lease for lease in leases if lease["id"] not in ids]
     if blocking:
         for lease in blocking:
-            action = " Ask that thread to release it." if not lease["unknown"] else ""
+            action = (" Only the owning thread releases it; to override, use --break-lease ID --break-reason."
+                      if not lease["unknown"] else "")
             print(f"Pause refused: {lease_description(lease)}.{action}")
         raise MacError("Pause refused because Docker has live leases")
     if set(ids) - {lease["id"] for lease in leases}:
@@ -504,7 +540,6 @@ def check_pause_leases(root, ids):
 
 
 def check_pause(root, port, health, args, settings_path):
-    leases = check_pause_leases(root, args.break_lease)
     try:
         ssh_ok = health("will") == "ok"
     except (OSError, subprocess.TimeoutExpired):
@@ -530,7 +565,6 @@ def check_pause(root, port, health, args, settings_path):
         print("Mac-only sessions: none.")
     if not args.force and not (ssh_ok and client_ok and monitor_ok and sessions == []):
         raise MacError("Pause refused. Use --force to bypass failed Will or session checks")
-    return leases
 
 
 def bundle_supports_pause(bundle_root):
@@ -554,6 +588,13 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
     if (args.break_lease or args.break_reason is not None) and not (
             args.break_lease and args.break_reason and args.break_reason.strip()):
         raise MacError("--break-lease and a nonempty --break-reason must be used together")
+    leases = read_leases(root)
+    expired_ids = set()
+    for lease in leases:
+        if not lease["live"]:
+            print_expired_lease(lease, details=True)
+            expired_ids.add(lease["id"])
+    check_pause_leases(leases, args.break_lease)
     check_pause(root, port, health, args, settings_path)
     containers = None
     state = engine_state()
@@ -567,7 +608,7 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
         print("Quitting Docker Desktop stops all running containers:")
         for name in containers or ["(none)"]:
             print(f"  {name}")
-    if not args.yes and not already_paused:
+    if expired_ids or (not args.yes and not already_paused):
         prompt = ("Pause Mac fallback while Docker is down?" if containers is None else "Quit Docker Desktop?")
         try:
             answer = input(prompt + " [y/N] ")
@@ -583,32 +624,42 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
             raise MacError("Could not tell whether the Docker engine is running. Run mac pause again")
         running = state == ENGINE_UP
         marker = read_marker(root) or {}
-        if not running and marker and not args.break_lease:
-            check_pause_leases(root, args.break_lease)
+        already_paused = not running and marker and not args.break_lease
+        if not already_paused:
+            if running and containers is None:
+                raise MacError("Docker engine started during preflight. Run mac pause again to review its containers")
+            if not running and containers is not None:
+                raise MacError("Docker engine stopped during preflight. Run mac pause again")
+            if not bundle_supports_pause(bundle_root):
+                message = "Ship the bundle first so the Mac watchdog and monitor honor the pause marker"
+                if not args.force:
+                    raise MacError(f"Pause refused. {message}")
+                print(f"Warning: {message}.")
+            print("Rechecking Will and session routes before pausing.")
+            check_pause(root, port, health, args, settings_path)
+        # Acquire uses this same lock, so a successful recheck covers the stop.
+        leases = read_leases(root)
+        newly_expired = [lease for lease in leases if not lease["live"] and lease["id"] not in expired_ids]
+        if newly_expired:
+            for lease in newly_expired:
+                print_expired_lease(lease, details=True)
+            raise MacError("An unreleased lease expired during preflight. Run mac pause again to confirm")
+        leases_to_break = check_pause_leases(leases, args.break_lease)
+        if already_paused:
+            if "restart_policy_disabled" not in marker and marker["paused_at"] != "unknown":
+                record_policy_disabled(root, marker, False)
             print("Mac is already paused. Docker engine is down.")
             return 0
-        if running and containers is None:
-            raise MacError("Docker engine started during preflight. Run mac pause again to review its containers")
-        if not running and containers is not None:
-            raise MacError("Docker engine stopped during preflight. Run mac pause again")
-        if not bundle_supports_pause(bundle_root):
-            message = "Ship the bundle first so the Mac watchdog and monitor honor the pause marker"
-            if not args.force:
-                raise MacError(f"Pause refused. {message}")
-            print(f"Warning: {message}.")
-        print("Rechecking Will and session routes before pausing.")
-        # Acquire uses this same lock, so a successful recheck covers the stop.
-        leases = check_pause(root, port, health, args, settings_path)
         current_policy = docker_restart_policy() if running else None
-        previous_policy = marker.get("restart_policy", current_policy)
-        broken = marker.get("broken_leases", [])
         # Persist the original policy before changing Docker, even if stopping fails.
-        write_marker(root, args.reason, containers, restart_policy=previous_policy, broken_leases=broken)
-        if current_policy is not None:
-            update_restart_policy("no")
-        if leases:
-            broken = [*broken, *break_leases(root, leases, args.break_reason, containers)]
-            write_marker(root, args.reason, containers, restart_policy=previous_policy, broken_leases=broken)
+        marker = write_marker(root, args.reason, containers,
+                              restart_policy=marker.get("restart_policy", current_policy),
+                              restart_policy_disabled=not running and marker.get("restart_policy_disabled") is True,
+                              broken_leases=marker.get("broken_leases", []))
+        if current_policy is not None and update_restart_policy("no"):
+            record_policy_disabled(root, marker, True)
+        if leases_to_break:
+            break_leases(root, leases_to_break, args.break_reason, marker)
         if not running:
             print("Mac paused. Docker engine was already down.")
             return 0
@@ -622,6 +673,48 @@ def pause(root, port, health, args, *, settings_path, bundle_root):
             raise MacError("Could not verify Docker stopped. The pause marker remains in place") from None
     print("Mac paused. Docker engine is down.")
     return 0
+
+
+def proxy_off(root):
+    with transition_lock(root):
+        marker = read_marker(root)
+        if marker is None:
+            raise MacError("mac proxy-off requires a pause marker")
+        if not engine_up():
+            raise MacError("mac proxy-off requires the Docker engine to be up")
+        if "restart_policy" not in marker:
+            policy = docker_restart_policy()
+            if policy is None:
+                raise MacError(f"No container named {PROXY_CONTAINER} to turn off")
+            if marker["paused_at"] == "unknown":
+                marker["paused_at"] = datetime.now(timezone.utc).isoformat()
+            marker.update(restart_policy=policy, restart_policy_disabled=False)
+            write_json(marker_path(root), marker)
+        else:
+            record_policy_disabled(root, marker, False)
+        if not update_restart_policy("no") or not docker_proxy_command("stop"):
+            raise MacError(f"No container named {PROXY_CONTAINER} to turn off")
+        record_policy_disabled(root, marker, True)
+    print(f"Stopped {PROXY_CONTAINER} and disabled its restart policy. Mac recovery stays paused.")
+    return 0
+
+
+def roll_back_proxy_resume(root, marker):
+    try:
+        if not update_restart_policy("no"):
+            return f"Could not re-disable the restart policy because {PROXY_CONTAINER} is gone"
+    except MacError:
+        return f"Could not re-disable the restart policy for {PROXY_CONTAINER}; run mac proxy-off"
+    message = f"Set {PROXY_CONTAINER} restart policy back to no"
+    try:
+        docker_proxy_command("stop")
+    except MacError:
+        return message + ", but could not stop the container; run mac proxy-off"
+    try:
+        record_policy_disabled(root, marker, True)
+    except OSError:
+        return message + ", but could not record the rollback in the pause marker"
+    return message
 
 
 def resume(root, health, *, yes_leases=False):
@@ -638,28 +731,46 @@ def resume(root, health, *, yes_leases=False):
         # A slow engine ("unknown") is already starting or running, so it gets the wait but no second start.
         if state != ENGINE_UP and not wait_for(engine_up, ENGINE_WAIT):
             raise MacError("Docker engine did not come up. Any pause marker remains in place")
+        restored = False
+        proxy_missing = False
         if "restart_policy" in marker:
-            # Updating the policy needs the engine. Keep the proxy watchdog paused until it is restored.
-            update_restart_policy(marker["restart_policy"])
-        marker_path(root).unlink(missing_ok=True)
+            proxy_missing = docker_restart_policy() is None
+            if not proxy_missing:
+                # Record any uncertainty before restoring the policy while the watchdog is paused.
+                record_policy_disabled(root, marker, False)
+                restored = update_restart_policy(marker["restart_policy"])
+                proxy_missing = not restored
+        try:
+            if restored:
+                proxy_missing = not docker_proxy_command("start")
+            try:
+                marker_path(root).unlink(missing_ok=True)
+            except OSError:
+                raise MacError("Could not remove the pause marker") from None
+        except MacError as error:
+            if restored:
+                rollback = roll_back_proxy_resume(root, marker)
+                raise MacError(f"{error}. {rollback}") from None
+            raise
+        if proxy_missing:
+            print(f"{PROXY_CONTAINER} is missing. The watchdog's compose recovery will recreate it.")
     if not wait_for(lambda: health("m5") == "ok", HEALTH_WAIT):
         raise MacError("Docker engine is up and the watchdog is enabled. Mac proxy is still unhealthy")
     print("Mac resumed. Docker engine is up and the Mac proxy is healthy.")
     return 0
 
 
-def lease_command(root, args, bundle_root, will_docker_up):
+def lease_command(root, args, bundle_root):
     if args.lease_command == "acquire":
         lease = acquire_lease(root, bundle_root, thread=args.thread, project=args.project,
                               purpose=args.purpose, why_mac=args.why_mac, hours=args.hours, approved=args.approved)
         print(lease_description(lease, date=True) + ".")
-        if will_docker_up():
-            print("Docker work defaults to Will; this lease is a Mac failover.")
+        print("Docker work defaults to Will; this lease is a Mac failover.")
     elif args.lease_command == "renew":
         lease = renew_lease(root, args.id, args.hours)
         print(lease_description(lease, date=True) + ".")
     elif args.lease_command == "release":
-        released_last_while_paused = release_lease(root, args.id)
+        released_last_while_paused = release_lease(root, args.id, args.thread)
         print(f"Released Docker lease {args.id}.")
         if released_last_while_paused:
             print("No live leases. Docker is still running while the Mac is paused; "
@@ -676,7 +787,7 @@ def lease_command(root, args, bundle_root, will_docker_up):
     return 0
 
 
-def command(args, host, health, *, settings_path, will_docker_up):
+def command(args, host, health, *, settings_path):
     root = Path(host["instance_root"])
     try:
         if sys.platform != "darwin" or not root.is_dir():
@@ -686,12 +797,20 @@ def command(args, host, health, *, settings_path, will_docker_up):
                          bundle_root=Path(host["bundle_root"]))
         if args.mac_command == "resume":
             return resume(root, health, yes_leases=args.yes_leases)
+        if args.mac_command == "proxy-off":
+            return proxy_off(root)
         if args.mac_command == "lease":
-            return lease_command(root, args, Path(host["bundle_root"]), will_docker_up)
+            return lease_command(root, args, Path(host["bundle_root"]))
         marker = read_marker(root)
         print(f"Mac paused since {marker['paused_at']}." if marker is not None else "Mac is not paused.")
         state = engine_state()
         print(f"Docker engine: {state}")
+        if marker is not None:
+            if marker.get("restart_policy_disabled") is True:
+                print("Mac proxy restart policy: recorded as disabled.")
+            else:
+                print("Mac proxy restart policy: unverified. If using a lease, run `mac proxy-off` "
+                      "right after starting Docker, or now if Docker is already up.")
         leases = read_leases(root)
         if marker is not None and state == ENGINE_UP and not any(lease["live"] for lease in leases):
             print("Docker is running while paused with no live lease. Its owner may still need it: "
@@ -702,8 +821,7 @@ def command(args, host, health, *, settings_path, will_docker_up):
                 print_expired_lease(lease)
             elif marker is not None and state == ENGINE_UP and not lease["unknown"]:
                 print(f"Docker is running for lease {lease['id']} ({lease['project']}, thread {lease['thread']}, "
-                      f"\"{lease['purpose']}\") until {pacific(lease['expires_at'])}. "
-                      "The Mac CLIProxy fallback stays paused.")
+                      f"\"{lease['purpose']}\") until {pacific(lease['expires_at'])}.")
             else:
                 print(lease_description(lease) + ".")
         print(f"Mac proxy: {health('m5')}")

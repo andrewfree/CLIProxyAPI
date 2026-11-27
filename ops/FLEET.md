@@ -171,6 +171,12 @@ the instance root for Compose, the host's logs, and private runtime state.
    )
    ```
 
+**Docker leases before a Mac rollback.** Announce the rollback in the coordination
+notes at `/Users/rever/omxlapi/out/coordination/THREADS.md`. Immediately before the
+rollback, confirm `mac lease list` shows no live leases, including leases with an
+unknown owner. Never roll back to a bundle whose watchdog predates leases while
+any lease is live.
+
 For a later Compose activation, run these from the instance root immediately
 before and after the approved operation. Confirm an in-flight watchdog repair
 has finished before changing Compose inputs. The watchdog keeps observing and
@@ -410,14 +416,16 @@ and container list with the broken leases and in the pause marker. An unreadable
 lease file counts as live. If the lease directory itself is unreadable, restore
 access before attempting a pause.
 
-`pause` lists every running Docker Desktop container and asks for confirmation
-unless you pass `--yes`. Quitting Docker Desktop stops all of them. On
+`pause` lists every running Docker Desktop container and any expired lease
+that its owner has yet to release. `--yes` skips confirmation only when no
+expired leases remain. Quitting Docker Desktop stops every container. On
 November 21 the list also included `slk`, `staging-track` and the CodeOne wiki
 backend. The command rechecks under a lock and writes
 `ops/runtime/fleet/mac-paused.json` under the Mac instance root. It saves the
 `cli-proxy-api` container's restart policy and sets it to `no` before quitting
 Desktop, so an unrelated Docker start can leave the proxy off. If Docker is
-already down, the command records the pause without starting the engine.
+already down, the command records the pause without starting the engine or
+changing the restart policy.
 
 While paused, `claude_cliproxy` keeps working through Will. New
 `codex_cliproxy` and Kimi lean sessions start on Will and have no working
@@ -427,30 +435,36 @@ proxy, so they do not work while paused.
 
 `resume` lists any live leases and requires `--yes-leases` to enable Mac recovery
 during their use windows. It starts Docker Desktop if needed, restores the saved
-restart policy once the engine can accept the update, then clears the marker
-and waits for the Mac proxy to become healthy. `status` shows the marker, Docker
-engine state, leases, and both hosts' health.
+restart policy and starts the proxy container, then clears the marker and waits
+for the Mac proxy to become healthy. If the container is missing, the watchdog's
+Compose recovery recreates it after the marker clears. `status` shows the marker,
+whether the restart policy is recorded as disabled, Docker engine state, leases,
+and both hosts' health.
 
 ### Mac Docker-use leases
 
 Run Docker work on Will by default. Before deliberately using Mac Docker for
 a workload, acquire a lease and share its ID and expiry with the owning thread.
-Acquire records the use window. Start Docker separately if needed.
+Acquire records the use window. Start Docker separately if needed. If Mac
+recovery is paused and `mac status` does not say `Mac proxy restart policy:
+recorded as disabled`, run `mac proxy-off` right after starting Docker. It
+disables the restart policy and stops only `cli-proxy-api`.
 
 ```sh
 python3 ~/cliproxy-live/ops/fleetctl.py mac lease acquire \
   --thread THREAD --project PROJECT --purpose 'what will run' --why-mac 'why it needs M5'
 python3 ~/cliproxy-live/ops/fleetctl.py mac lease list
 python3 ~/cliproxy-live/ops/fleetctl.py mac lease renew ID --hours 3
-python3 ~/cliproxy-live/ops/fleetctl.py mac lease release ID
+python3 ~/cliproxy-live/ops/fleetctl.py mac lease release ID --thread THREAD
 ```
 
 The default is three hours and the maximum is 12 hours from acquire or renewal.
 Renew before expiry, or acquire a new lease after expiry. Keep secrets, prompts,
 and paths to request logs out of lease text. When your work finishes, release the
-lease. Release leaves Docker running. The lease protects against a fleet pause
-or a watchdog Desktop restart. Direct Docker commands, a menu Quit, and a reboot
-can still interrupt the workload.
+lease, then run `mac pause` if `mac lease list` shows no other live lease. A lease
+protects only runs that acquired one, and it guards against a fleet pause or a
+watchdog Desktop restart. Direct Docker commands, a menu Quit, and a reboot can
+still interrupt the workload.
 
 ## Health and quota monitor
 

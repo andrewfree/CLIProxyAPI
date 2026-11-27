@@ -404,8 +404,11 @@ curl -fsS --max-time 3 http://127.0.0.1:8317/healthz
 docker inspect cli-proxy-api --format '{{.State.Status}} {{.State.Health.Status}}'
 ```
 
-A controlled engine-recovery drill starts by listing Mac Docker leases. Stop
-the drill if any lease is live, including one with an unknown owner.
+Announce a controlled engine-recovery drill in the coordination notes at
+`/Users/rever/omxlapi/out/coordination/THREADS.md`.
+Immediately before the drill, confirm the lease list shows no live leases,
+including leases with an unknown owner. Never roll back to a bundle whose
+watchdog predates leases while any lease is live.
 
 ```bash
 python3 ~/cliproxy-live/ops/fleetctl.py mac lease list

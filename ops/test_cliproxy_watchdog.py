@@ -139,6 +139,21 @@ class WatchdogTest(unittest.TestCase):
                 if not should_start:
                     self.assertIn(f"Docker Desktop restart skipped: lease {lease_id} (omxlapi)", "\n".join(logs.output))
 
+    def test_dangling_lease_directory_blocks_desktop_restart(self) -> None:
+        directory = fleet_mac.lease_dir(self.root)
+        directory.parent.mkdir(parents=True)
+        directory.symlink_to(self.root / "missing", target_is_directory=True)
+        watchdog = Watchdog(self.config, logger=logging.getLogger("watchdog-test"), clock=lambda: 5000)
+        state = {"engine_consecutive_failures": self.config.engine_failure_threshold}
+        with (patch.object(watchdog, "engine_ok", return_value=False),
+              patch.object(watchdog, "health_ok", return_value=False),
+              patch.object(watchdog, "desktop_is_stopped", return_value=False),
+              patch.object(watchdog, "restart_docker_desktop") as restart,
+              self.assertLogs("watchdog-test", "WARNING") as logs):
+            self.assertFalse(watchdog._restart_engine_if_allowed(state, 5000, check_only=False))
+        restart.assert_not_called()
+        self.assertIn("lease directory unreadable (unknown owner)", "\n".join(logs.output))
+
     def test_live_lease_preserves_proxy_container_recovery(self) -> None:
         self.acquire_lease()
         watchdog = Watchdog(self.config, logger=logging.getLogger("watchdog-test"), clock=lambda: 5000)

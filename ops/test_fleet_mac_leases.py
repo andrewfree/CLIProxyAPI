@@ -50,18 +50,19 @@ class LeaseStorageTest(unittest.TestCase):
         self.assertFalse(fleet_mac.read_leases(self.root)[0]["live"])
         with self.assertRaisesRegex(fleet_mac.MacError, "expired"):
             fleet_mac.renew_lease(self.root, lease_id, hours=3)
-        self.assertFalse(fleet_mac.release_lease(self.root, lease_id))
+        self.assertFalse(fleet_mac.release_lease(self.root, lease_id, thread="work-thread"))
         self.assertEqual(fleet_mac.read_leases(self.root), [])
 
     def test_acquire_validates_hours_and_metadata(self):
         for duration in (0, -1, 13, 1e-15, float("nan"), float("inf")):
             with self.subTest(hours=duration), self.assertRaisesRegex(fleet_mac.MacError, "--hours"):
                 self.acquire(hours=duration)
-        for purpose in ("", " ", "a\nb", "x" * 201):
-            with self.subTest(purpose=purpose), self.assertRaisesRegex(fleet_mac.MacError, "--purpose"):
-                self.acquire(purpose=purpose)
+        for field in ("purpose", "approved"):
+            for value in ("", " ", "a\nb", "x" * 201):
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(fleet_mac.MacError, f"--{field}"):
+                    self.acquire(**{field: value})
         with self.assertRaisesRegex(fleet_mac.MacError, "hexadecimal"):
-            fleet_mac.release_lease(self.root, "../mac-paused")
+            fleet_mac.release_lease(self.root, "../mac-paused", thread="work-thread")
         self.assertEqual(fleet_mac.read_leases(self.root), [])
 
     def test_acquire_refuses_an_older_watchdog(self):
@@ -72,20 +73,29 @@ class LeaseStorageTest(unittest.TestCase):
 
     def test_acquire_times_out_when_transition_lock_is_held(self):
         with fleet_mac.transition_lock(self.root):
-            with (patch.object(fleet_mac.time, "monotonic", side_effect=[100, 100, 130]),
-                  patch.object(fleet_mac.time, "sleep") as sleep,
+            with (patch.object(fleet_mac, "LEASE_LOCK_WAIT", 0),
                   self.assertRaisesRegex(fleet_mac.MacError, "Mac transition in progress; retry shortly")):
                 self.acquire()
-        sleep.assert_called_once_with(0.25)
         self.assertEqual(fleet_mac.read_leases(self.root), [])
 
+    def test_renew_and_release_time_out_without_changing_the_lease(self):
+        lease = self.acquire()
+        with fleet_mac.transition_lock(self.root), patch.object(fleet_mac, "LEASE_LOCK_WAIT", 0):
+            with self.assertRaisesRegex(fleet_mac.MacError, "Mac transition in progress; retry shortly"):
+                fleet_mac.renew_lease(self.root, lease["id"], hours=12)
+            with self.assertRaisesRegex(fleet_mac.MacError, "Mac transition in progress; retry shortly"):
+                fleet_mac.release_lease(self.root, lease["id"], thread="work-thread")
+        filename = fleet_mac.lease_dir(self.root) / f"{lease['id']}.json"
+        self.assertEqual(json.loads(filename.read_text()), lease)
+
     def test_acquire_cannot_overwrite_a_lease_with_a_colliding_id(self):
-        first, second = "a" * 16, "b" * 16
-        with patch.object(fleet_mac.secrets, "token_hex", side_effect=[first, first, second]):
-            self.assertEqual(self.acquire()["id"], first)
-            self.assertEqual(self.acquire(project="other")["id"], second)
+        lease_id = "a" * 16
+        with patch.object(fleet_mac.secrets, "token_hex", return_value=lease_id):
+            self.assertEqual(self.acquire()["id"], lease_id)
+            with self.assertRaisesRegex(fleet_mac.MacError, "already exists"):
+                self.acquire(project="other")
         self.assertEqual([(lease["id"], lease["project"]) for lease in fleet_mac.read_leases(self.root)],
-                         [(first, "omxlapi"), (second, "other")])
+                         [(lease_id, "omxlapi")])
 
     def test_only_lease_names_count_and_bad_contents_are_live(self):
         folder = fleet_mac.lease_dir(self.root)
@@ -97,11 +107,25 @@ class LeaseStorageTest(unittest.TestCase):
         (folder / f"{lease_id}.json").write_text("{")
         self.assertEqual(fleet_mac.live_leases(self.root), [{"id": lease_id, "live": True, "unknown": True}])
         with self.assertRaisesRegex(fleet_mac.MacError, "unreadable"):
-            fleet_mac.release_lease(self.root, lease_id)
+            fleet_mac.release_lease(self.root, lease_id, thread="work-thread")
+
+    def test_missing_directory_is_empty_but_symlinks_fail_closed(self):
+        directory = fleet_mac.lease_dir(self.root)
+        directory.parent.mkdir(parents=True)
+        self.assertEqual(fleet_mac.read_leases(self.root), [])
+        target = self.root / "lease-target"
+        directory.symlink_to(target, target_is_directory=True)
+        unknown = [{"id": None, "live": True, "unknown": True}]
+        self.assertEqual(fleet_mac.live_leases(self.root), unknown)
+        target.mkdir()
+        self.assertEqual(fleet_mac.live_leases(self.root), unknown)
+        with self.assertRaisesRegex(fleet_mac.MacError, "directory is unreadable"):
+            self.acquire()
 
     def test_file_and_directory_permission_errors_fail_closed(self):
         lease_id = self.acquire()["id"]
         with patch.object(Path, "read_text", side_effect=PermissionError):
             self.assertEqual(fleet_mac.live_leases(self.root), [{"id": lease_id, "live": True, "unknown": True}])
-        with patch.object(Path, "iterdir", side_effect=PermissionError):
-            self.assertEqual(fleet_mac.live_leases(self.root), [{"id": None, "live": True, "unknown": True}])
+        for error in (PermissionError, FileNotFoundError):
+            with self.subTest(error=error), patch.object(Path, "iterdir", side_effect=error):
+                self.assertEqual(fleet_mac.live_leases(self.root), [{"id": None, "live": True, "unknown": True}])
