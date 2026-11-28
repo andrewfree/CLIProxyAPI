@@ -91,6 +91,7 @@ type homeStreamingLogWriter struct {
 
 	chunkChan chan []byte
 	doneChan  chan struct{}
+	drops     StreamLogDrops
 
 	responseStatus    int
 	statusWritten     bool
@@ -120,7 +121,7 @@ func newHomeStreamingLogWriter(url, method string, headers map[string][]string, 
 		requestHeaders: requestHeaders,
 		requestBody:    append([]byte(nil), body...),
 		requestID:      strings.TrimSpace(requestID),
-		chunkChan:      make(chan []byte, 100),
+		chunkChan:      make(chan []byte, StreamLogQueueDepth),
 		doneChan:       make(chan struct{}),
 	}
 
@@ -139,13 +140,19 @@ func (w *homeStreamingLogWriter) asyncWriter() {
 }
 
 func (w *homeStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.WriteChunkAsyncUntil(chunk, nil)
+}
+
+func (w *homeStreamingLogWriter) WriteChunkAsyncUntil(chunk []byte, stopWaiting <-chan struct{}) {
 	if w == nil || w.chunkChan == nil || len(chunk) == 0 {
 		return
 	}
-	select {
-	case w.chunkChan <- append([]byte(nil), chunk...):
-	default:
-	}
+	w.drops.enqueueUntil(w.chunkChan, bytes.Clone(chunk), stopWaiting)
+}
+
+// RecordDroppedChunks adds losses from the middleware queue after it drains.
+func (w *homeStreamingLogWriter) RecordDroppedChunks(chunks, byteCount uint64) {
+	w.drops.Add(chunks, byteCount)
 }
 
 func (w *homeStreamingLogWriter) WriteStatus(status int, headers map[string][]string) error {
@@ -243,6 +250,9 @@ func (w *homeStreamingLogWriter) Close() error {
 		return errWrite
 	}
 	if errWrite := writeResponseSection(&buf, w.responseStatus, w.statusWritten, w.responseHeaders, bytes.NewReader(responsePayload), nil, false); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := w.drops.writeMarker(&buf); errWrite != nil {
 		return errWrite
 	}
 

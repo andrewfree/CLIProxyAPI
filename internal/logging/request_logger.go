@@ -72,8 +72,10 @@ type RequestLogger interface {
 
 // StreamingLogWriter handles real-time logging of streaming response chunks.
 // It provides methods for writing streaming response data asynchronously.
+// Custom writers can implement StreamingLogDropReporter to include middleware drops in their logs.
 type StreamingLogWriter interface {
-	// WriteChunkAsync writes a response chunk asynchronously (non-blocking).
+	// WriteChunkAsync queues a response chunk for asynchronous writing.
+	// Built-in writers may wait briefly once per queue stall.
 	//
 	// Parameters:
 	//   - chunk: The response chunk to write
@@ -133,6 +135,16 @@ type StreamingLogWriter interface {
 	// Returns:
 	//   - error: An error if closing fails, nil otherwise
 	Close() error
+}
+
+// StreamingLogDropReporter is an optional interface for writers that report middleware queue drops.
+// Middleware calls RecordDroppedChunks after forwarding queued response chunks and before Close.
+// Implementations must record the counts outside the chunk queue so a full queue cannot lose them.
+// The built-in file and Home writers append one marker with the combined middleware and sink counts
+// when publishing the completed response log. Custom writers without this interface receive only
+// response data through WriteChunkAsync and do not receive a drop marker from middleware.
+type StreamingLogDropReporter interface {
+	RecordDroppedChunks(chunks, byteCount uint64)
 }
 
 // FileRequestLogger implements RequestLogger using file-based storage.

@@ -45,6 +45,7 @@ type FileStreamingLogWriter struct {
 
 	// chunkChan is a channel for receiving response chunks to spool.
 	chunkChan chan []byte
+	drops     StreamLogDrops
 
 	// closeChan is a channel for signaling when the writer is closed.
 	closeChan chan struct{}
@@ -83,25 +84,26 @@ type FileStreamingLogWriter struct {
 	apiResponseTimestamp time.Time
 }
 
-// WriteChunkAsync writes a response chunk asynchronously (non-blocking).
+// WriteChunkAsync queues a copy of a response chunk for asynchronous writing.
 //
 // Parameters:
 //   - chunk: The response chunk to write
 func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.WriteChunkAsyncUntil(chunk, nil)
+}
+
+// WriteChunkAsyncUntil queues a copy of a chunk, with queue waits canceled when stopWaiting closes.
+func (w *FileStreamingLogWriter) WriteChunkAsyncUntil(chunk []byte, stopWaiting <-chan struct{}) {
 	if w.chunkChan == nil {
 		return
 	}
 
-	// Make a copy of the chunk to avoid data races
-	chunkCopy := make([]byte, len(chunk))
-	copy(chunkCopy, chunk)
+	w.drops.enqueueUntil(w.chunkChan, bytes.Clone(chunk), stopWaiting)
+}
 
-	// Non-blocking send
-	select {
-	case w.chunkChan <- chunkCopy:
-	default:
-		// Channel is full, skip this chunk to avoid blocking
-	}
+// RecordDroppedChunks adds losses from the middleware queue after it drains.
+func (w *FileStreamingLogWriter) RecordDroppedChunks(chunks, byteCount uint64) {
+	w.drops.Add(chunks, byteCount)
 }
 
 // WriteStatus buffers the response status and headers for later writing.
@@ -330,7 +332,10 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 		}
 	}()
 
-	return writeResponseSection(logFile, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false)
+	if errWrite := writeResponseSection(logFile, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false); errWrite != nil {
+		return errWrite
+	}
+	return w.drops.writeMarker(logFile)
 }
 
 func (w *FileStreamingLogWriter) cleanupTempFiles() {

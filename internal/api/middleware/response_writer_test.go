@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -160,8 +163,299 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	}
 }
 
+func TestStreamingLogMarksMiddlewareQueueDrops(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name      string
+		saturated bool
+	}{
+		{name: "normal"},
+		{name: "saturated", saturated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			logsDir := t.TempDir()
+			logger := logging.NewFileRequestLogger(true, logsDir, "", 0)
+			wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{
+				URL: "/v1/responses", Method: http.MethodPost, RequestID: "stream",
+			})
+			wrapper.Header().Set("Content-Type", "text/event-stream")
+			if tc.saturated {
+				// Start the file writer but pause the middleware consumer with a full queue.
+				streamWriter, errLog := logger.LogStreamingRequest("/v1/responses", http.MethodPost, nil, nil, "stream")
+				if errLog != nil {
+					t.Fatal(errLog)
+				}
+				wrapper.streamWriter = streamWriter
+				wrapper.chunkChannel = make(chan []byte, 1)
+				wrapper.chunkChannel <- []byte("data: retained")
+				wrapper.streamDone = make(chan struct{})
+			}
+			wrapper.WriteHeader(http.StatusOK)
+
+			const first = "data: one\n\n"
+			const second = "data: 猫\n\n"
+			nByte, errByte := wrapper.Write([]byte(first))
+			nString, errString := wrapper.WriteString(second)
+			if tc.saturated {
+				go processStreamingChunks(wrapper.streamDone, wrapper.chunkChannel, wrapper.streamWriter, nil)
+			}
+			if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+				t.Fatal(errFinalize)
+			}
+
+			if nByte != len(first) || nString != len(second) || errByte != nil || errString != nil {
+				t.Fatalf("client writes: (%d, %v), (%d, %v)", nByte, errByte, nString, errString)
+			}
+			if got := recorder.Body.String(); got != first+second {
+				t.Fatalf("client body = %q, want %q", got, first+second)
+			}
+			logs, errGlob := filepath.Glob(filepath.Join(logsDir, "*.log"))
+			if errGlob != nil || len(logs) != 1 {
+				t.Fatalf("expected one log, got %v (err=%v)", logs, errGlob)
+			}
+			raw, errRead := os.ReadFile(logs[0])
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			_, response, found := strings.Cut(string(raw), "=== RESPONSE ===\n")
+			if !found {
+				t.Fatalf("response section missing: %q", raw)
+			}
+			if tc.saturated {
+				want := fmt.Sprintf("data: retained\n[RESPONSE STREAM CHUNKS DROPPED FROM LOG: 2 chunks, %d bytes]\n", len(first)+len(second))
+				if !strings.HasSuffix(response, want) {
+					t.Fatalf("response log = %q, want suffix %q", response, want)
+				}
+			} else {
+				chunks, byteCount := wrapper.streamLogDrops.Counts()
+				if !strings.HasSuffix(response, first+second) ||
+					strings.Contains(response, "RESPONSE STREAM CHUNKS DROPPED FROM LOG") ||
+					chunks != 0 || byteCount != 0 {
+					t.Fatalf("normal response log = %q, middleware dropped %d chunks and %d bytes", response, chunks, byteCount)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamingLogFlushWithStuckQueue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		wrapper := NewResponseWriterWrapper(c.Writer, &testRequestLogger{enabled: true}, &RequestInfo{})
+		wrapper.isStreaming = true
+		wrapper.chunkChannel = make(chan []byte, 1)
+		wrapper.chunkChannel <- []byte("retained")
+
+		const frames = 100
+		const data = "data: frame"
+		start := time.Now()
+		for range frames {
+			if _, errWrite := wrapper.Write([]byte(data)); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			if _, errWrite := wrapper.WriteString("\n\n"); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+		}
+		if errFlush := wrapper.FlushError(); errFlush != nil {
+			t.Fatal(errFlush)
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("%d frames and flush took %s, want no wait", frames, elapsed)
+		}
+		if !recorder.Flushed || recorder.Body.String() != strings.Repeat(data+"\n\n", frames) {
+			t.Fatal("flush did not deliver all client frames unchanged")
+		}
+	})
+}
+
+func TestStreamingLogWritesNeverWaitForSlowConsumer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 0)
+		streamWriter, errLog := logger.LogStreamingRequest("/v1/responses", http.MethodPost, nil, nil, "slow-stream")
+		if errLog != nil {
+			t.Fatal(errLog)
+		}
+		wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{
+			URL: "/v1/responses", Method: http.MethodPost, RequestID: "slow-stream",
+		})
+		wrapper.isStreaming = true
+		wrapper.streamWriter = streamWriter
+		wrapper.chunkChannel = make(chan []byte, 1)
+		wrapper.streamDone = make(chan struct{})
+		wrapper.WriteHeader(http.StatusOK)
+		go func() {
+			defer close(wrapper.streamDone)
+			for chunk := range wrapper.chunkChannel {
+				time.Sleep(2900 * time.Microsecond)
+				streamWriter.WriteChunkAsync(chunk)
+			}
+		}()
+
+		const writes = 1000
+		const data = "data: frame\n\n"
+		start := time.Now()
+		for range writes {
+			if _, errWrite := wrapper.WriteString(data); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("%d client writes took %s, want no wait", writes, elapsed)
+		}
+		if got := recorder.Body.String(); got != strings.Repeat(data, writes) {
+			t.Fatal("slow log consumer changed the client response")
+		}
+		chunks, byteCount := wrapper.streamLogDrops.Counts()
+		if chunks == 0 || byteCount != chunks*uint64(len(data)) {
+			t.Fatalf("dropped %d chunks and %d bytes, want nonzero drops with %d bytes each", chunks, byteCount, len(data))
+		}
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatal(errFinalize)
+		}
+
+		logs, errGlob := filepath.Glob(filepath.Join(logsDir, "*.log"))
+		if errGlob != nil || len(logs) != 1 {
+			t.Fatalf("expected one log, got %v (err=%v)", logs, errGlob)
+		}
+		raw, errRead := os.ReadFile(logs[0])
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		_, response, found := strings.Cut(string(raw), "=== RESPONSE ===\n")
+		marker := logging.StreamLogDropMarker(chunks, byteCount)
+		if !found || !strings.Contains(response, marker) {
+			t.Fatalf("response log missing drop marker %q: %q", marker, raw)
+		}
+	})
+}
+
+func TestStreamingLogFinalizeCancelsSinkQueueWaits(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		writer := &stalledStreamingLogWriter{}
+		logger := &testRequestLogger{enabled: true, streamWriter: writer}
+		wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{})
+		wrapper.Header().Set("Content-Type", "text/event-stream")
+		wrapper.WriteHeader(http.StatusOK)
+		if _, errWrite := wrapper.WriteString("in flight"); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		synctest.Wait()
+		for range logging.StreamLogQueueDepth {
+			if _, errWrite := wrapper.WriteString("queued"); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+		}
+		start := time.Now()
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatal(errFinalize)
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Errorf("Finalize advanced time by %s while draining a stalled sink", elapsed)
+		}
+		if !writer.closed || writer.attempts != 1+logging.StreamLogQueueDepth {
+			t.Fatalf("sink closed = %t, attempts = %d, want closed with %d attempts", writer.closed, writer.attempts, 1+logging.StreamLogQueueDepth)
+		}
+	})
+}
+
+type stalledStreamingLogWriter struct {
+	testStreamingLogWriter
+	attempts int
+}
+
+func (w *stalledStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.WriteChunkAsyncUntil(chunk, nil)
+}
+
+func (w *stalledStreamingLogWriter) WriteChunkAsyncUntil(_ []byte, drain <-chan struct{}) {
+	w.attempts++
+	timer := time.NewTimer(3 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-drain:
+	case <-timer.C:
+	}
+}
+
+func TestStreamingLogLegacyWriterReceivesOnlyResponseChunks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		writer := &legacyStreamingLogWriter{chunks: make(chan string, 1)}
+		wrapper := NewResponseWriterWrapper(c.Writer, &testRequestLogger{enabled: true}, &RequestInfo{})
+		wrapper.isStreaming = true
+		wrapper.streamWriter = writer
+		wrapper.chunkChannel = make(chan []byte, 1)
+		wrapper.chunkChannel <- []byte("retained")
+		wrapper.streamDone = make(chan struct{})
+		if _, errWrite := wrapper.WriteString("dropped"); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+
+		go processStreamingChunks(wrapper.streamDone, wrapper.chunkChannel, writer, nil)
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatal(errFinalize)
+		}
+		select {
+		case got := <-writer.chunks:
+			if got != "retained" || !writer.closed {
+				t.Fatalf("legacy writer retained %q and closed = %t", got, writer.closed)
+			}
+		default:
+			t.Fatal("legacy writer did not receive the retained chunk")
+		}
+		if writer.attempts != 1 {
+			t.Fatalf("legacy writer received %d enqueue attempts, want one response chunk", writer.attempts)
+		}
+	})
+}
+
+func TestStreamingLogIgnoresNilWriter(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	wrapper := NewResponseWriterWrapper(c.Writer, &testRequestLogger{enabled: true, nilStreamWriter: true}, &RequestInfo{})
+	wrapper.Header().Set("Content-Type", "text/event-stream")
+	wrapper.WriteHeader(http.StatusOK)
+	const data = "data: client bytes\n\n"
+	if _, errWrite := wrapper.WriteString(data); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+		t.Fatal(errFinalize)
+	}
+	if wrapper.streamWriter != nil || wrapper.chunkChannel != nil || wrapper.streamDone != nil {
+		t.Fatal("nil SDK writer initialized streaming log state")
+	}
+	if got := recorder.Body.String(); got != data {
+		t.Fatalf("client body = %q, want %q", got, data)
+	}
+}
+
+type legacyStreamingLogWriter struct {
+	testStreamingLogWriter
+	chunks   chan string
+	attempts int
+}
+
+func (w *legacyStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+	w.attempts++
+	select {
+	case w.chunks <- string(chunk):
+	default:
+	}
+}
+
 type testRequestLogger struct {
-	enabled bool
+	enabled         bool
+	streamWriter    logging.StreamingLogWriter
+	nilStreamWriter bool
 }
 
 func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []byte, []byte, []*interfaces.ErrorMessage, string, time.Time, time.Time) error {
@@ -169,6 +463,12 @@ func (l *testRequestLogger) LogRequest(string, string, map[string][]string, []by
 }
 
 func (l *testRequestLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error) {
+	if l.nilStreamWriter {
+		return nil, nil
+	}
+	if l.streamWriter != nil {
+		return l.streamWriter, nil
+	}
 	return &testStreamingLogWriter{}, nil
 }
 
