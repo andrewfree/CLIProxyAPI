@@ -33,9 +33,9 @@
     "arm64": "sha256:84fc578d5d7d2bd1a556b147d986a63af6f9d1f4e474b7812bf0d34c2d373487"
   },
   "config_fingerprint": {
-    "shared": "9213320ea278e1af86a1b512145ea9395b4e7676b9202539ed720a431b391937",
+    "shared": "e2c13e781d5776f0b6e22c7f4b181866de4dc5a483664f09b07d59b5501f98f1",
     "observed": {
-      "m5": "fcd1d0b4c1c2882cb4615a9593850693e90ff8fba4be8ff3e851c5a88a90c480"
+      "m5": "20d6e0cfd84815aa9e055f579632901617bbcef39154ba475276224f8f6195f9"
     }
   },
   "runtime_policy": {
