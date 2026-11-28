@@ -305,6 +305,9 @@ class Watchdog:
         )
         if stop.returncode != 0:
             self.logger.warning("Docker Desktop stop returned rc=%d", stop.returncode)
+        return self.start_docker_desktop()
+
+    def start_docker_desktop(self) -> bool:
         self.logger.warning("recovery action: docker desktop start --detach")
         start = self.run_command(
             [self.config.docker, "desktop", "start", "--detach"], timeout=45
@@ -313,6 +316,17 @@ class Watchdog:
             self.logger.error("Docker Desktop start returned rc=%d", start.returncode)
             return False
         return True
+
+    def desktop_is_stopped(self) -> bool:
+        # The Desktop CLI can spend about 16 seconds querying a stopped app.
+        result = self.run_command([self.config.docker, "desktop", "status", "--format", "json"], timeout=25)
+        if result.returncode != 0:
+            return False
+        try:
+            status = json.loads(result.stdout)
+        except (ValueError, RecursionError):
+            return False
+        return isinstance(status, dict) and status.get("Status", status.get("status")) == "stopped"
 
     def compose_up(self) -> bool:
         if self.config.guard_compose:
@@ -443,7 +457,7 @@ class Watchdog:
 
     def restart_container(self) -> bool:
         command = ([self.config.docker, "restart", self.config.container] if self.config.guard_compose
-                   else [self.config.docker, "compose", "restart", self.config.service])
+                   else [self.config.docker, "compose", "restart", "--no-deps", self.config.service])
         self.logger.warning("recovery action: %s", " ".join(command))
         result = self.run_command(
             command,
@@ -540,9 +554,16 @@ class Watchdog:
             state.pop("last_engine_failure", None)
             self.logger.warning("Docker or CLIProxy recovered; suppressing Desktop restart")
             return False
+        leases = [lease for lease in fleet_mac.read_leases(self.config.root) if lease["live"]]
+        if leases and not self.desktop_is_stopped():
+            for lease in leases:
+                self.logger.warning("Docker Desktop restart skipped: lease %s (%s)",
+                                    lease["id"] or "directory unreadable", lease.get("project", "unknown owner"))
+            return False
         state["last_engine_restart"] = now
         self.save_state(state)
-        return self.restart_docker_desktop() and self.wait_for_engine()
+        started = self.start_docker_desktop() if leases else self.restart_docker_desktop()
+        return started and self.wait_for_engine()
 
     def run_once(
         self, *, check_only: bool = False, skip_auth: bool = False

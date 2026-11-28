@@ -407,10 +407,33 @@ curl -fsS --max-time 3 http://127.0.0.1:8317/healthz
 docker inspect cli-proxy-api --format '{{.State.Status}} {{.State.Health.Status}}'
 ```
 
-A controlled engine-recovery drill uses the same non-reset command as the incident recovery:
+Announce a controlled engine-recovery drill in the coordination notes at
+`/Users/rever/omxlapi/out/coordination/THREADS.md`. Run the lease check and the
+stop while holding the Mac transition lock, so no thread can acquire a lease
+between them (`mac lease acquire`, `renew` and `release` wait at most 30 seconds
+for that lock, then refuse). The block stops before touching Docker if any lease
+record exists, live, expired or of unknown owner. Never roll back to a bundle
+whose watchdog predates leases while any lease is live.
 
 ```bash
+/usr/bin/lockf -k -t 30 "$HOME/cliproxy/ops/runtime/fleet/mac-transition.lock" /bin/zsh -s <<'EOF'
+set -e
+python3 ~/cliproxy-live/ops/fleetctl.py mac lease list
+/usr/bin/python3 -I - <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.home() / "cliproxy-live/ops"))
+import fleet_mac
+sys.exit(1 if fleet_mac.read_leases(Path.home() / "cliproxy") else 0)
+PY
 docker desktop stop --force --timeout 30
+EOF
+```
+
+After the lock is released, start the watchdog's recovery. It takes the same
+lock, so it skips its cycle while the block above holds it.
+
+```bash
 launchctl kickstart -k gui/$(id -u)/com.rever.cliproxy-watchdog
 ```
 

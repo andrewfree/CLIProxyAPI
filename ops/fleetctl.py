@@ -562,8 +562,8 @@ def probe(name, hosts, paths, release, nonce, command):
         result = subprocess.run(
             ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
              "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
-             "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes",
-             "--", destination, "python3", "-I", "-B", "-", "--worker"],
+             "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes", "--", destination,
+             "python3", "-I", "-B", "-", "--worker"],
             input=program, capture_output=True, text=True, timeout=90, check=False,
         )
         if result.returncode == 255:
@@ -789,9 +789,27 @@ def main(argv=None, *, settings_path=None):
     pause.add_argument("--reason")
     pause.add_argument("--will-origin", help="override the Will origin from the T3 Claude pool profile")
     pause.add_argument("--force", action="store_true", help="bypass Will, session, and bundle preflight refusals")
-    pause.add_argument("--yes", action="store_true", help="skip the Docker Desktop confirmation")
-    mac_commands.add_parser("resume", help="start Docker Desktop and restore Mac recovery")
+    pause.add_argument("--yes", action="store_true", help="skip confirmation if no unreleased lease has expired")
+    pause.add_argument("--break-lease", action="append", default=[], metavar="ID", help="break a named live lease (repeatable)")
+    pause.add_argument("--break-reason", help="record why the named leases were broken")
+    resume = mac_commands.add_parser("resume", help="start Docker Desktop and restore Mac recovery")
+    resume.add_argument("--yes-leases", action="store_true", help="enable Mac recovery while leases are live")
+    mac_commands.add_parser("proxy-off", help="disable and stop the Mac proxy while recovery is paused")
     mac_commands.add_parser("status", help="show the pause marker, Docker engine, and proxy health")
+    lease = mac_commands.add_parser("lease", help="manage Mac Docker-use leases")
+    lease_commands = lease.add_subparsers(dest="lease_command", required=True)
+    acquire = lease_commands.add_parser("acquire", help="record a Mac Docker use window")
+    for field in ("thread", "project", "purpose", "why-mac"):
+        acquire.add_argument("--" + field, required=True)
+    acquire.add_argument("--hours", type=float, default=3, help="lease duration (default 3, maximum 12)")
+    acquire.add_argument("--approved", help="quote the approval for this use window")
+    renew = lease_commands.add_parser("renew", help="extend a live lease")
+    renew.add_argument("id", metavar="ID")
+    renew.add_argument("--hours", type=float, required=True, help="lease duration (maximum 12)")
+    release_lease = lease_commands.add_parser("release", help="remove a lease")
+    release_lease.add_argument("id", metavar="ID")
+    release_lease.add_argument("--thread", required=True, help="thread that owns the lease")
+    lease_commands.add_parser("list", help="show live and expired leases")
     for command in ("fingerprint", "health"):
         action = commands.add_parser(command)
         action.add_argument("--host", choices=FLEET_HOSTS, required=command == "fingerprint")
