@@ -685,6 +685,9 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 			thinkingSupport = info.Thinking
 		}
 	}
+	if info == nil || info.Type != registry.OpenAIImageModelType {
+		entry["visibility"] = "list"
+	}
 	applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 
 	if maxContextWindow := intModelValue(model, "max_context_length"); maxContextWindow > 0 {
@@ -701,6 +704,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["slug"] = id
 	entry["display_name"] = displayName
 	entry["description"] = description
+	entry["supported_in_api"] = true
 	entry["prefer_websockets"] = false
 	if optimizeMultiAgentV2 {
 		entry["multi_agent_version"] = "v2"
